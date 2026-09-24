@@ -1,0 +1,343 @@
+@import "tailwindcss";
+
+/* Carbadia 设计 Token + 全站统一背景 */
+:root {
+  --background: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f5f5f7;
+  --border: #e5e5ea;
+  --foreground: #1d1d1f;
+  --muted: #6e6e73;
+  --up: #00a15f;
+  --down: #e0352b;
+  --accent: #0a8a52;
+  --accent-strong: #097a48;
+  --series: var(--accent); /* 数据标记(折线、条形、比例条)的颜色;浅色主题与品牌绿相同 */
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-series: var(--series);
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Helvetica Neue", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --font-serif: Georgia, "Times New Roman", "Songti SC", "STSong", "Noto Serif CJK SC", serif;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 32px -16px rgba(0, 0, 0, 0.12);
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.03), 0 4px 14px -8px rgba(0, 0, 0, 0.08);
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  /* 全站统一的柔和背景：浅绿氛围光晕 + 极淡像素网格，把各页连成一体 */
+  background-color: var(--background);
+  background-image:
+    radial-gradient(55rem 32rem at 50% -10rem, rgba(10, 138, 82, 0.07), transparent 70%),
+    radial-gradient(40rem 28rem at 100% 2rem, rgba(10, 138, 82, 0.04), transparent 70%),
+    linear-gradient(rgba(10, 138, 82, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(10, 138, 82, 0.022) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 22px 22px, 22px 22px;
+  background-position: 0 0, 0 0, 0 0, 0 0;
+  background-attachment: fixed;
+  background-repeat: no-repeat, no-repeat, repeat, repeat;
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.011em;
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: -0.022em;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+}
+
+/* RTL(阿拉伯语)下数字/价格保持 LTR 书写序,避免 "$" 与符号被 bidi 算法重排 */
+[dir="rtl"] .tnum {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* ── 深色系 ─────────────────────────────────────────────────────────
+   <html data-theme="dark"> 只表示色系,底下有两种外观:
+   · dark            —— carbadia.co 同款星空 + 液态玻璃          [data-theme="dark"]:not([data-kids])
+   · 儿童护眼模式     —— 第一版的手绘夜空 + 深蓝卡片(原样保留)  [data-theme="dark"][data-kids]
+   两者共用文字、涨跌、品牌绿;现有的深色适配(Ransom 标题、各横带的深色分支)对两者都生效。 */
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="dark"] {
+  --foreground: #f2f5ff;
+  --muted: #aab2e0;
+  --up: #34d399;
+  --down: #fb7185;
+  --accent: #2ee27f;
+  --accent-strong: #1fcf6e;
+  --series: #16a34a; /* 深色主题:品牌绿 #2ee27f 做大面积数据标记太亮(dataviz 校验 L 0.805 > 0.67),数据标记用更深的一阶 */
+}
+
+/* ── Dark 模式：carbadia.co 同款星空 + 液态玻璃 ───────────────────── */
+:root[data-theme="dark"]:not([data-kids]) {
+  --background: #06080f; /* 与 carbadia.co 的深色底色相同;星点由 StarfieldCanvas 画在它上面 */
+  /* 面不再是深蓝色块,而是压在星空上的透明玻璃:极淡的一层,颜色取星光的冷白(205,218,255),背后的星空原样透过来 */
+  --surface: rgba(205, 218, 255, 0); /* 面板中央一点白都不铺:再淡的平铺白压在黑底上也是灰 */
+  --surface-2: rgba(205, 218, 255, 0.05);
+  --border: rgba(205, 218, 255, 0.12);
+  /* 浮层(菜单、对话框、提示、Toast)压在正文上,可读性优先:接近不透明 */
+  --surface-overlay: rgba(13, 16, 27, 0.94);
+  /* 卡面叠在底色上的等效不透明色:给「渐变到卡面色」这类遮挡用(见 HomeProductPreview 的读数区) */
+  --surface-solid: #11141c;
+  /* 玻璃的零件,下面的材质规则和各 CSS 模块共用。
+     不做模糊:玻璃是全透明的,背后的星星原样可见。透过来的东西拉一点对比和饱和(黑更黑、星更亮,才清澈;
+     不用 brightness,它把玻璃底下的黑整体抬亮就是一层灰)与边缘折射都在 LiquidGlassRefraction 里,
+     写在同一条 backdrop-filter:一个元素只开一层 backdrop 面,样式表里不再单独写 */
+  /* 清澈的关键是「中央什么都不加,边上又亮又窄」:高光 1px、带一点冷蓝;不做内圈柔光——那是雾 */
+  --glass-rim: inset 1px 1px 0 rgba(240, 246, 255, 0.5), inset -1px -1px 0 rgba(170, 200, 255, 0.16);
+  /* 控件的边:没有灰边框垫底,只剩这一圈高光——左上一道亮白,右下一道冷蓝回光(光穿过玻璃从对面出来),两头都亮才透 */
+  --glass-rim-strong: inset 1px 1px 0 rgba(255, 255, 255, 0.78), inset -1px -1px 0 rgba(190, 215, 255, 0.34);
+  /* 面板的光泽:左上不铺受光(原来那片 9% 白斜着晕开,卡片左上角看就是灰),受光只留在 1px 高光边上;
+     右下角留一点冷色回光,和控件底缘的回光一致 */
+  --glass-sheen: linear-gradient(155deg, rgba(170, 200, 255, 0) 78%, rgba(170, 200, 255, 0.045));
+  /* 控件的光泽:上半截什么都不铺(原来上缘那道 12% 白从左上往下晕开,小胶囊上看就是左上发灰),
+     只在下缘留一点冷色回光——光从上面进、在底边聚起来,玻璃才显得透亮 */
+  --glass-sheen-control: linear-gradient(180deg, rgba(190, 210, 255, 0) 62%, rgba(190, 210, 255, 0.07));
+}
+
+/* 夜空底色就是 --background 的纯色:关掉浅色模式的光晕与网格 */
+html[data-theme="dark"]:not([data-kids]) body {
+  background-image: none;
+  /* 卡片的「阴影」= 沿边一圈方向性高光(左上亮、右下次亮)+ 向下的浮起阴影 */
+  --shadow-card: var(--glass-rim), 0 18px 40px -20px rgba(0, 0, 0, 0.7);
+  --shadow-soft: var(--glass-rim), 0 8px 22px -12px rgba(0, 0, 0, 0.55);
+}
+
+/* 星空画布的高度:取「当前可见高度」与「地址栏收起后的最大高度」中较大的一个。
+   手机地址栏收放时画布尺寸不变,星星不跟着挪;两者对不上的环境(内嵌 webview、模拟器)也不会缺一截。
+   退路必须写成 @supports:同一条规则里的两个 height 会被构建时的压缩合并掉,只剩后一个。 */
+.starfield-canvas {
+  height: 100%;
+}
+@supports (height: 100lvh) {
+  .starfield-canvas {
+    height: max(100%, 100lvh);
+  }
+}
+
+/* ── 液态玻璃材质(只在 dark 生效;其它外观下这些类是空的)─────────────
+   三档:面板(卡片,低调)、控件(胶囊 / 按钮 / 小标签,更亮)、浮层(菜单 / 对话框,接近不透明)。
+   只有直接落在页面上的那一层(导航条、卡片)写 backdrop-filter:带 backdrop-filter 的祖先是 backdrop root,
+   里面的后代再写也只能看到祖先内部,看不到页面——白费性能。 */
+
+/* Tailwind 的 shadow-card / shadow-soft 把阴影值内联了,不跟 token 走:这里接回 token */
+html[data-theme="dark"]:not([data-kids]) .shadow-card {
+  --tw-shadow: var(--shadow-card);
+}
+html[data-theme="dark"]:not([data-kids]) .shadow-soft {
+  --tw-shadow: var(--shadow-soft);
+}
+
+/* 显式类:.glass-panel / .glass-control / .glass-overlay / .glass-bar,写在组件的 className 里 */
+html[data-theme="dark"]:not([data-kids]) .glass-panel {
+  box-shadow: var(--shadow-card);
+}
+html[data-theme="dark"]:not([data-kids]) :is(.shadow-card, .glass-panel):not(.glass-overlay) {
+  background-image: var(--glass-sheen);
+}
+
+/* 控件中央不着色(盖掉组件上的 bg-surface-2),边框透明(1px 灰边框和 1px 高光在左上挤成一道粗灰弧),
+   轮廓全交给 --glass-rim-strong 那一圈高光 */
+html[data-theme="dark"]:not([data-kids]) .glass-control {
+  background-color: transparent;
+  border-color: transparent;
+  background-image: var(--glass-sheen-control);
+  box-shadow: var(--glass-rim-strong), 0 6px 18px -10px rgba(0, 0, 0, 0.7);
+  transition: background-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+}
+/* 悬停:不往中间铺白(那又是一层灰),把边上的高光再点亮一档 */
+html[data-theme="dark"]:not([data-kids]) .glass-control:hover {
+  box-shadow: inset 1px 1px 0 rgba(255, 255, 255, 0.95), inset -1px -1px 0 rgba(200, 222, 255, 0.5), 0 6px 18px -10px rgba(0, 0, 0, 0.7);
+}
+html[data-theme="dark"]:not([data-kids]) .glass-control:active {
+  background-color: rgba(205, 218, 255, 0.06);
+}
+
+html[data-theme="dark"]:not([data-kids]) .glass-overlay {
+  background-color: var(--surface-overlay);
+  box-shadow: var(--glass-rim), 0 24px 60px -20px rgba(0, 0, 0, 0.85);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+}
+
+/* 导航条:手机端不开模糊(性能),没有模糊的半透明只会透出一层脏字,所以填充不透明。
+   桌面端条本身完全透明、不做 backdrop-filter——它一做,里面的胶囊按钮就只能看见它、看不见页面,折射就空了;
+   正文从它底下滚过时的可读性交给身后的 .glass-scrim(iOS 26 导航条的「滚动边缘」做法:一层向下渐隐的模糊 + 暗色)。 */
+html[data-theme="dark"]:not([data-kids]) .glass-bar {
+  background-color: #080a12;
+  border-color: rgba(255, 255, 255, 0.09);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+}
+.glass-scrim {
+  display: none;
+}
+@media (min-width: 768px) {
+  html[data-theme="dark"]:not([data-kids]) .glass-bar {
+    background-color: transparent;
+    border-color: rgba(255, 255, 255, 0.06);
+    box-shadow: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  html[data-theme="dark"]:not([data-kids]) .glass-scrim {
+    display: block;
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 3rem; /* 只垫住导航那一行(md:h-12);手机菜单展开时不跟着拉长 */
+    z-index: -1;
+    pointer-events: none;
+    background: linear-gradient(rgba(6, 8, 15, 0.82), rgba(6, 8, 15, 0.35));
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-mask-image: linear-gradient(#000 40%, transparent);
+    mask-image: linear-gradient(#000 40%, transparent);
+  }
+}
+/* 手机 / 平板的展开菜单压在正文上:按浮层处理,不透明 */
+html[data-theme="dark"]:not([data-kids]) .glass-menu {
+  background-color: var(--surface-overlay);
+}
+
+/* 系统开了「降低透明度」:面改回不透明的深灰,不做模糊 */
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-theme="dark"]:not([data-kids]) {
+    --surface: #11141c;
+    --surface-2: #1a1e29;
+    --border: #2a2f3d;
+    --surface-overlay: #0d101b;
+  }
+  html[data-theme="dark"]:not([data-kids]) :is(.glass-bar, .glass-overlay) {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  html[data-theme="dark"]:not([data-kids]) .glass-bar {
+    background-color: #080a12;
+  }
+  html[data-theme="dark"]:not([data-kids]) .glass-scrim {
+    display: none;
+  }
+}
+
+/* ── 儿童护眼模式:第一版 dark 原样保留(Peppa 星空夜色)──────────── */
+:root[data-theme="dark"][data-kids] {
+  --background: #0c1330;
+  --surface: #141b3d;
+  --surface-2: #1d2552;
+  --border: #2c3568;
+}
+
+/* 夜空底色：上深下浅的靛蓝渐变 + 右上方一抹紫光晕；卡通星星/弯月由 StarrySky 叠加 */
+html[data-theme="dark"][data-kids] body {
+  background-color: #0a1130;
+  background-image:
+    radial-gradient(60rem 42rem at 82% -6rem, rgba(124, 96, 210, 0.28), transparent 70%),
+    linear-gradient(180deg, #080d28 0%, #0b1336 46%, #122a4c 100%);
+  background-size: 100% 100%, 100% 100%;
+  background-position: 0 0, 0 0;
+  background-attachment: fixed;
+  background-repeat: no-repeat, no-repeat;
+  /* 卡片更通透，让星空透出来一点 */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 40px -20px rgba(0, 0, 0, 0.7);
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 22px -12px rgba(0, 0, 0, 0.55);
+}
+
+/* ── 星星眨眼(StarrySky)──────────────────────────────────────── */
+@keyframes carbadia-twinkle {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ── 流星:偶尔划过(大半个周期隐身,短暂加速掠过后淡出) ── */
+@keyframes carbadia-shoot {
+  0%,
+  4% {
+    opacity: 0;
+    transform: translate(0, 0);
+  }
+  8% {
+    opacity: 1;
+  }
+  20% {
+    opacity: 1;
+  }
+  26%,
+  100% {
+    opacity: 0;
+    transform: translate(330px, 150px);
+  }
+}
+
+.carbadia-shoot {
+  animation: carbadia-shoot 9s ease-in infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .carbadia-star {
+    animation: none !important;
+    opacity: 0.9;
+  }
+  /* 减弱动效时:流星静止显示在起点,不再循环掠过 */
+  .carbadia-shoot {
+    animation: none !important;
+    opacity: 0.85;
+  }
+}
+
+/* ── Ransom-note 剪报字（仅深色标题）─────────────────────────────── */
+/* 剪报标题：纸片有内边距/阴影/倾斜，给行距留余量，避免上下行咬合 */
+.ransom-line {
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+.ransom-letter {
+  display: inline-block;
+  padding: 0.02em 0.16em;
+  margin: 0 0.04em;
+  border-radius: 4px;
+  line-height: 1.04;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  letter-spacing: 0;
+}
+
+/* 手机:去掉每字阴影(重绘成本)并收紧内外边距,标题不贴边/不溢出 */
+@media (max-width: 767px) {
+  .ransom-letter {
+    box-shadow: none;
+    padding: 0.02em 0.1em;
+    margin: 0 0.02em;
+  }
+}

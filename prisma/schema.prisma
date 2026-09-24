@@ -1,0 +1,243 @@
+// Carbadia Trade — 数据模型(碳信用交易模拟盘)
+// 货币与持仓: 现金/价格用整数分, 碳信用数量用整数(吨 CO2e)
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         String   @default("USER") // USER | ADMIN
+  isBot        Boolean  @default(false)    // 做市机器人账户
+  cashBalance  BigInt   @default(0)       // 可用现金(分)
+  lockedCash   BigInt   @default(0)       // 挂单冻结现金(分)
+  createdAt    DateTime @default(now())
+
+  holdings    Holding[]
+  orders      Order[]
+  buyTrades   Trade[]       @relation("BuyerTrades")
+  sellTrades  Trade[]       @relation("SellerTrades")
+  otcListings OtcListing[]  @relation("OtcSeller")
+  otcDeals    OtcDeal[]     @relation("OtcBuyer")
+}
+
+// 碳信用资产 / 标的 (例如某个减排项目签发的核证减排量)
+model Asset {
+  id          String   @id @default(cuid())
+  symbol      String   @unique          // 交易代码, 如 VCS-FOR-2021
+  name        String                    // 项目名称
+  standard    String                    // 核证标准: VCS / GS / CCER / CDM
+  projectType String                    // 项目类型: 林业碳汇 / 可再生能源 / 甲烷回收 ...
+  vintage     Int                       // 减排或移除发生年份(vintage), 非签发年份
+  country     String                    // 项目所在国家/地区
+  registry    String                    // 登记簿
+  description String   @default("")
+  lastPrice   Int?                      // 最近成交价(分)
+  anchorPrice Int?                      // 机器人均值回归锚定价(分)
+  isScenario  Boolean  @default(false)  // 情景标的: 价格由模拟盘自主形成, 非真实资产映射
+  createdAt   DateTime @default(now())
+
+  holdings    Holding[]
+  orders      Order[]
+  trades      Trade[]
+  otcListings OtcListing[]
+}
+
+// 持仓
+model Holding {
+  id        String @id @default(cuid())
+  userId    String
+  assetId   String
+  quantity  Int    @default(0) // 总持仓(吨)
+  locked    Int    @default(0) // 挂卖单冻结
+
+  user  User  @relation(fields: [userId], references: [id])
+  asset Asset @relation(fields: [assetId], references: [id])
+
+  @@unique([userId, assetId])
+}
+
+// 订单簿订单
+model Order {
+  id             String   @id @default(cuid())
+  userId         String
+  assetId        String
+  side           String   // BUY | SELL
+  type           String   // LIMIT | MARKET
+  price          Int?     // 限价单价格(分); 市价单为 null
+  quantity       Int      // 委托数量(吨)
+  filledQuantity Int      @default(0)
+  status         String   @default("OPEN") // OPEN | PARTIAL | FILLED | CANCELLED
+  avgFillPrice   Int?     // 均价(分, 展示用参考价)
+  createdAt      DateTime @default(now())
+
+  user       User    @relation(fields: [userId], references: [id])
+  asset      Asset   @relation(fields: [assetId], references: [id])
+  buyTrades  Trade[] @relation("BuyOrder")
+  sellTrades Trade[] @relation("SellOrder")
+
+  @@index([assetId, side, status])
+  @@index([userId, status])
+}
+
+// 成交记录
+model Trade {
+  id          String   @id @default(cuid())
+  assetId     String
+  buyOrderId  String
+  sellOrderId String
+  buyerId     String
+  sellerId    String
+  price       Int      // 成交价(分)
+  quantity    Int
+  createdAt   DateTime @default(now())
+
+  asset     Asset @relation(fields: [assetId], references: [id])
+  buyOrder  Order @relation("BuyOrder", fields: [buyOrderId], references: [id])
+  sellOrder Order @relation("SellOrder", fields: [sellOrderId], references: [id])
+  buyer     User  @relation("BuyerTrades", fields: [buyerId], references: [id])
+  seller    User  @relation("SellerTrades", fields: [sellerId], references: [id])
+
+  @@index([assetId, createdAt])
+  @@index([buyerId, createdAt])
+  @@index([sellerId, createdAt])
+  // 清理任务按订单号反查成交(NOT EXISTS 探测)必须走索引——缺失时每个候选订单全表扫描两次(2026-07-17 生产事故)
+  @@index([buyOrderId])
+  @@index([sellOrderId])
+}
+
+// OTC(场外/挂牌)出售挂单
+model OtcListing {
+  id          String   @id @default(cuid())
+  sellerId    String
+  assetId     String
+  quantity    Int      // 剩余可售数量
+  pricePerUnit Int     // 单价(分/吨)
+  minQuantity Int      @default(1) // 最小购买量
+  status      String   @default("ACTIVE") // ACTIVE | SOLD | CANCELLED
+  createdAt   DateTime @default(now())
+
+  seller User      @relation("OtcSeller", fields: [sellerId], references: [id])
+  asset  Asset     @relation(fields: [assetId], references: [id])
+  deals  OtcDeal[]
+
+  @@index([assetId, status])
+}
+
+// OTC 成交
+model OtcDeal {
+  id        String   @id @default(cuid())
+  listingId String
+  buyerId   String
+  quantity  Int
+  price     Int      // 成交单价(分)
+  total     Int      // 成交总额(分)
+  createdAt DateTime @default(now())
+
+  listing OtcListing @relation(fields: [listingId], references: [id])
+  buyer   User       @relation("OtcBuyer", fields: [buyerId], references: [id])
+}
+
+// 第一方产品埋点:匿名漏斗事件(pageview/register/first_order/demo_login),90 天清理
+model Event {
+  id        String   @id @default(cuid())
+  name      String
+  path      String?
+  visitorId String?
+  createdAt DateTime @default(now())
+
+  @@index([name, createdAt])
+}
+
+// 站内反馈(发布承接面)
+model Feedback {
+  id        String   @id @default(cuid())
+  message   String
+  contact   String?
+  createdAt DateTime @default(now())
+}
+
+// 审计流水: 一切资金/持仓变动的 append-only 账本。只插入, 永不 update/delete(bot 条目除外, 随保留期清理)。
+// 对账不变量: 每用户每 account 的 Σdelta == 对应列当前值(迁移基线 MIGRATION_BASELINE 起算)。
+// 无外键关系——流水允许在清理删除订单/成交后悬挂引用。
+model LedgerEntry {
+  id        String   @id @default(cuid())
+  userId    String
+  account   String   // CASH | CASH_LOCKED | HOLDING | HOLDING_LOCKED
+  assetId   String?  // HOLDING* 必填
+  delta     BigInt   // 分(CASH*)或 吨(HOLDING*), 有符号
+  reason    String   // ORDER_LOCK|ORDER_UNLOCK|TRADE_SETTLE|PRICE_IMPROVE_REFUND|OTC_LOCK|OTC_UNLOCK|OTC_SETTLE|GRANT|SEED|BOT_MINT_CASH|BOT_MINT_QTY|MIGRATION_BASELINE
+  refType   String?  // ORDER | TRADE | LISTING | DEAL
+  refId     String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, account, createdAt])
+  @@index([refType, refId])
+  @@index([createdAt])
+}
+
+// 影子价格实验每日快照(与交易域零外键——Trade/Asset 可被清理或重建, 本表永久留存)。
+// realClose 是内部研究字段: 任何 API 路由都不得 select/spread 本表
+// (/api/assets 会整行外溢 Asset, 故真实价放这里而非 Asset 列)。金额一律整数分。
+// shadowClose/Volume 只算撮合成交(OTC 会动 lastPrice 但不进 Trade, 分析时知情)。
+model ShadowSnapshot {
+  id           String   @id @default(cuid())
+  assetSymbol  String                 // 冗余 symbol 而非外键
+  day          String                 // "YYYY-MM-DD", Asia/Shanghai 日界
+  shadowClose  Int?                   // 当日最后一笔撮合成交价(分); 无成交为 null
+  shadowVolume Int      @default(0)   // 当日撮合成交量(吨)
+  realClose    Int?                   // 内部: 真实市场当日收盘/均价(分), 绝不进任何 API
+  createdAt    DateTime @default(now())
+
+  @@unique([assetSymbol, day])
+}
+
+// 同步运行记录(job 持久化日志 + "今天跑过没"判据)
+model SyncRun {
+  id           String    @id @default(cuid())
+  source       String                          // offsetsdb | ccer
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  status       String    @default("RUNNING")   // RUNNING | OK | FAILED
+  rowsUpserted Int       @default(0)
+  dataAsOf     String?                         // OffsetsDB metadata.generated_at
+  error        String?
+
+  @@index([source, startedAt])
+}
+
+// Permanent simulation receipts. Snapshot fields intentionally have no foreign keys:
+// resetting demo assets must not rewrite historical receipts or imply registry custody.
+model Retirement {
+  id                 String   @id @default(cuid())
+  userId             String
+  assetId            String
+  reference          String   @unique
+  status             String   @default("SIMULATED")
+  quantity           Int      // Integer simulated credits; 1 credit represents 1 tCO2e in the demo only.
+  symbol             String
+  projectName        String
+  registry           String
+  standard           String
+  vintage            Int
+  reason             String
+  beneficiary        String
+  purpose            String
+  publicMessage      String?  // Reserved message field; never published by this application.
+  idempotencyKey     String
+  requestFingerprint String
+  createdAt          DateTime @default(now())
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt])
+}
+

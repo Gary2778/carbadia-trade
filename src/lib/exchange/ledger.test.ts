@@ -1,0 +1,161 @@
+import { execSync } from "node:child_process";
+import { rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+// 独立测试库,绝不触碰 dev.db(机制同 matching.test.ts: vi.mock 替换 db 模块,
+// 用 datasourceUrl 把连接显式钉在测试库上)
+const DB_FILE = fileURLToPath(new URL("../../../prisma/test-ledger.db", import.meta.url));
+const DB_URL = `file:${DB_FILE}`;
+const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+
+vi.mock("../server/db", async () => {
+  const { PrismaClient } = await import("../../generated/prisma");
+  const { fileURLToPath: toPath } = await import("node:url");
+  const url = `file:${toPath(new URL("../../../prisma/test-ledger.db", import.meta.url))}`;
+  return { prisma: new PrismaClient({ datasourceUrl: url, log: ["error"] }) };
+});
+
+type DbModule = typeof import("../server/db");
+type MatchingModule = typeof import("./matching");
+type OtcModule = typeof import("./otc");
+type LedgerModule = typeof import("./ledger");
+
+let prisma: DbModule["prisma"];
+let matching: MatchingModule;
+let otc: OtcModule;
+let ledgerLib: LedgerModule;
+
+let buyer: { id: string };
+let seller: { id: string };
+let assetId: string;
+
+const GRANT_CENTS = 10_000_000; // $100,000 赠金(整数分)
+
+// SQLite 主文件之外还可能有日志/WAL 附属文件,一并清理才算干净
+const wipeDbFiles = () => {
+  for (const suffix of ["", "-journal", "-wal", "-shm"]) rmSync(DB_FILE + suffix, { force: true });
+};
+
+beforeAll(async () => {
+  wipeDbFiles();
+  process.env.DATABASE_URL = DB_URL;
+  execSync("npx prisma migrate deploy", {
+    cwd: REPO_ROOT,
+    env: { ...process.env, DATABASE_URL: DB_URL },
+    stdio: "pipe",
+  });
+  matching = await import("./matching");
+  otc = await import("./otc");
+  ledgerLib = await import("./ledger");
+  ({ prisma } = await import("../server/db"));
+
+  // 保险丝: 确认连的是测试库再继续
+  const rows = await prisma.$queryRaw<{ file: string }[]>`SELECT file FROM pragma_database_list WHERE name = 'main'`;
+  if (!rows[0]?.file.endsWith("test-ledger.db")) {
+    throw new Error(`测试连到了意外的数据库: ${rows[0]?.file}`);
+  }
+
+  // ---- 场景: 赠金 → 限价卖挂单 → 限价买(部分成交,含价格改善) → 撤单 → OTC 挂牌 → 购买 → 撤牌 ----
+  const asset = await prisma.asset.create({
+    data: {
+      symbol: "VCS-LEDGER-2021",
+      name: "审计流水测试标的",
+      standard: "VCS",
+      projectType: "林业碳汇",
+      vintage: 2021,
+      country: "中国",
+      registry: "Verra",
+    },
+  });
+  assetId = asset.id;
+
+  seller = await prisma.user.create({
+    data: { email: "seller@ledger.test", name: "seller", passwordHash: "test", cashBalance: BigInt(GRANT_CENTS) },
+  });
+  buyer = await prisma.user.create({
+    data: { email: "buyer@ledger.test", name: "buyer", passwordHash: "test", cashBalance: BigInt(GRANT_CENTS) },
+  });
+  await ledgerLib.writeLedger(prisma, [
+    { userId: seller.id, account: "CASH", delta: GRANT_CENTS, reason: "GRANT" },
+    { userId: buyer.id, account: "CASH", delta: GRANT_CENTS, reason: "GRANT" },
+  ]);
+  await prisma.holding.create({ data: { userId: seller.id, assetId, quantity: 1_000 } });
+  await ledgerLib.writeLedger(prisma, [{ userId: seller.id, account: "HOLDING", assetId, delta: 1_000, reason: "SEED" }]);
+
+  // 限价卖挂单: 50 吨 @ 10,000 分
+  await matching.placeOrder({ userId: seller.id, assetId, side: "SELL", type: "LIMIT", price: 10_000, quantity: 50 });
+  // 限价买: 80 吨 @ 10,100 分 → 按挂单价 10,000 成交 50(价格改善 100 分/吨), 余 30 挂簿
+  const buy = await matching.placeOrder({ userId: buyer.id, assetId, side: "BUY", type: "LIMIT", price: 10_100, quantity: 80 });
+  // 撤掉未成交的 30 吨(解冻 303,000 分)
+  await matching.cancelOrder(buyer.id, buy.order.id);
+  // OTC: 挂牌 100 吨 @ 11,000 分 → 买 40 吨 → 撤牌(解冻剩余 60 吨)
+  const listing = await otc.createListing({ sellerId: seller.id, assetId, quantity: 100, pricePerUnit: 11_000 });
+  await otc.buyListing(buyer.id, listing.id, 40);
+  await otc.cancelListing(seller.id, listing.id);
+}, 120_000);
+
+afterAll(async () => {
+  await prisma?.$disconnect();
+  wipeDbFiles();
+});
+
+async function ledgerSum(userId: string, account: string, forAssetId?: string): Promise<number> {
+  const rows = forAssetId
+    ? await prisma.$queryRaw<{ s: bigint | null }[]>`
+        SELECT SUM(delta) AS s FROM "LedgerEntry" WHERE userId = ${userId} AND account = ${account} AND assetId = ${forAssetId}`
+    : await prisma.$queryRaw<{ s: bigint | null }[]>`
+        SELECT SUM(delta) AS s FROM "LedgerEntry" WHERE userId = ${userId} AND account = ${account}`;
+  return Number(rows[0]?.s ?? BigInt(0));
+}
+
+describe("审计流水 — 对账不变量", () => {
+  it("流水对账: 每用户每账户 Σdelta == 列值", async () => {
+    for (const u of [buyer, seller]) {
+      const fresh = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      await expect(ledgerSum(u.id, "CASH")).resolves.toBe(Number(fresh.cashBalance));
+      await expect(ledgerSum(u.id, "CASH_LOCKED")).resolves.toBe(Number(fresh.lockedCash));
+      const holdings = await prisma.holding.findMany({ where: { userId: u.id } });
+      for (const h of holdings) {
+        await expect(ledgerSum(u.id, "HOLDING", h.assetId)).resolves.toBe(h.quantity);
+        await expect(ledgerSum(u.id, "HOLDING_LOCKED", h.assetId)).resolves.toBe(h.locked);
+      }
+    }
+  });
+
+  it("现金零和: 交易只转移不创造(GRANT 之外)", async () => {
+    const cash = await prisma.$queryRaw<{ s: bigint | null }[]>`
+      SELECT SUM(delta) AS s FROM "LedgerEntry" WHERE account = 'CASH' AND reason IN ('TRADE_SETTLE','OTC_SETTLE','PRICE_IMPROVE_REFUND','ORDER_LOCK','ORDER_UNLOCK')`;
+    const locked = await prisma.$queryRaw<{ s: bigint | null }[]>`
+      SELECT SUM(delta) AS s FROM "LedgerEntry" WHERE account = 'CASH_LOCKED'`;
+    expect(Number(cash[0]?.s ?? BigInt(0)) + Number(locked[0]?.s ?? BigInt(0))).toBe(0);
+  });
+
+  it("列值终态正确且流水种类齐全(冻结/结算/退款/解冻/OTC 全覆盖)", async () => {
+    // buyer: 10,000,000 − 500,000(成交 50×10,000) − 440,000(OTC 40×11,000) = 9,060,000
+    const buyerAfter = await prisma.user.findUniqueOrThrow({ where: { id: buyer.id } });
+    expect(Number(buyerAfter.cashBalance)).toBe(9_060_000);
+    expect(Number(buyerAfter.lockedCash)).toBe(0);
+    // seller: 10,000,000 + 500,000 + 440,000 = 10,940,000
+    const sellerAfter = await prisma.user.findUniqueOrThrow({ where: { id: seller.id } });
+    expect(Number(sellerAfter.cashBalance)).toBe(10_940_000);
+    expect(Number(sellerAfter.lockedCash)).toBe(0);
+
+    const reasons = await prisma.$queryRaw<{ reason: string; n: bigint | number }[]>`
+      SELECT reason, COUNT(*) AS n FROM "LedgerEntry" GROUP BY reason`;
+    const byReason = new Map(reasons.map((r) => [r.reason, Number(r.n)]));
+    for (const expected of [
+      "GRANT",
+      "SEED",
+      "ORDER_LOCK",
+      "ORDER_UNLOCK",
+      "TRADE_SETTLE",
+      "PRICE_IMPROVE_REFUND",
+      "OTC_LOCK",
+      "OTC_SETTLE",
+      "OTC_UNLOCK",
+    ]) {
+      expect(byReason.get(expected) ?? 0, `缺少流水种类: ${expected}`).toBeGreaterThan(0);
+    }
+  });
+});

@@ -1,0 +1,25 @@
+node_modules
+.next
+.next-*
+out
+build
+.git
+.gitignore
+.env
+.env.*
+prisma/*.db
+prisma/*.db-journal
+src/generated
+.superpowers
+docs
+.claude
+.worktrees
+.wrangler
+infra
+coverage
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+.DS_Store
+# Railway IaC 由 CLI 读取,不进镜像
+.railway
