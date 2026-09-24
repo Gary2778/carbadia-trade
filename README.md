@@ -68,10 +68,13 @@ src/
     http/client.ts format.ts redirects.ts
   instrumentation.ts         做市机器人与影子价格同步入口
 prisma/                      数据模型、迁移、种子
-infra/cloudflare-proxy/      cbda.trade 反代 Worker
-scripts/prod/                生产检查与诊断脚本
-docs/                        设计、计划、发布记录
+infra/cloudflare-proxy/      cbda.trade 反代 Worker(内部)
+scripts/prod/                生产检查与诊断脚本(内部)
+docs/                        设计、计划、发布记录(内部)
+.railway/                    Railway 基础设施定义(内部)
 ```
+
+标了「内部」的目录只在私有工作区里,不随公开源码快照发布;公开仓 github.com/Gary2778/carbadia-trade 里没有它们。
 
 测试文件与对应模块放在一起。
 
@@ -109,8 +112,8 @@ npm run test:worker   # Cloudflare 反代 Worker 的 node:test
 
 ## 运行与发布
 
-Railway 使用 Dockerfile 构建，并在构建时执行测试与 ESLint。容器启动时校验环境变量、应用 Prisma 迁移、重建查询统计，然后启动 Next.js；生产 SQLite 必须挂载在 `/data` 持久化卷上。基础设施定义在 `.railway/railway.ts`（`railway config plan` / `apply`），反代 Worker 在 `infra/cloudflare-proxy/`。
+Railway 使用 Dockerfile 构建，并在构建时执行测试与 ESLint。容器启动时校验环境变量、应用 Prisma 迁移、重建查询统计，然后启动 Next.js；生产 SQLite 必须挂载在 `/data` 持久化卷上。基础设施定义在内部目录 `.railway/railway.ts`（`railway config plan` / `apply`），反代 Worker 在内部目录 `infra/cloudflare-proxy/`。
 
 ## 与 carbadia.io 的关系
 
-本仓库从 carbadia.io 仓库的提交 `8cac5e2c` 分离（2026-09-24），设计见 `docs/superpowers/specs/2026-09-24-carbadia-trade-separation-design.md`。两边只剩两条弱连接：主站导航与首页的外链指向这里；这里的 `/api/real/*` 代理读主站的公开接口。
+本仓库从 carbadia.io 仓库的提交 `8cac5e2c` 分离（2026-09-24），设计文档在内部仓库的 `docs/superpowers/specs/2026-09-24-carbadia-trade-separation-design.md`。两边只剩两条弱连接：主站导航与首页的外链指向这里；这里的 `/api/real/*` 代理读主站的公开接口。
