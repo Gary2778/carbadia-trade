@@ -1,33 +1,26 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { api } from "@/lib/http/client";
+import { useState } from "react";
 import { fmtMoney } from "@/lib/format";
+import { accountActions, useAccountStatus, useMe } from "@/lib/market/account-store";
 import { useExchangeText } from "@/components/exchange/useExchange";
 import { DemoButton } from "@/components/exchange/AccountData";
 import { ExchangeIcon } from "@/components/exchange/ExchangeIcon";
 export default function AccountPage() {
   const c = useExchangeText();
-  const [me, setMe] = useState<{
-      name: string;
-      email: string;
-      cashBalance: number;
-      lockedCash: number;
-    } | null>(null),
-    [loaded, setLoaded] = useState(false),
+  // 登录态与余额读共享的账户 store(Nav 挂载时拉的那份,换路径时节流刷新),不再自己拉 /api/auth/me。
+  // SSR 与水合首帧 store 是 idle → 按「加载中」画,与原来 loaded 之前一致;/api/auth/me 瞬时失败时 store 先按未登录显示并自愈重试
+  const me = useMe() ?? null,
+    status = useAccountStatus(),
+    loaded = status === "ready" || status === "anon",
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
-  useEffect(() => {
-    api<typeof me>("/api/auth/me")
-      .then(setMe)
-      .catch((e) => setError(e.message))
-      .finally(() => setLoaded(true));
-  }, []);
   async function logout() {
     setBusy(true);
     try {
-      await api("/api/auth/logout", { method: "POST" });
-      // 登出后整页重载是有意的:导航栏等客户端状态里还留着登录态,软导航清不掉
+      // 经账户 store 登出:POST /api/auth/logout,成功后 store 清空并请求传输层重连(Nav 同一拍变成未登录)
+      await accountActions.logout();
+      // 整页回首页(保留原来的行为):其它页面各自的客户端缓存(轮询中的资产、订单)一并清掉
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.assign("/");
     } catch (e) {

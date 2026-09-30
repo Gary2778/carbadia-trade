@@ -9,12 +9,16 @@ const cache = new Map<string, { data: { candles: Candle[] }; ts: number }>();
 // K 线对所有访客相同 → 允许 CDN 吸收轮询流量
 const PUBLIC_CACHE = { headers: { "Cache-Control": "public, max-age=1, s-maxage=5, stale-while-revalidate=10" } };
 
+/** 旧端点只认 /market 页四个 tab 的周期(计划 §3.4「保留、不变」);15m / 4h 只在终端的 /api/market/[symbol]/candles 提供 */
+const LEGACY_INTERVALS = ["1m", "5m", "1h", "1d"] as const satisfies readonly IntervalKey[];
+const isLegacyInterval = (s: string): s is (typeof LEGACY_INTERVALS)[number] => (LEGACY_INTERVALS as readonly string[]).includes(s);
+
 export async function GET(req: Request, ctx: { params: Promise<{ symbol: string }> }) {
   try {
     const { symbol } = await ctx.params;
     const interval = new URL(req.url).searchParams.get("interval") ?? "1m";
-    if (!Object.hasOwn(INTERVALS, interval)) return fail("interval must be one of 1m/5m/1h/1d", 400);
-    const cfg = INTERVALS[interval as IntervalKey];
+    if (!isLegacyInterval(interval)) return fail(`interval must be one of ${LEGACY_INTERVALS.join("/")}`, 400);
+    const cfg = INTERVALS[interval];
 
     const asset = await prisma.asset.findUnique({ where: { symbol }, select: { id: true } });
     if (!asset) return fail("Instrument not found", 404);

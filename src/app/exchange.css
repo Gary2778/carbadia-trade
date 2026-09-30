@@ -2,19 +2,23 @@
 .exchange-content {
   min-width: 0;
 }
+/* 下面四条是站内旧页面的交互默认值,不分层(压过 @layer utilities 里的工具类,旧页面一直按这个效果写,不动)。
+   交易终端([data-terminal],同样在 .exchange-content 里)整棵子树排除在外:终端只认 tokens 与工具类(计划 §4.6),
+   否则 focus-visible:outline-none + shadow-focus 会被叠上一圈 accent 外框、disabled:opacity-50 被改成 0.48。
+   :not(:where(…)) 的特异性为 0,旧页面的层叠结果不变。终端用的同一组默认值在文件末尾的 @layer base 里。 */
 .exchange-content
-  :where(button, a, input, select, textarea, summary):focus-visible {
+  :where(button, a, input, select, textarea, summary):focus-visible:not(:where([data-terminal] *)) {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
-.exchange-content button {
+.exchange-content button:not(:where([data-terminal] *)) {
   cursor: pointer;
 }
-.exchange-content button:disabled {
+.exchange-content button:disabled:not(:where([data-terminal] *)) {
   cursor: not-allowed;
   opacity: 0.48;
 }
-.exchange-content :where(input, select, textarea) {
+.exchange-content :where(input, select, textarea):not(:where([data-terminal] *)) {
   accent-color: var(--accent);
 }
 .ex-page-heading h1 {
@@ -118,10 +122,10 @@
   background: var(--surface-2);
 }
 .ex-icon-button.saved {
-  color: #ae873c;
+  color: var(--warning);
 }
 .ex-icon-button.saved svg {
-  fill: color-mix(in srgb, #c99b3f 18%, transparent);
+  fill: color-mix(in srgb, var(--warning) 18%, transparent);
 }
 .ex-market-stats {
   display: grid;
@@ -358,9 +362,10 @@
 }
 .ex-error {
   padding: 12px 16px;
-  background: color-mix(in srgb, var(--down) 6%, var(--surface));
-  color: var(--down);
-  border: 1px solid color-mix(in srgb, var(--down) 22%, var(--border));
+  /* 语义色,不随涨跌轴翻转(--down 在 red-up 下是绿的) */
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 22%, var(--border));
   border-radius: 6px;
   font-size: 12px;
   margin-bottom: 16px;
@@ -557,7 +562,7 @@
   border-color: color-mix(in srgb, var(--up) 20%, var(--border));
 }
 .ex-status-tag.open {
-  color: #b08028;
+  color: var(--warning);
 }
 .ex-glossary {
   display: grid;
@@ -780,17 +785,37 @@
 
 /* ── dark 的液态玻璃(材质零件见 globals.css)────────────────────────── */
 /* 面板:阴影 token 已经带了沿边高光(globals.css),这里补光泽与背后的柔化 */
-html[data-theme="dark"]:not([data-kids]) :is(.ex-stat, .ex-market-body, .ex-panel, .ex-project-card) {
+html[data-theme="dark"] :is(.ex-stat, .ex-market-body, .ex-panel, .ex-project-card) {
   background-image: var(--glass-sheen);
 }
 /* 按钮:和 globals.css 的 .glass-control 一样——中央不着色、没有灰边框,轮廓只靠那圈高光 */
-html[data-theme="dark"]:not([data-kids]) .ex-button:not(.primary):not(.ghost) {
+html[data-theme="dark"] .ex-button:not(.primary):not(.ghost) {
   background-color: transparent;
   border-color: transparent;
   background-image: var(--glass-sheen-control);
   box-shadow: var(--glass-rim-strong), 0 6px 18px -10px rgba(0, 0, 0, 0.7);
 }
-html[data-theme="dark"]:not([data-kids]) .ex-button:not(.primary):not(.ghost):hover {
+html[data-theme="dark"] .ex-button:not(.primary):not(.ghost):hover {
   background-color: transparent;
   box-shadow: inset 1px 1px 0 rgba(255, 255, 255, 0.95), inset -1px -1px 0 rgba(200, 222, 255, 0.5), 0 6px 18px -10px rgba(0, 0, 0, 0.7);
+}
+
+/* ── 交易终端里的同一组交互默认值 ──────────────────────────────────────
+   与文件开头的四条相同,但放进 @layer base(与 Tailwind preflight 同层、低于 @layer utilities):只作兜底,
+   终端组件自己的工具类(focus-visible:outline-none + shadow-focus、disabled:opacity-50、accent-up 等)照常生效。 */
+@layer base {
+  [data-terminal] :where(button, a, input, select, textarea, summary):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+  [data-terminal] button {
+    cursor: pointer;
+  }
+  [data-terminal] button:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
+  }
+  [data-terminal] :where(input, select, textarea) {
+    accent-color: var(--accent);
+  }
 }

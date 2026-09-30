@@ -40,16 +40,29 @@ model Asset {
   vintage     Int                       // 减排或移除发生年份(vintage), 非签发年份
   country     String                    // 项目所在国家/地区
   registry    String                    // 登记簿
-  description String   @default("")
+  description String   @default("")     // 旧字段: 不再进任何 API(计划 §9.1 第 16 条), 列保留以便旧镜像回滚
   lastPrice   Int?                      // 最近成交价(分)
-  anchorPrice Int?                      // 机器人均值回归锚定价(分)
+  anchorPrice Int?                      // 机器人均值回归锚定价(分); 永不外露(公开路由只 select INSTRUMENT_SELECT)
   isScenario  Boolean  @default(false)  // 情景标的: 价格由模拟盘自主形成, 非真实资产映射
   createdAt   DateTime @default(now())
+
+  // 终端元数据(计划 §3.4 迁移块): 同项目多 vintage 靠 projectId 归组;
+  // methodology / verificationStatus 未知即 null(UI 显示「未提供」), 不填任何真实登记数据
+  projectId          String?            // 模拟项目编号 SIM-PRJ-<STANDARD>-<TYPE>
+  methodology        String?
+  verificationStatus String?            // 自由 TEXT; 读取边界 narrowVerification 只放行 "SIMULATED_UNVERIFIED"
+  tickSize           Int      @default(1)   // 最小价格变动(分)
+  pricePrecision     Int      @default(2)   // 价格显示小数位
+  qtyStep            Int      @default(1)   // 数量步长(吨)
+  minQty             Int      @default(1)   // 最小数量(吨)
+  currency           String   @default("USD")
 
   holdings    Holding[]
   orders      Order[]
   trades      Trade[]
   otcListings OtcListing[]
+
+  @@index([projectId])
 }
 
 // 持仓
@@ -79,12 +92,15 @@ model Order {
   status         String   @default("OPEN") // OPEN | PARTIAL | FILLED | CANCELLED
   avgFillPrice   Int?     // 均价(分, 展示用参考价)
   createdAt      DateTime @default(now())
+  clientOrderId  String?  // 客户端幂等键(uuid); bot 不传, SQLite 多个 NULL 不冲突
+  updatedAt      DateTime? @updatedAt
 
   user       User    @relation(fields: [userId], references: [id])
   asset      Asset   @relation(fields: [assetId], references: [id])
   buyTrades  Trade[] @relation("BuyOrder")
   sellTrades Trade[] @relation("SellOrder")
 
+  @@unique([userId, clientOrderId])
   @@index([assetId, side, status])
   @@index([userId, status])
 }
@@ -175,7 +191,7 @@ model LedgerEntry {
   account   String   // CASH | CASH_LOCKED | HOLDING | HOLDING_LOCKED
   assetId   String?  // HOLDING* 必填
   delta     BigInt   // 分(CASH*)或 吨(HOLDING*), 有符号
-  reason    String   // ORDER_LOCK|ORDER_UNLOCK|TRADE_SETTLE|PRICE_IMPROVE_REFUND|OTC_LOCK|OTC_UNLOCK|OTC_SETTLE|GRANT|SEED|BOT_MINT_CASH|BOT_MINT_QTY|MIGRATION_BASELINE
+  reason    String   // ORDER_LOCK|ORDER_UNLOCK|SELF_TRADE_UNLOCK|TRADE_SETTLE|PRICE_IMPROVE_REFUND|OTC_LOCK|OTC_UNLOCK|OTC_SETTLE|GRANT|SEED|BOT_MINT_CASH|BOT_MINT_QTY|MIGRATION_BASELINE
   refType   String?  // ORDER | TRADE | LISTING | DEAL
   refId     String?
   createdAt DateTime @default(now())

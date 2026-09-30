@@ -3,7 +3,7 @@ import { cookies } from "next/headers";
 import { z } from "zod";
 import { prisma } from "@/lib/server/db";
 import { ok, fail, handle, parseBody } from "@/lib/server/api";
-import { clientIp, rateLimit } from "@/lib/server/rate-limit";
+import { clientIp, rateLimit, retryAfterSeconds } from "@/lib/server/rate-limit";
 
 const schema = z.object({
   name: z.literal("pageview"), // 客户端只允许报 pageview;漏斗事件全部服务端直写,防伪造
@@ -12,7 +12,8 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
-    if (!rateLimit(`track:${clientIp(req)}`, 60, 60_000)) return fail("Too many requests, please retry later", 429);
+    const key = `track:${clientIp(req)}`;
+    if (!rateLimit(key, 60, 60_000)) return fail("Too many requests, please retry later", 429, { "Retry-After": String(retryAfterSeconds(key, 60_000)) });
     const { name, path } = await parseBody(req, schema);
     const jar = await cookies();
     let vid = jar.get("cx_vid")?.value;

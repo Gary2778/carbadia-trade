@@ -1,10 +1,12 @@
 import { z } from "zod";
 import { prisma } from "@/lib/server/db";
 import { requireUser } from "@/lib/server/auth";
-import { placeOrder } from "@/lib/exchange/matching";
+import { MAX_ORDER_QUANTITY, placeOrder } from "@/lib/exchange/matching";
 import { ok, fail, handle, parseBody } from "@/lib/server/api";
-import { rateLimit, clientIp } from "@/lib/server/rate-limit";
+import { rateLimit, clientIp, retryAfterSeconds } from "@/lib/server/rate-limit";
 import { MAX_PRICE_CENTS } from "@/lib/exchange/limits";
+import { ledgerIdsByTrade, toFill, toOrder } from "@/lib/server/account-mappers";
+import type { PlaceOrderResponse } from "@/shared/api-shapes";
 
 const schema = z.object({
   assetId: z.string().min(1),
@@ -17,8 +19,19 @@ const schema = z.object({
     .max(MAX_PRICE_CENTS)
     .nullable()
     .optional(),
-  quantity: z.number().int().positive("Quantity must be a positive integer"),
+  // MARKET 与 LIMIT 同一个数量上限(P1-25b);MARKET 单的 price 若带了只做格式校验,撮合入口忽略它(落库 null)
+  quantity: z.number().int().positive("Quantity must be a positive integer").max(MAX_ORDER_QUANTITY, "Quantity exceeds maximum"),
+  // 客户端幂等键:同一用户重放同一 id 返回既有单(200 + replayed: true),不会再下一单
+  clientOrderId: z.uuid("clientOrderId must be a UUID").optional(),
 });
+
+const WINDOW_MS = 60_000;
+/**
+ * 429 一律带 Retry-After(计划 §3.4「信封与限流基础件」、§9.1 第 26 条)。
+ * 文案沿用全站既有的 "Too many requests, please retry later"(5386cb4 起、main 亦然;login / register / otc / track 同一句),
+ * 而不是计划 §3.4 缩写的 "Too many requests"——已在 P1-07 报告里记为偏离,客户端(P1-20)只按状态码 + Retry-After 渲染 toast.rateLimited。
+ */
+const tooMany = (key: string) => fail("Too many requests, please retry later", 429, { "Retry-After": String(retryAfterSeconds(key, WINDOW_MS)) });
 
 async function withExecutionPrices<
   T extends { id: string; filledQuantity: number },
@@ -65,9 +78,12 @@ async function withExecutionPrices<
 
 export async function POST(req: Request) {
   try {
-    if (!rateLimit(`orders:${clientIp(req)}`, 30, 60_000))
-      return fail("Too many requests, please retry later", 429);
+    // 先按 IP 粗筛(未登录的洪泛也挡),登录后再按用户细限:orders:ip 120/min、orders:user 60/min
+    const ipKey = `orders:ip:${clientIp(req)}`;
+    if (!rateLimit(ipKey, 120, WINDOW_MS)) return tooMany(ipKey);
     const user = await requireUser();
+    const userKey = `orders:user:${user.id}`;
+    if (!rateLimit(userKey, 60, WINDOW_MS)) return tooMany(userKey);
     const body = await parseBody(req, schema);
     const prior = await prisma.order.count({ where: { userId: user.id } });
     const result = await placeOrder({
@@ -77,12 +93,24 @@ export async function POST(req: Request) {
       type: body.type,
       price: body.price ?? null,
       quantity: body.quantity,
+      clientOrderId: body.clientOrderId ?? null,
     });
-    if (prior === 0)
+    if (prior === 0 && !result.replayed)
       void prisma.event
         .create({ data: { name: "first_order" } })
         .catch(() => {});
-    return ok(result);
+    // Fill.ledgerRefs = 本人在该成交下的账本行 id(计划 §3.5):事务提交后一次查询,只在有成交时发生
+    const ledgerIds = await ledgerIdsByTrade(prisma, user.id, result.trades.map((trade) => trade.id));
+    const data: PlaceOrderResponse = {
+      order: toOrder(result.order),
+      filledQty: result.filledQty,
+      filledCost: result.filledCost,
+      fills: result.trades.map((trade) => toFill(trade, user.id, ledgerIds.get(trade.id))),
+      replayed: result.replayed,
+      // 自成交防护撤掉的本人挂单条数(计划 §9.1 第 41 条);重放时 placeOrder 给 0。终端据此弹 terminal.toast.selfTradeCancelled
+      selfTradeCancelled: result.selfTradeCancelled,
+    };
+    return ok(data, { headers: { "Cache-Control": "private, no-store" } });
   } catch (err) {
     return handle(err);
   }

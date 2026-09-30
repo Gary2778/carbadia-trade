@@ -20,15 +20,21 @@ type DbModule = typeof import("../server/db");
 type MatchingModule = typeof import("./matching");
 type OtcModule = typeof import("./otc");
 type LedgerModule = typeof import("./ledger");
+type MappersModule = typeof import("../server/account-mappers");
 
 let prisma: DbModule["prisma"];
 let matching: MatchingModule;
 let otc: OtcModule;
 let ledgerLib: LedgerModule;
+let mappers: MappersModule;
 
 let buyer: { id: string };
 let seller: { id: string };
 let assetId: string;
+/** 自成交场景里的两张单:被自成交防护撤掉的 seller 买单、seller 自己撤掉的卖单;以及 buyer 手动撤掉的买单 */
+let stpBidId: string;
+let stpAskId: string;
+let userCancelledBuyId: string;
 
 const GRANT_CENTS = 10_000_000; // $100,000 赠金(整数分)
 
@@ -48,6 +54,7 @@ beforeAll(async () => {
   matching = await import("./matching");
   otc = await import("./otc");
   ledgerLib = await import("./ledger");
+  mappers = await import("../server/account-mappers");
   ({ prisma } = await import("../server/db"));
 
   // 保险丝: 确认连的是测试库再继续
@@ -56,7 +63,7 @@ beforeAll(async () => {
     throw new Error(`测试连到了意外的数据库: ${rows[0]?.file}`);
   }
 
-  // ---- 场景: 赠金 → 限价卖挂单 → 限价买(部分成交,含价格改善) → 撤单 → OTC 挂牌 → 购买 → 撤牌 ----
+  // ---- 场景: 赠金 → 限价卖挂单 → 限价买(部分成交,含价格改善) → 撤单 → OTC 挂牌 → 购买 → 撤牌 → 自成交防护撤单 ----
   const asset = await prisma.asset.create({
     data: {
       symbol: "VCS-LEDGER-2021",
@@ -89,10 +96,20 @@ beforeAll(async () => {
   const buy = await matching.placeOrder({ userId: buyer.id, assetId, side: "BUY", type: "LIMIT", price: 10_100, quantity: 80 });
   // 撤掉未成交的 30 吨(解冻 303,000 分)
   await matching.cancelOrder(buyer.id, buy.order.id);
+  userCancelledBuyId = buy.order.id;
   // OTC: 挂牌 100 吨 @ 11,000 分 → 买 40 吨 → 撤牌(解冻剩余 60 吨)
   const listing = await otc.createListing({ sellerId: seller.id, assetId, quantity: 100, pricePerUnit: 11_000 });
   await otc.buyListing(buyer.id, listing.id, 40);
   await otc.cancelListing(seller.id, listing.id);
+  // 自成交防护(EXPIRE_MAKER,计划 §9.1 第 41 条): seller 挂买 10 @ 9,000(冻结 90,000 分),再挂卖 5 @ 8,900 ——
+  // 会与自己的买单成交 → 撤掉那张买单(SELF_TRADE_UNLOCK: CASH_LOCKED −90,000 / CASH +90,000),卖单挂出;随后 seller 自己撤卖单。
+  // 现金净额为零,终态余额与没有这一段时相同。
+  const bid = await matching.placeOrder({ userId: seller.id, assetId, side: "BUY", type: "LIMIT", price: 9_000, quantity: 10 });
+  const ask = await matching.placeOrder({ userId: seller.id, assetId, side: "SELL", type: "LIMIT", price: 8_900, quantity: 5 });
+  if (ask.selfTradeCancelled !== 1 || ask.filledQty !== 0) throw new Error("自成交场景没有按预期撤掉本人买单");
+  await matching.cancelOrder(seller.id, ask.order.id);
+  stpBidId = bid.order.id;
+  stpAskId = ask.order.id;
 }, 120_000);
 
 afterAll(async () => {
@@ -125,7 +142,7 @@ describe("审计流水 — 对账不变量", () => {
 
   it("现金零和: 交易只转移不创造(GRANT 之外)", async () => {
     const cash = await prisma.$queryRaw<{ s: bigint | null }[]>`
-      SELECT SUM(delta) AS s FROM "LedgerEntry" WHERE account = 'CASH' AND reason IN ('TRADE_SETTLE','OTC_SETTLE','PRICE_IMPROVE_REFUND','ORDER_LOCK','ORDER_UNLOCK')`;
+      SELECT SUM(delta) AS s FROM "LedgerEntry" WHERE account = 'CASH' AND reason IN ('TRADE_SETTLE','OTC_SETTLE','PRICE_IMPROVE_REFUND','ORDER_LOCK','ORDER_UNLOCK','SELF_TRADE_UNLOCK')`;
     const locked = await prisma.$queryRaw<{ s: bigint | null }[]>`
       SELECT SUM(delta) AS s FROM "LedgerEntry" WHERE account = 'CASH_LOCKED'`;
     expect(Number(cash[0]?.s ?? BigInt(0)) + Number(locked[0]?.s ?? BigInt(0))).toBe(0);
@@ -154,8 +171,33 @@ describe("审计流水 — 对账不变量", () => {
       "OTC_LOCK",
       "OTC_SETTLE",
       "OTC_UNLOCK",
+      "SELF_TRADE_UNLOCK",
     ]) {
       expect(byReason.get(expected) ?? 0, `缺少流水种类: ${expected}`).toBeGreaterThan(0);
     }
+  });
+
+  it("自成交防护撤单: 解冻流水 SELF_TRADE_UNLOCK 挂在被撤订单上,现金一进一出", async () => {
+    const lines = await prisma.ledgerEntry.findMany({ where: { reason: "SELF_TRADE_UNLOCK" }, orderBy: { account: "asc" } });
+    expect(lines.map((l) => [l.userId, l.account, Number(l.delta), l.refType, l.refId])).toEqual([
+      [seller.id, "CASH", 90_000, "ORDER", stpBidId],
+      [seller.id, "CASH_LOCKED", -90_000, "ORDER", stpBidId],
+    ]);
+  });
+
+  it("撤单原因由流水派生: 自成交防护撤掉的单 → SELF_TRADE, 用户自己撤的 → USER(订单表没有原因列)", async () => {
+    const rows = await prisma.order.findMany({
+      where: { id: { in: [stpBidId, stpAskId, userCancelledBuyId] } },
+      include: { asset: { select: { symbol: true } } },
+    });
+    expect(rows.every((r) => r.status === "CANCELLED")).toBe(true);
+    const selfTraded = await mappers.selfTradeCancelledIds(prisma, rows);
+    expect([...selfTraded]).toEqual([stpBidId]);
+    const reasons = new Map(rows.map((r) => [r.id, mappers.toOrder(r, undefined, selfTraded).cancelReason]));
+    expect(reasons.get(stpBidId)).toBe("SELF_TRADE");
+    expect(reasons.get(stpAskId)).toBe("USER");
+    expect(reasons.get(userCancelledBuyId)).toBe("USER");
+    // 不查流水的调用方(不传 selfTraded)仍是旧口径
+    expect(mappers.toOrder(rows.find((r) => r.id === stpBidId)!).cancelReason).toBe("USER");
   });
 });

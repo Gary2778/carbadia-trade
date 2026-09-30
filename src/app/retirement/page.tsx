@@ -428,7 +428,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
           {loadError && (
             <div
               role="alert"
-              className="rounded-xl border border-down/20 bg-down/5 p-3 text-sm text-down"
+              className="rounded-xl border border-danger/25 bg-danger-soft p-3 text-sm text-danger"
             >
               {t.refreshError}
             </div>
@@ -644,7 +644,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                   {formError && (
                     <div
                       role="alert"
-                      className="mt-4 rounded-xl border border-down/20 bg-down/5 p-4 text-sm text-down"
+                      className="mt-4 rounded-xl border border-danger/25 bg-danger-soft p-4 text-sm text-danger"
                     >
                       <p>{formError}</p>
                       {uncertain && (
@@ -914,7 +914,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                     </p>
                   </div>
                   {formError && (
-                    <p role="alert" className="text-sm text-down">
+                    <p role="alert" className="text-sm text-danger">
                       {formError}
                     </p>
                   )}

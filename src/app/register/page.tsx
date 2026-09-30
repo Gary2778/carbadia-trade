@@ -4,6 +4,7 @@ import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/http/client";
+import { accountActions } from "@/lib/market/account-store";
 import { safeReturnTo } from "@/lib/redirects";
 import { useT } from "@/i18n/LangProvider";
 import { Input } from "../login/page";
@@ -32,6 +33,9 @@ function RegisterForm() {
     setBusy(true); setErr("");
     try {
       await api("/api/auth/register", { method: "POST", body: JSON.stringify({ email, name, password }) });
+      // 跳转前刷新共享的账户 store:Nav 与终端立即看到新身份与余额(不抛错;身份变化时会请求 WS 重连)。
+      // 最多等 AUTH_NAVIGATE_WAIT_MS:请求挂住时照样跳转,hydrate 在后台继续,失败由 Nav 的自愈重试补上
+      await accountActions.hydrateForNavigation();
       router.push(returnTo);
       router.refresh();
     } catch (e) {
@@ -49,7 +53,7 @@ function RegisterForm() {
           <Input label={t.nameLabel} type="text" value={name} onChange={setName} placeholder={t.namePlaceholder} />
           <Input label={t.emailLabel} type="email" value={email} onChange={setEmail} placeholder="you@example.com" />
           <Input label={t.passwordLabel} type="password" value={password} onChange={setPassword} placeholder={t.passwordPlaceholder} />
-          {err && <div className="text-down text-xs">{err}</div>}
+          {err && <div className="text-danger text-xs">{err}</div>}
           <label className="flex items-start gap-2 text-xs text-muted">
             <input type="checkbox" required className="mt-0.5 accent-current" />
             <span>

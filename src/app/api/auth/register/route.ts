@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { prisma } from "@/lib/server/db";
-import { createSession, hashPassword } from "@/lib/server/auth";
+import { createSession, hashPassword, isReservedEmail } from "@/lib/server/auth";
 import { ok, fail, handle, parseBody } from "@/lib/server/api";
-import { rateLimit, clientIp } from "@/lib/server/rate-limit";
+import { rateLimit, clientIp, retryAfterSeconds } from "@/lib/server/rate-limit";
 
 const schema = z.object({
   email: z.string().email("Invalid email address"),
@@ -12,8 +12,11 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
-    if (!rateLimit(`register:${clientIp(req)}`, 5, 3_600_000)) return fail("Too many requests, please retry later", 429);
+    const key = `register:${clientIp(req)}`;
+    if (!rateLimit(key, 5, 3_600_000)) return fail("Too many requests, please retry later", 429, { "Retry-After": String(retryAfterSeconds(key, 3_600_000)) });
     const { email, name, password } = await parseBody(req, schema);
+    // carbadia.bot 域保留给做市机器人:与「已注册」同一个 409,不区分库里有没有这个地址
+    if (isReservedEmail(email)) return fail("This email is already registered", 409);
     const exists = await prisma.user.findUnique({ where: { email } });
     if (exists) return fail("This email is already registered", 409);
 

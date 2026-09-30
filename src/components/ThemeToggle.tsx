@@ -3,14 +3,12 @@
 import { useTheme } from "@/providers/ThemeProvider";
 import { useT } from "@/i18n/LangProvider";
 
-// 日 / 月按钮:平时在浅色与 dark 之间切。儿童护眼模式开着时,它是「回去」——
-// 图标画的是回去之后的那个(太阳 = 浅色,月亮 = dark),按下即退出儿童护眼。
+// 日 / 月按钮:在浅色与 dark 之间切;图标画的是当前外观(太阳 = 浅色,月亮 = dark)。
 export function ThemeToggle() {
-  const { theme, kids, baseTheme, toggle } = useTheme();
-  const dark = theme === "dark" && !kids;
-  const moon = baseTheme === "dark";
+  const { theme, toggle } = useTheme();
+  const dark = theme === "dark";
   const tx = useT("themeToggle");
-  const label = kids ? (moon ? tx.toDark : tx.toLight) : dark ? tx.toLight : tx.toDark;
+  const label = dark ? tx.toLight : tx.toDark;
 
   return (
     <button
@@ -21,7 +19,7 @@ export function ThemeToggle() {
       className="glass-control grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-full bg-transparent text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent md:h-9 md:w-9"
     >
       <span aria-hidden>
-        {moon ? (
+        {dark ? (
           // 弯月
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
             <path

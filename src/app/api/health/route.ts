@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/server/db";
 import { ok, fail } from "@/lib/server/api";
 import { clientIp } from "@/lib/server/rate-limit";
+import { readWsStats } from "@/lib/server/ws-stats";
+import type { HealthResponse } from "@/shared/api-shapes";
 
 export const dynamic = "force-dynamic";
 
@@ -20,8 +22,12 @@ export async function GET(req: Request) {
   }
   try {
     await prisma.$queryRaw`SELECT 1`;
-    return ok({ db: true });
   } catch {
     return fail("db unavailable", 500);
   }
+  // 计划 §3.4:bot = instrumentation 是否拉起了做市机器人;ws = hub 的统计(WS_DISABLED 时 enabled: false 的零计数);
+  // startMode 由「有没有 hub 初始化过 __carbadiaWsStats」推断——next start(START_MODE=next)下 server.mjs 不跑,恒为 null。
+  const ws = readWsStats();
+  const body: HealthResponse = { db: true, bot: globalThis.__carbadiaBot === true, startMode: ws ? "custom" : "next", ws };
+  return ok(body);
 }

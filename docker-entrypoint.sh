@@ -79,5 +79,13 @@ echo "PRAGMA journal_mode=WAL;" | npx prisma db execute --stdin --url "$DATABASE
 echo "[deploy] 检查种子数据（仅当数据库为空时写入）…"
 npm run db:seed:if-empty
 
-echo "[deploy] 启动 Next.js（端口 ${PORT:-3000}）…"
-exec npx next start -H 0.0.0.0 -p "${PORT:-3000}"
+# 启动方式(计划 §3.4「启动脚本与回滚」):默认 START_MODE=custom → node server.mjs(Next + /ws 同端口);
+# 回滚开关 START_MODE=next → 原来的 next start(无 /ws,前端自动降级轮询),一条 `railway variables set START_MODE=next` + redeploy 即可。
+export NODE_ENV=production
+if [ "${START_MODE:-custom}" = "next" ]; then
+  echo "[deploy] 启动 Next.js（START_MODE=next,无 WebSocket,端口 ${PORT:-3000}）…"
+  exec npx next start -H 0.0.0.0 -p "${PORT:-3000}"
+else
+  echo "[deploy] 启动 server.mjs（Next + WebSocket,端口 ${PORT:-3000}）…"
+  exec node server.mjs
+fi

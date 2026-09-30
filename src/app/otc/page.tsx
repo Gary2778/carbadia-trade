@@ -4,13 +4,14 @@ import { useCallback, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { usePolling } from "@/hooks/usePolling";
-import { api } from "@/lib/http/client";
+import { api, ApiError } from "@/lib/http/client";
 import { fmtMoney, fmtQty } from "@/lib/format";
 import { Reveal } from "@/components/anim/Reveal";
 import { useToast } from "@/components/anim/Toast";
 import { ComplianceNote } from "@/components/ComplianceNote";
 import { useT, useLang } from "@/i18n/LangProvider";
 import { tName, tUserName } from "@/i18n/data";
+import { accountActions, useAccountStatus, useMe } from "@/lib/market/account-store";
 
 type Listing = {
   id: string;
@@ -23,7 +24,11 @@ type Listing = {
   seller: { name: string };
 };
 type Asset = { id: string; symbol: string; name: string };
-type Me = { id: string } | null;
+
+/** 写操作回 401:会话在这页上过期了,让共享的账户 store 重新确认身份(Nav 与本页的登录入口随之变成未登录) */
+function recheckLoginOn401(e: unknown): void {
+  if (e instanceof ApiError && e.status === 401) void accountActions.refresh();
+}
 
 export default function OtcPage() {
   const t = useT("otc");
@@ -31,21 +36,20 @@ export default function OtcPage() {
   const pathname = usePathname();
   const [listings, setListings] = useState<Listing[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
-  const [me, setMe] = useState<Me>(null);
+  // 登录态读共享的账户 store(Nav 挂载时拉的那份,换路径时 Nav 节流刷新),不再每 5 s 随挂牌一起拉 /api/auth/me。
+  // SSR 与水合首帧 store 是 idle(身份未知):与原来「第一次加载回来之前」一样按加载中画,身份确定后再画买入 / 撤牌 / 登录入口
+  const me = useMe() ?? null;
+  const status = useAccountStatus();
+  const accountKnown = status === "ready" || status === "anon";
   const [showCreate, setShowCreate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const [ls, a, m] = await Promise.all([
-        api<Listing[]>("/api/otc"),
-        api<Asset[]>("/api/assets"),
-        api<Me>("/api/auth/me"),
-      ]);
+      const [ls, a] = await Promise.all([api<Listing[]>("/api/otc"), api<Asset[]>("/api/assets")]);
       setListings(ls);
       setAssets(a);
-      setMe(m);
       setErr("");
     } catch (e) {
       setErr((e as Error).message);
@@ -75,16 +79,16 @@ export default function OtcPage() {
       </div>
 
       {/* 已有数据时刷新失败只提示,不遮挡列表;无数据时的错误在下方卡片里展示 */}
-      {err && listings.length > 0 && <div className="text-down text-sm">{err}</div>}
+      {err && listings.length > 0 && <div className="text-danger text-sm">{err}</div>}
 
       {showCreate && me && <CreateListing assets={assets} onDone={() => { setShowCreate(false); load(); }} />}
 
       <Reveal>
         <div className="rounded-2xl border border-border bg-surface shadow-card overflow-hidden">
-          {loading ? (
+          {loading || !accountKnown ? (
             <div className="p-10 text-center text-muted">{t.loading}</div>
           ) : listings.length === 0 && err ? (
-            <div className="p-10 text-center text-down">{err}</div>
+            <div className="p-10 text-center text-danger">{err}</div>
           ) : listings.length === 0 ? (
             <div className="p-10 text-center text-muted">{t.emptyPre}{!me && <>{t.emptyMid}<Link href={`/login?returnTo=${encodeURIComponent(pathname)}`} className="text-accent">{t.emptyLogin}</Link>{t.emptyPost}</>}</div>
           ) : (
@@ -157,6 +161,7 @@ function CreateListing({ assets, onDone }: { assets: Asset[]; onDone: () => void
       toast("ok", t.listingPublished);
       onDone();
     } catch (e) {
+      recheckLoginOn401(e);
       setErr((e as Error).message);
     } finally {
       setBusy(false);
@@ -179,7 +184,7 @@ function CreateListing({ assets, onDone }: { assets: Asset[]; onDone: () => void
         <Field label={t.fieldUnitPrice} value={price} onChange={setPrice} step="0.01" />
         <Field label={t.fieldMinBuy} value={minQty} onChange={setMinQty} />
       </div>
-      {err && <div className="text-down text-xs">{err}</div>}
+      {err && <div className="text-danger text-xs">{err}</div>}
       <button onClick={submit} disabled={busy || !assetId || !quantity || !price}
         className="px-4 py-2 rounded-full bg-accent text-background text-sm font-medium hover:bg-accent-strong transition-colors disabled:opacity-40">
         {busy ? t.submitting : t.confirmPublish}
@@ -219,10 +224,13 @@ function BuyListing({ listing, onDone }: { listing: Listing; onDone: () => void 
     setBusy(true);
     try {
       await api(`/api/otc/${listing.id}/buy`, { method: "POST", body: JSON.stringify({ quantity: Number(qty) }) });
+      // 买入扣了现金:立刻刷新共享的账户 store,Nav 的现金不等下一次导航
+      void accountActions.refresh();
       toast("ok", t.bought(qty));
       setOpen(false);
       onDone();
     } catch (e) {
+      recheckLoginOn401(e);
       toast("err", (e as Error).message);
     } finally {
       setBusy(false);
@@ -258,7 +266,7 @@ function CancelListing({ id, onDone }: { id: string; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   return (
     // 撤牌成功补 toast,与行情页撤单反馈对齐;触控目标移动端拉到 44px,桌面观感不变
-    <button disabled={busy} onClick={async () => { setBusy(true); try { await api(`/api/otc/${id}`, { method: "DELETE" }); toast("ok", tm.cancelled); onDone(); } catch (e) { toast("err", (e as Error).message); setBusy(false); } }}
-      className="text-xs text-muted hover:text-down disabled:opacity-40 min-h-11 sm:min-h-0 inline-flex items-center">{t.cancelListing}</button>
+    <button disabled={busy} onClick={async () => { setBusy(true); try { await api(`/api/otc/${id}`, { method: "DELETE" }); toast("ok", tm.cancelled); onDone(); } catch (e) { recheckLoginOn401(e); toast("err", (e as Error).message); setBusy(false); } }}
+      className="text-xs text-muted hover:text-danger disabled:opacity-40 min-h-11 sm:min-h-0 inline-flex items-center">{t.cancelListing}</button>
   );
 }

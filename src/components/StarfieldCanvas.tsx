@@ -5,8 +5,9 @@ import { useTheme } from "@/providers/ThemeProvider";
 import { COOL_RGB, WARM_RGB, fitField, paintField, type PaintStar, type Star } from "./starfield";
 
 // 深色模式的背景:carbadia.co 同款视差星空(数学在 starfield.ts)。
-// 一张铺满视口的画布,固定在内容之后、不可交互;只在 dark 挂载(儿童护眼模式用的是手绘夜空 StarrySky)。
-// 纪律与 useAsciiFrames 相同:标签页隐藏不画,reduce-motion 只画一张静帧。
+// 一张铺满视口的画布,固定在内容之后、不可交互;只在 dark 挂载。
+// 纪律与 useAsciiFrames 相同:标签页隐藏不画,reduce-motion 只画一张静帧;
+// 终端挂载时在 <html> 上写 data-starfield="static",走同一条单帧路径(画一帧就停 rAF),属性移除后恢复 30 帧。
 
 const FULL_TURN = 6.2832;
 const COOL = `rgb(${COOL_RGB})`;
@@ -24,6 +25,9 @@ function Sky() {
     if (!canvas || !ctx) return;
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const root = document.documentElement;
+    // 静帧:系统减弱动效,或终端要求星空静止
+    const isStill = () => reducedMotion.matches || root.dataset.starfield === "static";
     const field: Star[] = [];
     const view = { vw: 0, vh: 0 };
     let dpr = 0;
@@ -42,7 +46,7 @@ function Sky() {
     const draw = (time: number, dt: number) => {
       ctx.globalAlpha = 1;
       ctx.clearRect(0, 0, view.vw, view.vh);
-      paintField(field, view, time, dt, reducedMotion.matches, paintStar);
+      paintField(field, view, time, dt, isStill(), paintStar);
     };
 
     // 位图尺寸跟 CSS 盒子走;尺寸与像素比都没变就什么也不做
@@ -72,7 +76,7 @@ function Sky() {
     const syncPlayback = () => {
       window.cancelAnimationFrame(frameId);
       previousTime = undefined;
-      if (reducedMotion.matches) draw(0, 0);
+      if (isStill()) draw(0, 0);
       else if (!document.hidden) frameId = window.requestAnimationFrame(animate);
     };
 
@@ -83,9 +87,12 @@ function Sky() {
     resizeObserver.observe(canvas);
     reducedMotion.addEventListener("change", syncPlayback);
     document.addEventListener("visibilitychange", syncPlayback);
+    const attributes = new MutationObserver(syncPlayback);
+    attributes.observe(root, { attributes: true, attributeFilter: ["data-starfield"] });
     return () => {
       window.cancelAnimationFrame(frameId);
       resizeObserver.disconnect();
+      attributes.disconnect();
       reducedMotion.removeEventListener("change", syncPlayback);
       document.removeEventListener("visibilitychange", syncPlayback);
     };
@@ -96,6 +103,6 @@ function Sky() {
 }
 
 export function StarfieldCanvas() {
-  const { theme, kids } = useTheme();
-  return theme === "dark" && !kids ? <Sky /> : null;
+  const { theme } = useTheme();
+  return theme === "dark" ? <Sky /> : null;
 }

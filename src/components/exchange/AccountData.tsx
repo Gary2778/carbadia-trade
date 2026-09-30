@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useCallback, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/http/client";
 import { usePolling } from "@/hooks/usePolling";
+import { accountActions, useAccountStore } from "@/lib/market/account-store";
 import { ExchangeIcon } from "./ExchangeIcon";
 import { useExchangeText } from "./useExchange";
 export type Position = {
@@ -68,11 +69,13 @@ export function usePortfolio() {
   const [unauthorized, setUnauthorized] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const ticket = useRef(0);
+  // 会话在这页上失效(撤单等写操作回 401):除了本页改画登录入口,也让共享的账户 store 重新确认身份,Nav 同时变成未登录
   const expireSession = useCallback(() => {
     ticket.current += 1;
     setData(null);
     setUnauthorized(true);
     setLoaded(true);
+    void accountActions.refresh();
   }, []);
   const reload = useCallback(async () => {
     const request = ++ticket.current;
@@ -88,6 +91,8 @@ export function usePortfolio() {
         if (e instanceof ApiError && e.status === 401) {
           setData(null);
           setUnauthorized(true);
+          // 轮询发现会话已失效:Nav 还显示着名字与现金的话,让共享的账户 store 重新确认(已是未登录时不必再拉)
+          if (useAccountStore.getState().status === "ready") void accountActions.refresh();
         }
       }
       throw e;
@@ -127,7 +132,7 @@ export function DemoButton({
         <ExchangeIcon name="arrow" size={14} />
       </button>
       {error && (
-        <p role="alert" className="text-down text-xs mt-3 max-w-sm">
+        <p role="alert" className="text-danger text-xs mt-3 max-w-sm">
           {error}
         </p>
       )}

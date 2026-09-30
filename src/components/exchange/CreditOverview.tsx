@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useLang } from "@/i18n/LangProvider";
+import { useLang, useT } from "@/i18n/LangProvider";
 import { isChinese } from "@/i18n/config";
 import { tCountry, tProjectType, tRegistry } from "@/i18n/data";
 import { fmtMoney, fmtQty } from "@/lib/format";
@@ -16,9 +16,11 @@ type Asset = {
   vintage: number;
   country: string;
   registry: string;
-  description: string;
   lastPrice: number | null;
   isScenario: boolean;
+  /** Instrument 的同源元数据(/api/assets/[symbol] 的 asset);未知为 null,显示「未提供」,从不杜撰 */
+  methodology?: string | null;
+  verificationStatus?: string | null;
 };
 
 const DESCRIPTIONS: Record<string, { en: string; zh: string }> = {
@@ -59,7 +61,10 @@ export function CreditOverview({
 }) {
   const { lang } = useLang();
   const zh = isChinese(lang);
+  const tm = useT("terminal").meta;
+  // 方法学 / 核证状态读 Instrument(getCreditProfile 原样透传,不补不猜);核证状态只可能是 SIMULATED_UNVERIFIED 或 null
   const profile = getCreditProfile(asset);
+  const methodology = profile.methodology?.trim() ? profile.methodology : null;
   const description = DESCRIPTIONS[asset.symbol];
   const projectDescription = description
     ? zh
@@ -254,12 +259,16 @@ export function CreditOverview({
             />
             <Metadata
               label={zh ? "方法学与版本" : "Methodology and version"}
-              value={notProvided}
-              missing
+              value={methodology ?? notProvided}
+              missing={methodology === null}
             />
             <Metadata
               label={zh ? "查证机构与报告" : "Verifier and verification report"}
-              value={notProvided}
+              value={
+                profile.verification === "SIMULATED_UNVERIFIED"
+                  ? tm.simulatedUnverified
+                  : notProvided
+              }
               missing
             />
             <Metadata

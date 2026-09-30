@@ -56,8 +56,11 @@ const fieldClass =
   "min-w-0 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent focus:ring-2 focus:ring-accent/10";
 const buttonClass =
   "inline-flex items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs font-medium hover:border-accent/40 hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40";
+/** 交易终端的深链(= lib/market/navigation 的 terminalHref(symbol);这里不为一条路径把终端的导航模块带进首页包) */
+const terminalPath = (symbol: string) => `/trade/${encodeURIComponent(symbol)}`;
+// 情景标的只有终端能交易(旧标的页的 tab=trade 对它们也会跳到终端),行直接指向 /trade/<symbol>
 const instrumentHref = (asset: CarbonAsset) =>
-  `/market/${asset.symbol}${asset.isScenario ? "?tab=trade&mode=advanced" : ""}`;
+  asset.isScenario ? terminalPath(asset.symbol) : `/market/${asset.symbol}`;
 
 export function SpotTable({
   watchlistOnly = false,
@@ -66,6 +69,7 @@ export function SpotTable({
 }) {
   const t = useT("exchange");
   const tm = useT("market");
+  const tn = useT("nav");
   const c = useExchangeText();
   const { lang } = useLang();
   const router = useRouter();
@@ -349,7 +353,7 @@ export function SpotTable({
         <div className="flex flex-wrap items-center gap-3">
           {err && assets.length > 0 && (
             <div className="flex items-center gap-2 text-xs">
-              <span role="status" className="text-down">
+              <span role="status" className="text-danger">
                 {tm.refreshFailed}
               </span>
               <button
@@ -677,12 +681,14 @@ export function SpotTable({
         </div>
       )}
       {loading && assets.length === 0 ? (
-        <div className="p-8 text-center text-muted" role="status">
+        // 首页的加载态至少一屏高(与 page.tsx 的 Suspense 占位同理):页脚留在首屏之外,行情行到了也不推动视口里的内容(P1-25f);
+        // 关注列表可能只有几行,加载后变矮反而会把页脚拉进视口,不留
+        <div className={`p-8 text-center text-muted ${watchlistOnly ? "" : "min-h-svh"}`} role="status">
           {t.loading}
         </div>
       ) : err && assets.length === 0 ? (
         <div className="space-y-3 p-8 text-center text-sm">
-          <p role="alert" className="text-down">
+          <p role="alert" className="text-danger">
             {c("Market data could not be loaded.", "无法加载市场数据。")}
           </p>
           <p className="text-xs text-muted">
@@ -764,6 +770,9 @@ export function SpotTable({
                   {t.thBidAsk}
                 </th>
                 {sortableTh("volume24h", t.thVolume24h, "px-3 sm:px-5")}
+                <th scope="col" className="px-3 sm:px-5 py-3 hidden sm:table-cell">
+                  <span className="sr-only">{tn.terminal}</span>
+                </th>
                 {toolsOpen && (
                   <th scope="col" className="text-center font-medium px-3 py-3">
                     {c("Save / compare", "收藏／比较")}
@@ -827,6 +836,19 @@ export function SpotTable({
                           </span>
                         )}
                       </Link>
+                      {/* 手机(< sm)上右侧的终端列隐藏:非情景行在标的格里给一个紧凑入口(情景行的主链接本来就去终端),
+                          触控高度 min-h-touch;sm 起由终端列那枚按钮接手 */}
+                      {!asset.isScenario && (
+                        <Link
+                          href={terminalPath(asset.symbol)}
+                          prefetch={false}
+                          aria-label={`${tn.terminal} · ${asset.symbol}`}
+                          className="sm:hidden inline-flex min-h-touch items-center gap-1 text-xs font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        >
+                          {tn.terminal}
+                          <span aria-hidden="true">→</span>
+                        </Link>
+                      )}
                     </td>
                     <td className="px-3 py-3 hidden md:table-cell">
                       <span className="text-xs px-2 py-0.5 rounded bg-surface-2 border border-border">
@@ -890,6 +912,17 @@ export function SpotTable({
                     <td className="px-3 sm:px-5 py-3 text-end tnum text-muted">
                       {fmtQty(asset.volume24h)}
                     </td>
+                    {/* 每行直达交易终端(计划 §9.1 第 3 条的站内入口之一);不预取,点了才请求 */}
+                    <td className="px-3 sm:px-5 py-3 text-end hidden sm:table-cell">
+                      <Link
+                        href={terminalPath(asset.symbol)}
+                        prefetch={false}
+                        aria-label={`${tn.terminal} · ${asset.symbol}`}
+                        className="inline-flex items-center rounded-full border border-border px-2.5 py-1 text-xs font-medium text-muted hover:border-accent/40 hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      >
+                        {tn.terminal}
+                      </Link>
+                    </td>
                     {toolsOpen && (
                       <td className="px-3 py-3">
                         <div className="flex items-center justify-center gap-3">
@@ -898,7 +931,7 @@ export function SpotTable({
                             aria-label={`${watch.symbols.includes(asset.symbol) ? c("Unwatch", "取消关注") : c("Watch", "关注")} ${tName(asset.symbol, asset.name, lang)}`}
                             aria-pressed={watch.symbols.includes(asset.symbol)}
                             onClick={() => toggleWatch(asset.symbol)}
-                            className={`rounded p-1.5 hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent ${watch.symbols.includes(asset.symbol) ? "text-amber-600" : "text-muted"}`}
+                            className={`rounded p-1.5 hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent ${watch.symbols.includes(asset.symbol) ? "text-warning" : "text-muted"}`}
                           >
                             <ExchangeIcon name="star" size={16} />
                           </button>
@@ -931,7 +964,7 @@ export function SpotTable({
                   </motion.tr>
                   {toolsOpen && showCreditDetails && !asset.isScenario && (
                     <tr className="border-b border-border/50 bg-surface-2/50">
-                      <td colSpan={8} className="px-5 py-4">
+                      <td colSpan={9} className="px-5 py-4">
                         <CreditDetails asset={asset} />
                       </td>
                     </tr>

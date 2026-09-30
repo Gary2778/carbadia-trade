@@ -1,4 +1,9 @@
-/** Public demo-market metadata. None of these descriptors attest to verification. */
+import type { VerificationStatus } from "@/shared/types";
+
+/**
+ * Public demo-market metadata (= /api/assets 的行). None of these descriptors attest to verification.
+ * 无 description(计划 §9.1 第 16 条); projectId / methodology / verificationStatus 未知即 null, UI 显示「未提供」。
+ */
 export type CarbonAsset = {
   id: string;
   symbol: string;
@@ -8,8 +13,13 @@ export type CarbonAsset = {
   vintage: number;
   country: string;
   registry: string;
-  description: string;
   isScenario: boolean;
+  /** 模拟项目编号 SIM-PRJ-<STANDARD>-<TYPE>; 同项目多 vintage 靠它归组 */
+  projectId: string | null;
+  methodology: string | null;
+  verificationStatus: VerificationStatus | null;
+  /** 价格显示小数位 */
+  pricePrecision: number;
   lastPrice: number | null;
   bestBid: number | null;
   bestAsk: number | null;
@@ -30,14 +40,17 @@ export type CreditProfile = {
   registryUrl?: string;
   programUrl?: string;
   provenance: string;
-  methodology: null;
-  verification: null;
+  /** 由 Instrument 填充, 这里从不杜撰; null → 未提供 */
+  methodology: string | null;
+  verification: string | null;
 };
 export function getCreditProfile(asset: {
   symbol: string;
   projectType: string;
   standard?: string;
   registry?: string;
+  methodology?: string | null;
+  verificationStatus?: string | null;
 }): CreditProfile {
   const s = `${asset.symbol} ${asset.projectType}`.toLowerCase();
   let p: Pick<
@@ -59,7 +72,7 @@ export function getCreditProfile(asset: {
       approachZh: "移除",
       family: "Nature-based",
       familyZh: "自然型",
-      color: "#397d96",
+      color: "var(--series-2)",
       icon: "water",
     };
   else if (/cook|能效|cookstove/.test(s))
@@ -70,7 +83,7 @@ export function getCreditProfile(asset: {
       approachZh: "避免排放",
       family: "Technology-based",
       familyZh: "技术型",
-      color: "#b17b4d",
+      color: "var(--series-3)",
       icon: "flame",
     };
   else if (/meth|甲烷/.test(s))
@@ -81,7 +94,7 @@ export function getCreditProfile(asset: {
       approachZh: "避免排放",
       family: "Technology-based",
       familyZh: "技术型",
-      color: "#89709b",
+      color: "var(--series-4)",
       icon: "layers",
     };
   else if (/biochar|生物炭|dac|direct air/.test(s))
@@ -92,7 +105,7 @@ export function getCreditProfile(asset: {
       approachZh: "移除",
       family: "Technology-based",
       familyZh: "技术型",
-      color: "#636e9d",
+      color: "var(--series-4)",
       icon: "layers",
     };
   else if (/for|林业|林业|forest|afforestation/.test(s))
@@ -103,7 +116,7 @@ export function getCreditProfile(asset: {
       approachZh: "混合／依项目而定",
       family: "Nature-based",
       familyZh: "自然型",
-      color: "#488276",
+      color: "var(--series)",
       icon: "forest",
     };
   else if (/sol|wind|renew|可再生/.test(s))
@@ -114,7 +127,7 @@ export function getCreditProfile(asset: {
       approachZh: "避免排放",
       family: "Technology-based",
       familyZh: "技术型",
-      color: /wind/.test(s) ? "#6685ac" : "#b98b37",
+      color: /wind/.test(s) ? "var(--series-2)" : "var(--series-3)",
       icon: /wind/.test(s) ? "wind" : "sun",
     };
   else
@@ -125,7 +138,7 @@ export function getCreditProfile(asset: {
       approachZh: "未提供",
       family: "Not specified",
       familyZh: "未提供",
-      color: "#71828b",
+      color: "var(--series-4)",
       icon: "layers",
     };
   const urls: Record<string, string> = {
@@ -145,10 +158,11 @@ export function getCreditProfile(asset: {
         ? "https://verra.org/programs/verified-carbon-standard/"
         : urls[asset.standard ?? ""],
     provenance: "Demonstration asset; not linked to a registered project.",
-    methodology: null,
-    verification: null,
+    methodology: asset.methodology ?? null,
+    verification: asset.verificationStatus ?? null,
   };
 }
+/** 全部取自 URL 查询串, 所以是字符串; 价格上下限以美元计(与既有 maxPrice 一致), 内部换算成分比较 */
 export type CreditFilters = {
   search?: string;
   standard?: string;
@@ -157,10 +171,17 @@ export type CreditFilters = {
   category?: string;
   approach?: string;
   family?: string;
+  registry?: string;
+  projectId?: string;
   minSupply?: string;
+  /** 旧键, 与 priceMax 同义, 保留给既有 SpotTable 的 URL */
   maxPrice?: string;
+  priceMin?: string;
+  priceMax?: string;
   sort?: string;
 };
+// 美元字符串 → 整数分:先乘再四舍五入,否则 "4.35" * 100 = 434.99999999999994 会漏掉恰好等于边界的价格
+const dollarsToCents = (raw: string) => Math.round(Number(raw) * 100);
 export function filterCredits(
   assets: CarbonAsset[],
   f: CreditFilters,
@@ -190,9 +211,15 @@ export function filterCredits(
       (!f.category || p.category === f.category) &&
       (!f.approach || p.approach === f.approach) &&
       (!f.family || p.family === f.family) &&
+      (!f.registry || a.registry === f.registry) &&
+      (!f.projectId || a.projectId === f.projectId) &&
       (!f.minSupply || a.availableSupply >= Number(f.minSupply)) &&
       (!f.maxPrice ||
-        (a.lastPrice !== null && a.lastPrice <= Number(f.maxPrice) * 100))
+        (a.lastPrice !== null && a.lastPrice <= dollarsToCents(f.maxPrice))) &&
+      (!f.priceMax ||
+        (a.lastPrice !== null && a.lastPrice <= dollarsToCents(f.priceMax))) &&
+      (!f.priceMin ||
+        (a.lastPrice !== null && a.lastPrice >= dollarsToCents(f.priceMin)))
     );
   });
   return result.sort((a, b) => {

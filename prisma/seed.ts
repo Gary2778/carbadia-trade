@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { PrismaClient } from "../src/generated/prisma";
+import { INSTRUMENT_SEEDS } from "../src/lib/exchange/ensure-instruments";
 
 const prisma = new PrismaClient();
 
@@ -9,18 +10,17 @@ function hashPassword(password: string): string {
   return `${salt}:${derived}`;
 }
 
+/** 不可登录的哈希:与 src/lib/server/auth.ts 的 LOCKED_PASSWORD_PREFIX("!")同一约定 */
+function lockedHash(): string {
+  return "!" + crypto.randomBytes(32).toString("hex");
+}
+
 // 金额一律整数分; 数量为整数吨
 const HUMAN_CASH = 50_000_000; // ¥500,000
 const BOT_CASH = 5_000_000_000; // ¥50,000,000
 
-const ASSETS = [
-  { symbol: "VCS-FOR-2021", name: "云南森林经营碳汇项目", standard: "VCS", projectType: "林业碳汇", vintage: 2021, country: "中国", registry: "Verra", mid: 6800, desc: "通过可持续森林经营增加碳储量的核证减排量。" },
-  { symbol: "CCER-SOL-2023", name: "青海光伏发电项目", standard: "CCER", projectType: "可再生能源", vintage: 2023, country: "中国", registry: "国家温室气体自愿减排登记簿", mid: 8200, desc: "大型地面光伏电站替代化石能源发电。" },
-  { symbol: "GS-WIND-2022", name: "印度拉贾斯坦风电项目", standard: "GS", projectType: "可再生能源", vintage: 2022, country: "印度", registry: "Gold Standard", mid: 4500, desc: "陆上风电场并网发电减排。" },
-  { symbol: "GS-MANG-2022", name: "印尼红树林蓝碳修复", standard: "GS", projectType: "蓝碳", vintage: 2022, country: "印度尼西亚", registry: "Gold Standard", mid: 9500, desc: "红树林生态修复带来的高质量蓝碳信用。" },
-  { symbol: "VCS-COOK-2020", name: "肯尼亚高效炉灶项目", standard: "VCS", projectType: "能效", vintage: 2020, country: "肯尼亚", registry: "Verra", mid: 1200, desc: "推广高效生物质炉灶减少薪柴消耗。" },
-  { symbol: "CDM-METH-2019", name: "巴西垃圾填埋气回收", standard: "CDM", projectType: "甲烷回收", vintage: 2019, country: "巴西", registry: "UNFCCC", mid: 900, desc: "填埋场甲烷收集发电避免温室气体排放。" },
-];
+// 标的与启动时的 ensureInstruments 同源(12 条: 6 既有 + 6 同项目多 vintage), 不在这里另维护一份
+const ASSETS = INSTRUMENT_SEEDS;
 
 async function main() {
   console.log("清空旧数据…");
@@ -49,10 +49,12 @@ async function main() {
   }
 
   console.log("创建做市机器人…");
+  // 机器人从不登录:每个一份不可用的哈希(`!` + 随机十六进制,verifyPassword 对 `!` 开头恒为 false),
+  // 与 bot.ts 首轮 tick 的锁定写法一致 —— 不再给它们公开的演示密码(BOT_DISABLED=1 的本地 / 新库也登不进)
   const bots = await Promise.all(
     ["mm1", "mm2", "mm3"].map((n) =>
       prisma.user.create({
-        data: { email: `${n}@carbadia.bot`, name: `做市商 ${n.toUpperCase()}`, passwordHash: pw, isBot: true, cashBalance: BigInt(BOT_CASH) },
+        data: { email: `${n}@carbadia.bot`, name: `做市商 ${n.toUpperCase()}`, passwordHash: lockedHash(), isBot: true, cashBalance: BigInt(BOT_CASH) },
       })
     )
   );
@@ -62,13 +64,8 @@ async function main() {
 
   console.log("创建标的…");
   const assets = await Promise.all(
-    ASSETS.map((a) =>
-      prisma.asset.create({
-        data: {
-          symbol: a.symbol, name: a.name, standard: a.standard, projectType: a.projectType,
-          vintage: a.vintage, country: a.country, registry: a.registry, description: a.desc, lastPrice: a.mid, anchorPrice: a.mid,
-        },
-      })
+    ASSETS.map(({ mid, ...fields }) =>
+      prisma.asset.create({ data: { ...fields, lastPrice: mid, anchorPrice: mid } })
     )
   );
 

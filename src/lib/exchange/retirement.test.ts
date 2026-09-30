@@ -147,6 +147,64 @@ describe("simulated retirement accounting", () => {
     expect(await retirement.getRetirement(otherId, first.retirement.id)).toBeNull();
   });
 
+  describe("cross-bundle Prisma errors are recognised by code, not by class", () => {
+    // 模拟另一份 Prisma 运行时抛出的错误: 同名同 code, 但对本模块图的类 instanceof 为 false
+    //(生产里 instrumentation 与 route handler 各带一份运行时, globalThis.prisma 来自前者)
+    class ForeignKnownRequestError extends Error {
+      code: string;
+      constructor(code: string) {
+        super(`foreign ${code}`);
+        this.name = "PrismaClientKnownRequestError";
+        this.code = code;
+      }
+    }
+
+    it("is a genuine foreign instance for the purpose of this test", async () => {
+      const { Prisma } = await import("../../generated/prisma");
+      expect(new ForeignKnownRequestError("P2034")).not.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    });
+
+    it.each(["P1008", "P2028", "P2034"])("maps a foreign %s to a 503 RetirementError without writing", async (code) => {
+      const txSpy = vi.spyOn(prisma, "$transaction").mockImplementationOnce((() => Promise.reject(new ForeignKnownRequestError(code))) as never);
+      const error = await retirement.retireCredits(ownerId, input()).catch((e) => e);
+      txSpy.mockRestore();
+      expect(error).toBeInstanceOf(retirement.RetirementError);
+      expect(error.status).toBe(503);
+      expect(error.message).toMatch(/busy/i);
+      expect(await prisma.retirement.count()).toBe(0);
+    });
+
+    it("replays the existing receipt on a foreign P2002 and rejects a changed payload on that key", async () => {
+      const first = await retirement.retireCredits(ownerId, input());
+      const txSpy = vi.spyOn(prisma, "$transaction");
+      txSpy.mockImplementationOnce((() => Promise.reject(new ForeignKnownRequestError("P2002"))) as never);
+      const replay = await retirement.retireCredits(ownerId, input());
+      expect(txSpy).toHaveBeenCalledTimes(1);
+      expect(replay).toMatchObject({ replayed: true, retirement: { id: first.retirement.id } });
+      txSpy.mockImplementationOnce((() => Promise.reject(new ForeignKnownRequestError("P2002"))) as never);
+      const conflict = await retirement.retireCredits(ownerId, input({ quantity: 21 })).catch((e) => e);
+      expect(conflict).toBeInstanceOf(retirement.RetirementError);
+      expect(conflict.status).toBe(409);
+      // P2002 但按幂等键重读不到 → 让客户端原样重发(503), 不是 500
+      txSpy.mockImplementationOnce((() => Promise.reject(new ForeignKnownRequestError("P2002"))) as never);
+      const orphan = await retirement.retireCredits(ownerId, input({ idempotencyKey: "request-00000009" })).catch((e) => e);
+      txSpy.mockRestore();
+      expect(orphan).toBeInstanceOf(retirement.RetirementError);
+      expect(orphan.status).toBe(503);
+      expect(await prisma.retirement.count()).toBe(1);
+    });
+
+    it("rethrows errors without a contention code unchanged", async () => {
+      const plain = new Error("disk full");
+      const txSpy = vi.spyOn(prisma, "$transaction").mockImplementationOnce((() => Promise.reject(plain)) as never);
+      await expect(retirement.retireCredits(ownerId, input())).rejects.toBe(plain);
+      const other = new ForeignKnownRequestError("P2025");
+      txSpy.mockImplementationOnce((() => Promise.reject(other)) as never);
+      await expect(retirement.retireCredits(ownerId, input())).rejects.toBe(other);
+      txSpy.mockRestore();
+    });
+  });
+
   it("rolls back the holdings change if the audit ledger cannot be appended", async () => {
     await prisma.$executeRawUnsafe("CREATE TRIGGER fail_retirement_ledger BEFORE INSERT ON LedgerEntry WHEN NEW.reason = 'SIMULATED_RETIREMENT' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END");
     try {

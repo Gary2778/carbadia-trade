@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/http/client";
+import { accountActions } from "@/lib/market/account-store";
 import { fmtMoney, fmtQty } from "@/lib/format";
 import { useLang } from "@/i18n/LangProvider";
 import { isChinese } from "@/i18n/config";
@@ -147,6 +148,8 @@ export function SimpleTrade({
       setReview(null);
       setQuantity("");
       void onDone().catch(() => {});
+      // 成交改了现金:刷新共享的账户 store(Nav 的现金),不等下一次导航
+      void accountActions.refresh();
     } catch (e) {
       const ambiguous =
         !(e instanceof ApiError) ||
@@ -319,7 +322,7 @@ export function SimpleTrade({
                 ref={errorRef}
                 tabIndex={-1}
                 role="alert"
-                className="rounded-xl border border-down/25 bg-down/5 p-3 text-sm text-down"
+                className="rounded-xl border border-danger/25 bg-danger-soft p-3 text-sm text-danger"
               >
                 {error}
               </p>
@@ -435,7 +438,7 @@ export function SimpleTrade({
               <p
                 id="simple-quantity-error"
                 role="status"
-                className="mt-1 text-xs text-down"
+                className="mt-1 text-xs text-danger"
               >
                 {quantity !== "" && !validQty
                   ? zh
@@ -486,7 +489,7 @@ export function SimpleTrade({
               </p>
             )}
             {cannotAfford && (
-              <p className="text-sm text-down">
+              <p className="text-sm text-danger">
                 {zh
                   ? "目前模拟资金不足以按显示价格买入 1 单位。"
                   : "Your demo cash cannot buy one whole unit at the displayed prices."}
@@ -576,7 +579,7 @@ export function SimpleTrade({
           {selectedEstimate && selectedEstimate.unfilledQuantity > 0 && (
             <p
               role="status"
-              className="mt-4 rounded-xl border border-amber-500/25 bg-amber-500/5 p-3 text-xs leading-5 text-muted"
+              className="mt-4 rounded-xl border border-warning/25 bg-warning-soft p-3 text-xs leading-5 text-muted"
             >
               {zh
                 ? `目前估算只能成交 ${fmtQty(selectedEstimate.quantity)} / ${fmtQty(selectedQty)} 单位。流动性或可用资金不足；结果可能是部分成交。`

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { Prisma, type Retirement } from "../../generated/prisma";
+import type { Retirement } from "../../generated/prisma";
 import { prisma } from "../server/db";
+import { isContentionError, prismaErrorCode } from "./matching";
 
 export const retirementInputSchema = z.object({
   assetId: z.string().trim().min(1).max(100),
@@ -143,12 +144,15 @@ export async function retireCredits(userId: string, rawInput: unknown) {
       return { retirement: record, replayed: false };
     });
   } catch (error) {
+    // 只认 code 字段不认类:生产下 globalThis.prisma 来自 instrumentation 那份运行时,这里 instanceof 本 bundle 的
+    // Prisma.PrismaClientKnownRequestError 恒为 false,P2002 重放与 P1008/P2028/P2034 → 503 都会漏成 500(见 matching.ts prismaErrorCode)。
     // Concurrent duplicate submissions are resolved by the database unique key.
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+    if (prismaErrorCode(error) === "P2002") {
       const existing = await prisma.retirement.findUnique({ where: { userId_idempotencyKey: key } });
       if (existing) return replay(existing);
     }
-    if (error instanceof Prisma.PrismaClientKnownRequestError && ["P1008", "P2028", "P2034"].includes(error.code)) {
+    // P2002 但重读不到(另一次提交已回滚 / reference 撞了 uuid)同样让客户端原样重发,而不是 500
+    if (isContentionError(error)) {
       throw new RetirementError("The account is busy. Retry this same request to check whether it completed.", 503);
     }
     throw error;

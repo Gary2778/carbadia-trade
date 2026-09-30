@@ -9,7 +9,7 @@ Carbadia Trade（cbda.trade）是 Carbadia 的碳信用交易模拟盘：真实�
 - **模拟注销与私有凭证**：按账户记录模拟注销，幂等请求防重复扣减，不产生登记簿注销或真实减排声明。
 - **影子价格实验**：情景标的价格纯由本盘交易形成；每日快照与真实收盘的内部对照只供研究，任何接口都不返回真实价格。
 - **两种界面语言**：English、简体中文。
-- **三种外观**：浅色、深色（星空 + 液态玻璃）、儿童护眼。
+- **两种外观**：浅色、深色（星空 + 液态玻璃）。
 
 > ⚠️ 仅供学习演示，非真实交易、不涉及真实资金或碳资产。
 
@@ -27,10 +27,10 @@ npm install
 cp .env.example .env    # 本地开发环境变量(SQLite 路径;dev 有内置 SESSION_SECRET 回退)
 npm run db:migrate      # 建库 + 生成 Prisma Client(首次)
 npm run db:seed         # 写入演示用户/标的/订单簿/OTC 挂牌
-npm run dev             # http://localhost:3000
+npm run dev             # http://localhost:3000(node server.mjs:Next + WebSocket /ws)
 ```
 
-行情表初始有 6 个标的；另外 2 个情景标的由影子价格同步首次运行时创建，`SYNC_DISABLED=1` 时不会出现，属正常。
+行情表初始有 12 个标的；另外 2 个情景标的由影子价格同步首次运行时创建（合计 14 个），`SYNC_DISABLED=1` 时不会出现，属正常。
 
 ### 演示账号（密码均为 `password123`）
 
@@ -46,28 +46,38 @@ npm run dev             # http://localhost:3000
 ## 目录结构
 
 ```
+server.mjs                   自定义 server:Next 页面、REST 与 WebSocket /ws 同一端口
+server/                      纯 JS 的 server 模块:事件总线、WebSocket hub、会话签名、客户端 IP、生命周期
 src/
   app/
     page.tsx                 行情(现货市场)
-    market/[symbol]/         标的页:订单簿、K 线、深度、交易
+    trade/[symbol]/          交易终端:标的列表、K 线、盘口与成交、下单、委托 / 成交 / 持仓
+    market/[symbol]/         标的页:总览与简易交易(高级交易进终端)
     otc/ portfolio/ dashboard/ orders/ transactions/ retirement/ account/
     projects/ watchlist/ research/ learn/
     login/ register/ feedback/ terms/ privacy/
     api/                     Route Handlers(认证、行情、交易、持仓、注销、反馈、埋点、健康检查)
+    api/market/ api/account/ 终端的公开行情快照与私有账户接口
     api/real/[...path]/      登记簿数据代理(→ carbadia.io/api/real/*)
   components/
+    terminal/                交易终端的面板、快捷键帮助与布局
+    ui/                      全站共用的骨架、空态、错误态、对话框与虚拟列表
     exchange/                交易页组件及专属界面逻辑
     charts/ anim/            图表与动效
     Nav, Footer, 主题与语言切换、星空与液态玻璃
   hooks/ providers/ i18n/    hooks、主题状态、语言(en + zh-CN)
+  shared/                    前后端共用的类型、WebSocket 协议与纯函数(不依赖 React / Next / Prisma)
   lib/
+    market/                  终端的行情与账户 store、WebSocket / 轮询传输、选择器、下单草稿、快捷键
     exchange/                撮合、OTC、做市、账本、持仓分析与模拟注销
-    server/                  数据库、认证、限流与 API 响应处理
+    server/                  数据库、认证、限流、API 响应处理、行情发布与快照
     real-sync/               影子价格采集
     registry-proxy.ts        代理路由的白名单与上游地址
     http/client.ts format.ts redirects.ts
   instrumentation.ts         做市机器人与影子价格同步入口
 prisma/                      数据模型、迁移、种子
+scripts/perf/                性能度量脚本(chunk 预算、Lighthouse、WebSocket 压测)
+scripts/smoke-ws.mjs         /ws 冒烟
 infra/cloudflare-proxy/      cbda.trade 反代 Worker(内部)
 scripts/prod/                生产检查与诊断脚本(内部)
 docs/                        设计、计划、发布记录(内部)
@@ -97,6 +107,18 @@ docs/                        设计、计划、发布记录(内部)
 | `RETENTION_DAYS` | 否 | 机器人历史数据保留天数,默认 `7`;任何真人参与的成交/订单永久保留 |
 | `PROXY_SECRET` | 否 | 反代密钥(生产建议设)。Cloudflare Worker 转发时注入请求头 `x-proxy-secret=<此值>`;应用只在该头匹配时才信任 `cf-connecting-ip` 做限流分桶 |
 | `REGISTRY_UPSTREAM` | 否 | 登记簿数据上游,默认 `https://carbadia.io` |
+| `BOT_TICK_MS` | 否 | 做市机器人节奏(毫秒),默认 `2500`;本地压盘口可设 `500`,生产不改 |
+| `START_MODE` | 否 | 容器启动方式:`custom`(默认,`node server.mjs`,Next + WebSocket `/ws` 同端口)或 `next`(回滚到 `next start`,无 `/ws`)。`docker-entrypoint.sh` 据它选启动命令;终端页在服务端也读它,为 `next` 时页面首帧就轮询、不试 `/ws` |
+| `WS_DISABLED` | 否 | 设为 `1` 时 `server.mjs` 不挂 `/ws`,`/api/health` 的 `ws.enabled` 为 `false` |
+| `WS_MAX_CONNECTIONS` | 否 | `/ws` 总连接上限,默认 `500`;超出的握手回 HTTP 503 + `Retry-After: 30` |
+| `WS_MAX_PER_IP` | 否 | `/ws` 每 IP 连接上限,默认 `8`;IP 经 `PROXY_SECRET` 信任链解析;本地开发(没有 `PROXY_SECRET`、没有 IP 头)不按 IP 限、只受总上限约束 |
+| `WS_MAX_UNTRUSTED` | 否 | 直连源站(`x-proxy-secret` 不匹配)的 `/ws` 连接共用一个桶,默认上限 `16` |
+| `WS_ALLOWED_ORIGINS` | 否 | `/ws` 放行的 `Origin`,逗号分隔,`:*` 结尾匹配任意端口;默认 `https://cbda.trade`,非生产环境额外放行 `http://localhost:*`。本地用生产模式在浏览器里看终端时要设成 `http://localhost:<端口>`,否则 `/ws` 被拒、终端降级轮询 |
+| `MAX_RSS_MB` | 否 | RSS 告警阈值(MB),默认 `900`;每 30 s 采样,超过只记告警不退出 |
+| `NEXT_PUBLIC_MARKET_TRANSPORT` | 否 | 构建期。终端行情传输:`ws`(默认)或 `poll`(强制轮询 `/api/market/*`) |
+| `NEXT_PUBLIC_WS_URL` | 否 | 构建期。WebSocket 地址,默认同源 `/ws`(https 页面自动用 wss) |
+
+`DATABASE_URL` 的相对路径以 `prisma/` 目录为基准:`file:./dev.db` 指向 `prisma/dev.db`,写成 `file:./prisma/dev.db` 会落到不存在的 `prisma/prisma/dev.db`。自定义 server 相关的变量全部有代码内默认,生产环境不需要新增;回滚只需把 `START_MODE` 设为 `next` 并重新部署。
 
 ## 常用脚本
 
@@ -108,11 +130,18 @@ RUST_LOG=info npm test
 npm run lint
 BOT_DISABLED=1 SYNC_DISABLED=1 npm run build
 npm run test:worker   # Cloudflare 反代 Worker 的 node:test
+npm run dev           # node server.mjs:Next + WebSocket /ws 同端口(读 PORT,也接受 -p / --port)
+npm run dev:plain     # next dev 逃生口:没有 /ws,终端自动降级轮询,用来排查自定义 server 与 HMR 的冲突
+npm run start         # 生产模式的 server.mjs(先 npm run build);npm run start:plain = next start
+npm run smoke:ws -- ws://localhost:3000/ws VCS-FOR-2021   # /ws 冒烟:10 s 内收到 hello、subscribed 与一帧 book 即 exit 0
+npm run perf:chunks  # 首屏 JS 体积门禁(先 npm run build):各路由 gzip 预算、库检测与阳性对照,超标 exit 1;--json 输出明细
+npm run perf:lh -- http://localhost:3000       # Lighthouse:终端页与首页各跑移动 3 次 + 桌面 3 次,取中位数(npx lighthouse@12,需本机 Chrome)
+npm run perf:ws-flood -- --url ws://localhost:3000/ws --clients 300 --seconds 60   # /ws 压测
 ```
 
 ## 运行与发布
 
-Railway 使用 Dockerfile 构建，并在构建时执行测试与 ESLint。容器启动时校验环境变量、应用 Prisma 迁移、重建查询统计，然后启动 Next.js；生产 SQLite 必须挂载在 `/data` 持久化卷上。基础设施定义在内部目录 `.railway/railway.ts`（`railway config plan` / `apply`），反代 Worker 在内部目录 `infra/cloudflare-proxy/`。
+Railway 使用 Dockerfile 构建，并在构建时执行测试与 ESLint。容器启动时校验环境变量、应用 Prisma 迁移、重建查询统计，然后启动 `node server.mjs`（Next 页面、REST 与 WebSocket `/ws` 同一端口；`START_MODE=next` 时退回 `next start`，无 `/ws`，终端自动降级轮询）；生产 SQLite 必须挂载在 `/data` 持久化卷上。`GET /api/health` 返回 `{ db, bot, startMode, ws }`，其中 `ws` 是 hub 的连接 / 订阅 / 帧数 / 背压统计（`WS_DISABLED=1` 时 `enabled: false`）。基础设施定义在内部目录 `.railway/railway.ts`（`railway config plan` / `apply`），反代 Worker 在内部目录 `infra/cloudflare-proxy/`。
 
 ## 与 carbadia.io 的关系
 

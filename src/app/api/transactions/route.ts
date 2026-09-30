@@ -32,6 +32,9 @@ function activity(entry: { account: string; reason: string; delta: bigint }) {
     case "ORDER_UNLOCK":
     case "OTC_UNLOCK":
       return { type: "RELEASE", label: credits ? "Credits released" : "Demo funds released" };
+    // 自成交防护撤掉本人挂单时的解冻(计划 §9.1 第 41 条):同属 RELEASE,标签点明原因
+    case "SELF_TRADE_UNLOCK":
+      return { type: "RELEASE", label: credits ? "Credits released (self-trade prevention)" : "Demo funds released (self-trade prevention)" };
     case "PRICE_IMPROVE_REFUND":
       return { type: "REFUND", label: "Price improvement refund" };
     case "GRANT":

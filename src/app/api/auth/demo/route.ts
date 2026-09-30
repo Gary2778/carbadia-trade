@@ -2,13 +2,14 @@ import { randomBytes } from "node:crypto";
 import { prisma } from "@/lib/server/db";
 import { createSession, hashPassword } from "@/lib/server/auth";
 import { ok, fail, handle } from "@/lib/server/api";
-import { clientIp, rateLimit } from "@/lib/server/rate-limit";
+import { clientIp, rateLimit, retryAfterSeconds } from "@/lib/server/rate-limit";
 
 // 一键演示账号:独立沙箱访客,避免公开密码 + 多访客共享同一账号互相踩仓位
 export async function POST(req: Request) {
   try {
-    if (!rateLimit(`demo:${clientIp(req)}`, 3, 3_600_000)) {
-      return fail("Too many requests, please retry later", 429);
+    const key = `demo:${clientIp(req)}`;
+    if (!rateLimit(key, 3, 3_600_000)) {
+      return fail("Too many requests, please retry later", 429, { "Retry-After": String(retryAfterSeconds(key, 3_600_000)) });
     }
     const tag = randomBytes(4).toString("hex");
     const user = await prisma.$transaction(async (tx) => {

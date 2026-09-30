@@ -221,6 +221,8 @@ function Refraction() {
     );
 
     function add(el: HTMLElement) {
+      // 终端(TerminalShell 根节点 data-glass="off")退出玻璃:整棵子树不折射;SELECTOR 里的 [data-glass] 会选中它自己,closest 含自身
+      if (el.closest('[data-glass="off"]')) return;
       if (glasses.has(el) || el.parentElement?.closest(NESTED_IN)) return;
       const filter = document.createElementNS(SVG_NS, "filter");
       filter.id = `liquid-glass-${++seq}`;
@@ -270,6 +272,6 @@ function Refraction() {
 }
 
 export function LiquidGlassRefraction() {
-  const { theme, kids } = useTheme();
-  return theme === "dark" && !kids ? <Refraction /> : null;
+  const { theme } = useTheme();
+  return theme === "dark" ? <Refraction /> : null;
 }

@@ -3,7 +3,7 @@ import { prisma } from "@/lib/server/db";
 import { requireUser } from "@/lib/server/auth";
 import { createListing } from "@/lib/exchange/otc";
 import { ok, fail, handle, parseBody } from "@/lib/server/api";
-import { rateLimit, clientIp } from "@/lib/server/rate-limit";
+import { rateLimit, clientIp, retryAfterSeconds } from "@/lib/server/rate-limit";
 import { MAX_PRICE_CENTS } from "@/lib/exchange/limits";
 
 export async function GET() {
@@ -31,7 +31,8 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
-    if (!rateLimit(`otc:${clientIp(req)}`, 30, 60_000)) return fail("Too many requests, please retry later", 429);
+    const key = `otc:${clientIp(req)}`;
+    if (!rateLimit(key, 30, 60_000)) return fail("Too many requests, please retry later", 429, { "Retry-After": String(retryAfterSeconds(key, 60_000)) });
     const user = await requireUser();
     const body = await parseBody(req, schema);
     const listing = await createListing({ sellerId: user.id, ...body });

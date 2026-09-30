@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/server/db";
 import { ok, fail, handle, parseBody } from "@/lib/server/api";
-import { clientIp, rateLimit } from "@/lib/server/rate-limit";
+import { clientIp, rateLimit, retryAfterSeconds } from "@/lib/server/rate-limit";
 
 const schema = z.object({
   message: z.string().min(1).max(2000),
@@ -10,7 +10,8 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
-    if (!rateLimit(`feedback:${clientIp(req)}`, 5, 3_600_000)) return fail("Too many requests, please retry later", 429);
+    const key = `feedback:${clientIp(req)}`;
+    if (!rateLimit(key, 5, 3_600_000)) return fail("Too many requests, please retry later", 429, { "Retry-After": String(retryAfterSeconds(key, 3_600_000)) });
     const { message, contact } = await parseBody(req, schema);
     await prisma.feedback.create({ data: { message, contact } });
     return ok(true);

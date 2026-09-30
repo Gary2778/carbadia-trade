@@ -1,4 +1,5 @@
 import { prisma } from "../server/db";
+import { publishLastPrice } from "../server/market-publisher";
 import { MAX_NOTIONAL_CENTS, MAX_PRICE_CENTS } from "./limits";
 import { writeLedger } from "./ledger";
 
@@ -76,13 +77,13 @@ export async function cancelListing(sellerId: string, listingId: string) {
   });
 }
 
-/** 购买 OTC 挂牌(可部分成交) */
+/** 购买 OTC 挂牌(可部分成交)。事务提交后把成交价交给发布器(ticker 最后价 + 双方账户事件),发布不 await、失败的事务永不进总线 */
 export async function buyListing(buyerId: string, listingId: string, qty: number) {
   const quantity = Math.trunc(qty);
   if (quantity <= 0) throw new OtcError("Purchase quantity must be a positive integer");
 
-  return prisma.$transaction(async (tx) => {
-    const listing = await tx.otcListing.findUnique({ where: { id: listingId } });
+  const { deal, published } = await prisma.$transaction(async (tx) => {
+    const listing = await tx.otcListing.findUnique({ where: { id: listingId }, include: { asset: { select: { symbol: true } } } });
     if (!listing) throw new OtcError("Listing not found");
     if (listing.status !== "ACTIVE") throw new OtcError("Listing is not available");
     if (listing.sellerId === buyerId) throw new OtcError("You cannot buy your own listing");
@@ -133,6 +134,11 @@ export async function buyListing(buyerId: string, listingId: string, qty: number
       { userId: buyerId, account: "HOLDING", assetId: listing.assetId, delta: quantity, reason: "OTC_SETTLE", refType: "DEAL", refId: deal.id },
     ]);
 
-    return deal;
+    return {
+      deal,
+      published: { assetId: listing.assetId, symbol: listing.asset.symbol, lastPrice: listing.pricePerUnit, buyerId, sellerId: listing.sellerId },
+    };
   });
+  publishLastPrice(published);
+  return deal;
 }

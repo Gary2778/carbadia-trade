@@ -9,6 +9,7 @@ import { NumberTicker } from "@/components/anim/NumberTicker";
 import { Reveal } from "@/components/anim/Reveal";
 import { useToast } from "@/components/anim/Toast";
 import { getCreditProfile } from "@/lib/exchange/carbon";
+import { accountActions } from "@/lib/market/account-store";
 import { useExchangeText, useMarket, useWatchlist } from "./useExchange";
 import { ExchangeIcon } from "./ExchangeIcon";
 import { Stat } from "./MarketPlace";
@@ -559,6 +560,8 @@ function CancelPositionAction({
     try {
       await api(url, { method: "DELETE" });
       setCompleted(true);
+      // 撤单 / 撤牌释放了冻结的现金:刷新共享的账户 store(Nav 的现金)
+      void accountActions.refresh();
       toast("ok", t.cancelled);
       // A failed refresh must not overwrite a confirmed cancellation receipt.
       await onDone().catch(() => {});
@@ -577,7 +580,7 @@ function CancelPositionAction({
       onClick={cancel}
       disabled={busy || completed}
       aria-label={`${label}: ${recordName}`}
-      className="-my-2 inline-flex min-h-11 min-w-11 items-center justify-center text-xs text-muted hover:text-down disabled:opacity-40 sm:my-0 sm:min-h-0 sm:min-w-0"
+      className="-my-2 inline-flex min-h-11 min-w-11 items-center justify-center text-xs text-muted hover:text-danger disabled:opacity-40 sm:my-0 sm:min-h-0 sm:min-w-0"
     >
       {completed ? t.cancelled : busy ? "…" : label}
     </button>

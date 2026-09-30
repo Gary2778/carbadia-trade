@@ -4,6 +4,7 @@ import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/http/client";
+import { accountActions } from "@/lib/market/account-store";
 import { safeReturnTo } from "@/lib/redirects";
 import { useT } from "@/i18n/LangProvider";
 
@@ -31,6 +32,9 @@ function LoginForm() {
     setBusy(true); setErr("");
     try {
       await api("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+      // 跳转前刷新共享的账户 store:Nav 与终端立即看到新身份与余额(不抛错;身份变化时会请求 WS 重连)。
+      // 最多等 AUTH_NAVIGATE_WAIT_MS:请求挂住时照样跳转,hydrate 在后台继续,失败由 Nav 的自愈重试补上
+      await accountActions.hydrateForNavigation();
       router.push(returnTo);
       router.refresh();
     } catch (e) {
@@ -43,6 +47,9 @@ function LoginForm() {
     setDemoBusy(true); setErr("");
     try {
       await api("/api/auth/demo", { method: "POST" });
+      // 跳转前刷新共享的账户 store:Nav 与终端立即看到新身份与余额(不抛错;身份变化时会请求 WS 重连)。
+      // 最多等 AUTH_NAVIGATE_WAIT_MS:请求挂住时照样跳转,hydrate 在后台继续,失败由 Nav 的自愈重试补上
+      await accountActions.hydrateForNavigation();
       router.push(returnTo);
       router.refresh();
     } catch (e) {
@@ -59,7 +66,7 @@ function LoginForm() {
         <form onSubmit={submit} className="space-y-3">
           <Input label={t.email} type="email" value={email} onChange={setEmail} placeholder="you@example.com" />
           <Input label={t.password} type="password" value={password} onChange={setPassword} placeholder="••••••" />
-          {err && <div className="text-down text-xs">{err}</div>}
+          {err && <div className="text-danger text-xs">{err}</div>}
           <button disabled={busy} className="w-full py-2.5 rounded-full bg-accent text-background font-medium hover:bg-accent-strong transition-colors disabled:opacity-40">
             {busy ? t.loggingIn : t.login}
           </button>

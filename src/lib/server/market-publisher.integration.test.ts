@@ -1,0 +1,1224 @@
+// 发布器对真实 SQLite(临时库 + migrate deploy)的集成测试(计划 §3.2、§3.4 两级门控):
+// vi.mock 掉 db 指向临时库;总线用 server/bus.mjs 的 createBus() 挂在 globalThis 上,测试自己当订阅者;presence 直接写 globalThis.__carbadiaPresence。
+// 断言:穿价成交 → 立即 trades(takerSide = 下单方)、50 ms 后 book(delta 只含变化档)、6 条 candle、ticker;同一去抖窗口内两次标脏只读一次盘口;
+// 对 book:SYM 无兴趣 → getOrderBook 零调用、兴趣恢复后先发整份快照;无订阅者 → 零派生、零查询;presence 不含用户 → 无 account 事件,
+// 含时 order / fill / balance / position 各一;撤单、重放、OTC buyListing → ticker 与标的列表缓存作废、订阅者抛错不影响后续、
+// ticker 250 ms 节流、account 快照钩子(一个事务读完)。
+// 每个用例一个新标的与两个新用户(freshMarket),盘口在 beforeEach 里不经发布器铺好:用例之间不共享盘口、成交与持仓,单独跑某一个(-t)也成立。
+//
+// 另外:两次读盘口乱序返回时旧的那份丢掉;K 线稳态折桶(不再查库、跨桶先发上一根的最终状态)与两个 bundle 乱序时的水位;
+// ticker 兴趣中断期间丢掉 24 h 统计;订单行按提交顺序领票(跨 bundle 乱序时旧行不发);机器人账户不发 account 事件;
+// 每用户票号表随用户离线回收。
+import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { createBus } from "../../../server/bus.mjs";
+import type { BusMessage, Presence } from "@/shared/bus";
+import { INTERVAL_MS } from "@/shared/candle-live";
+import { CANDLE_INTERVALS } from "@/shared/constants";
+import type { CandleBar, CandleInterval } from "@/shared/types";
+import type { Topic } from "@/shared/ws-protocol";
+
+const database = vi.hoisted(() => ({ directory: "", path: "", client: null as unknown }));
+const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+
+vi.mock("./db", async () => {
+  const { PrismaClient } = await import("../../generated/prisma");
+  // 与生产的 db.ts 一样整个进程一份(生产挂在 globalThis.prisma 上):模拟第二个 bundle 而重新求值本模块时,拿到的还是这一个
+  database.client ??= new PrismaClient({ datasourceUrl: `file:${database.path}`, log: [{ emit: "event", level: "query" }] });
+  return { prisma: database.client };
+});
+
+type Db = (typeof import("./db"))["prisma"];
+type Matching = typeof import("../exchange/matching");
+type Otc = typeof import("../exchange/otc");
+type Publisher = typeof import("./market-publisher");
+type Snapshots = typeof import("./market-snapshots");
+type Stats = typeof import("../exchange/stats24h");
+
+let prisma: Db;
+let matching: Matching;
+let otc: Otc;
+let publisher: Publisher;
+let snapshots: Snapshots;
+let getOrderBook: MockInstance<Matching["getOrderBook"]>;
+let stats24h: MockInstance<Stats["stats24h"]>;
+let realStats24h: Stats["stats24h"];
+/** 未打桩的 getOrderBook(乱序读取的用例要在桩里调真的那个) */
+let realGetOrderBook: Matching["getOrderBook"];
+/** 发布器用的那份 market-snapshots(K 线用例 spy 它的 getBars;在 beforeAll 里取,原因同 stats24h) */
+let barsSource: typeof import("./market-snapshots");
+let bus: ReturnType<typeof createBus>;
+let queries = 0;
+/** 最近的 SQL(只在需要看语句的用例里清空再读) */
+const sql: string[] = [];
+
+// 当前用例的标的与用户(freshMarket 每个用例重建)
+let run = 0;
+let symbol: string;
+let assetId: string;
+let alice: string;
+let bob: string;
+
+const received: BusMessage[] = [];
+let unsubscribe: (() => void) | null = null;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function ofKind<K extends BusMessage["kind"]>(kind: K): Extract<BusMessage, { kind: K }>[] {
+  return received.filter((m): m is Extract<BusMessage, { kind: K }> => m.kind === kind);
+}
+function accountOf(userId: string) {
+  return ofKind("account").filter((m) => m.userId === userId);
+}
+/** 当前标的的六个 candles topic */
+function candleTopics(): Topic[] {
+  return CANDLE_INTERVALS.map((i) => `candles:${symbol}:${i}` as Topic);
+}
+/** 当前标的的全部 topic(book / trades / ticker / 六个 candles)都有人订 */
+function all(): Topic[] {
+  return ["book", "trades", "ticker"].map((p) => `${p}:${symbol}` as Topic).concat(candleTopics());
+}
+/** 某个 interval 最后发出的那根 bar */
+function lastCandle(interval: CandleInterval): CandleBar | undefined {
+  return ofKind("candle").filter((m) => m.interval === interval).at(-1)?.candle;
+}
+/** 独立的对照:库里「uptoTs 所在的桶」从桶起点到 uptoTs 的全部成交聚合成的 bar(按 createdAt, id 排序取开收) */
+async function bucketFromDb(interval: CandleInterval, uptoTs: number): Promise<CandleBar> {
+  const ms = INTERVAL_MS[interval];
+  const t = Math.floor(uptoTs / ms) * ms;
+  const rows = await prisma.trade.findMany({
+    where: { assetId, createdAt: { gte: new Date(t), lte: new Date(uptoTs) } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { price: true, quantity: true },
+  });
+  const prices = rows.map((r) => r.price);
+  return { t, o: prices[0], h: Math.max(...prices), l: Math.min(...prices), c: prices[prices.length - 1], v: rows.reduce((s, r) => s + r.quantity, 0) };
+}
+function presence(topics: Topic[], users: string[] = []) {
+  const p: Presence = { users: new Map(users.map((u) => [u, 1])), topics: new Map(topics.map((t) => [t, 1])) };
+  globalThis.__carbadiaPresence = p;
+}
+/** 等去抖(50 ms)与串行派生都跑完 */
+async function settle(ms = 120) {
+  await sleep(ms);
+  await publisher._internal.idle();
+}
+function subscribe() {
+  unsubscribe?.();
+  unsubscribe = bus.subscribe((m) => received.push(m));
+}
+/** 不经发布器改库:期间总线没有订阅者(门控 ①),下单只落库、不派生、不发消息 */
+async function quietly<T>(fn: () => Promise<T>): Promise<T> {
+  unsubscribe?.();
+  unsubscribe = null;
+  try {
+    return await fn();
+  } finally {
+    subscribe();
+  }
+}
+const buy = (userId: string, price: number, quantity: number, clientOrderId?: string) =>
+  matching.placeOrder({ userId, assetId, side: "BUY", type: "LIMIT", price, quantity, clientOrderId });
+const sell = (userId: string, price: number, quantity: number) => matching.placeOrder({ userId, assetId, side: "SELL", type: "LIMIT", price, quantity });
+
+/** 新标的 + 两个新用户(alice 有现金,bob 有 100 000 吨持仓) */
+async function freshMarket() {
+  run += 1;
+  const a = await prisma.user.create({ data: { email: `alice-${run}@publisher.test`, name: "Alice", passwordHash: "x", cashBalance: BigInt(10_000_000_00) } });
+  const b = await prisma.user.create({ data: { email: `bob-${run}@publisher.test`, name: "Bob", passwordHash: "x", cashBalance: BigInt(10_000_000_00) } });
+  alice = a.id;
+  bob = b.id;
+  symbol = `PUB-TEST-${run}`;
+  const asset = await prisma.asset.create({
+    data: { symbol, name: "Publisher test", standard: "VCS", projectType: "Forestry", vintage: 2026, country: "Example", registry: "Demo", lastPrice: 10_000 },
+  });
+  assetId = asset.id;
+  await prisma.holding.create({ data: { userId: bob, assetId, quantity: 100_000, locked: 0 } });
+}
+
+beforeAll(async () => {
+  database.directory = mkdtempSync(join(tmpdir(), "carbadia-publisher-"));
+  database.path = join(database.directory, "publisher.db");
+  execFileSync("node_modules/.bin/prisma", ["migrate", "deploy"], {
+    cwd: ROOT,
+    env: { ...process.env, DATABASE_URL: `file:${database.path}` },
+    stdio: "pipe",
+  });
+  bus = createBus();
+  globalThis.__carbadiaBus = bus;
+  ({ prisma } = await import("./db"));
+  // db.ts 的类型是按无事件日志构造的 client(\$on 参数为 never);这里的实例在 mock 里带了 emit: "event",运行时可用
+  (prisma as unknown as { $on(event: "query", cb: (e: { query: string }) => void): void }).$on("query", (e) => {
+    queries += 1;
+    sql.push(e.query);
+    if (sql.length > 200) sql.shift();
+  });
+  matching = await import("../exchange/matching");
+  realGetOrderBook = matching.getOrderBook; // 取在 spyOn 之前
+  barsSource = await import("./market-snapshots");
+  otc = await import("../exchange/otc");
+  publisher = await import("./market-publisher");
+  snapshots = await import("./market-snapshots");
+  getOrderBook = vi.spyOn(matching, "getOrderBook");
+  // 在 beforeAll 里取:之后「两个 bundle」的用例 vi.resetModules() 了,再 import 拿到的是新实例,不是发布器用的这一份
+  const statsModule = await import("../exchange/stats24h");
+  realStats24h = statsModule.stats24h;
+  stats24h = vi.spyOn(statsModule, "stats24h");
+}, 60_000);
+
+afterAll(async () => {
+  unsubscribe?.();
+  publisher?._internal.reset();
+  globalThis.__carbadiaBus = undefined;
+  globalThis.__carbadiaPresence = undefined;
+  globalThis.__carbadiaAccountSnapshot = undefined;
+  globalThis.__carbadiaBookRefresh = undefined;
+  globalThis.__carbadiaRecentTrades = undefined;
+  globalThis.__carbadiaInstrumentsCache = undefined;
+  vi.restoreAllMocks();
+  await prisma?.$disconnect();
+  if (database.directory) rmSync(database.directory, { recursive: true, force: true });
+});
+
+beforeEach(async () => {
+  unsubscribe?.();
+  unsubscribe = null;
+  publisher._internal.reset();
+  received.length = 0;
+  await freshMarket();
+  // 标准盘口:bob 在 10_000 挂 100、在 10_100 挂 50(总线还没有订阅者,不经发布器)
+  await sell(bob, 10_000, 100);
+  await sell(bob, 10_100, 50);
+  getOrderBook.mockClear();
+  presence(all());
+  subscribe();
+});
+
+afterEach(async () => {
+  await publisher._internal.idle();
+});
+
+describe("门控 ①:无订阅者", () => {
+  it("bus.hasSubscribers() 为 false → 零派生、零查询(placeOrder 之后再没有任何 SQL),也不读盘口", async () => {
+    unsubscribe?.();
+    unsubscribe = null;
+    expect(bus.hasSubscribers()).toBe(false);
+    const r = await buy(alice, 10_000, 10); // 穿价成交,若不门控会派生 ticker / candle / account
+    expect(r.trades).toHaveLength(1);
+    await settle(50); // 让事务自己的最后一条查询事件落地
+    const after = queries;
+    await settle(200);
+    expect(queries).toBe(after);
+    expect(getOrderBook).not.toHaveBeenCalled();
+    expect(received).toHaveLength(0);
+  });
+});
+
+describe("撮合结果 → book / trades / ticker / candle", () => {
+  it("穿价成交:立即 trades(takerSide = 下单方,auditRef),50 ms 后 book(delta 只含变化档)、ticker、6 条 candle(当前桶从库里补齐)", async () => {
+    await quietly(() => buy(alice, 10_000, 10)); // 此前的一笔成交(不经发布器):10_000 档剩 90
+    await publisher._internal.flushBook(assetId); // 基线:第一次 delta 为 null = 整份快照
+    expect(ofKind("book")).toHaveLength(1);
+    expect(ofKind("book")[0].delta).toBeNull();
+    received.length = 0;
+    getOrderBook.mockClear();
+
+    const r = await buy(alice, 10_050, 30); // 吃掉 10_000 档的 30(90 → 60)
+    expect(r.trades).toHaveLength(1);
+    // trades 在 placeOrder 返回前就已同步发出
+    expect(ofKind("trades")).toHaveLength(1);
+    expect(ofKind("trades")[0]).toEqual({
+      kind: "trades",
+      symbol,
+      trades: [{ id: r.trades[0].id, symbol, price: 10_000, quantity: 30, takerSide: "BUY", ts: r.trades[0].createdAt.getTime(), auditRef: `SIM-TRD-${r.trades[0].id}` }],
+    });
+
+    await vi.waitFor(() => expect(ofKind("book")).toHaveLength(1));
+    const book = ofKind("book")[0];
+    expect(getOrderBook).toHaveBeenCalledTimes(1);
+    expect(getOrderBook).toHaveBeenCalledWith(assetId, 50);
+    expect(book.snapshot.asks).toEqual([
+      { price: 10_000, quantity: 60, orders: 1 },
+      { price: 10_100, quantity: 50, orders: 1 },
+    ]);
+    expect(book.snapshot.bids).toEqual([]);
+    // 只有 10_000 档变了;10_100 没变不在 delta 里
+    expect(book.delta).toEqual({ symbol, bids: [], asks: [{ price: 10_000, quantity: 60, orders: 1 }], ts: book.snapshot.ts });
+
+    await settle();
+    const candles = ofKind("candle");
+    expect(candles.map((c) => c.interval).sort()).toEqual([...CANDLE_INTERVALS].sort());
+    const tradeTs = r.trades[0].createdAt.getTime();
+    for (const c of candles) {
+      const ms = { "1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000 }[c.interval];
+      const bucket = Math.floor(tradeTs / ms) * ms;
+      expect(c.symbol).toBe(symbol);
+      expect(c.candle.t).toBe(bucket);
+      // 当前桶从库里补齐:含同一桶里此前那笔 10 吨(不跨桶时),不是只有这一笔
+      const inBucket = await prisma.trade.aggregate({ where: { assetId, createdAt: { gte: new Date(bucket), lte: new Date(tradeTs) } }, _sum: { quantity: true } });
+      expect(inBucket._sum.quantity).toBeGreaterThanOrEqual(30);
+      expect(c.candle).toEqual({ t: bucket, o: 10_000, h: 10_000, l: 10_000, c: 10_000, v: inBucket._sum.quantity });
+    }
+
+    // 基线那次 flush 已发过一条书顶 ticker,成交这条落在 250 ms 节流窗口里,尾随发出
+    await vi.waitFor(() => expect(ofKind("ticker").some((t) => t.ticker.lastPrice != null)).toBe(true), { timeout: 1_000 });
+    const last = ofKind("ticker").find((t) => t.ticker.lastPrice != null)!;
+    expect(last.ticker).toMatchObject({ symbol, lastPrice: 10_000, change24h: 0, high24h: 10_000, low24h: 10_000, volume24h: 40 });
+    expect(typeof last.ticker.ts).toBe("number");
+  });
+
+  it("同一 50 ms 窗口内标脏两次(两次下单各标一次)→ getOrderBook 只调用一次,一条 book 带两档变化", async () => {
+    await publisher._internal.flushBook(assetId); // 基线
+    // 两次下单先落库(不经发布器),再同步连着标脏两次:必然落在同一个窗口里,不靠两个事务恰好在 50 ms 内提交
+    await quietly(async () => {
+      await sell(bob, 10_200, 10);
+      await sell(bob, 10_300, 10);
+    });
+    received.length = 0;
+    getOrderBook.mockClear();
+    publisher.markBookDirty(assetId);
+    publisher.markBookDirty(assetId);
+    await settle(150);
+    expect(getOrderBook).toHaveBeenCalledTimes(1);
+    expect(ofKind("book")).toHaveLength(1);
+    const { delta, snapshot } = ofKind("book")[0];
+    expect(delta).toMatchObject({ bids: [], asks: [{ price: 10_200, quantity: 10, orders: 1 }, { price: 10_300, quantity: 10, orders: 1 }] });
+    expect(snapshot.asks.map((l) => l.price)).toEqual([10_000, 10_100, 10_200, 10_300]);
+  });
+
+  it("盘口没变化时不发 book(去抖窗口后再读到同样的簿)", async () => {
+    await publisher._internal.flushBook(assetId); // 建基线
+    received.length = 0;
+    getOrderBook.mockClear();
+    publisher.markBookDirty(assetId); // 标脏但库里没变
+    await settle();
+    expect(getOrderBook).toHaveBeenCalledTimes(1);
+    expect(ofKind("book")).toHaveLength(0);
+  });
+
+  it("两次读盘口乱序返回(较早发出的读取较晚回来)→ 较旧的那份不当基线、不发,hub 的盘口不被倒回去", async () => {
+    await publisher._internal.flushBook(assetId); // 基线:10_000 / 10_100
+    await quietly(() => sell(bob, 10_200, 10));
+    received.length = 0;
+    let firstReadDone!: () => void;
+    const firstRead = new Promise<void>((resolve) => (firstReadDone = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    getOrderBook.mockImplementationOnce(async (id, depth) => {
+      const book = await realGetOrderBook(id, depth); // 读到的是 10_300 挂上之前的簿
+      firstReadDone();
+      await gate; // 另一个 bundle / 下一次 flush 的读取先回来
+      return book;
+    });
+    const slow = publisher._internal.flushBook(assetId);
+    await firstRead;
+    await quietly(() => sell(bob, 10_300, 10));
+    await publisher._internal.flushBook(assetId); // 较晚发出、先回来:含 10_200 与 10_300
+    release();
+    await slow;
+    const books = ofKind("book");
+    expect(books).toHaveLength(1); // 旧的那份若当了基线,会再发一条 { 10_300 → 0 } 的 delta
+    expect(books[0].snapshot.asks.map((l) => l.price)).toEqual([10_000, 10_100, 10_200, 10_300]);
+    expect(globalThis.__carbadiaBookCache?.get(assetId)?.asks.map((l) => l.price)).toEqual([10_000, 10_100, 10_200, 10_300]);
+    // 基线仍是较新的那份:库没变时再读一次不发
+    await publisher._internal.flushBook(assetId);
+    expect(ofKind("book")).toHaveLength(1);
+  });
+
+  it("dev HMR:globalThis 上是加全局票号之前的旧状态(每个 key 各数各的,没有 ticketSeq)→ 全局序列从旧表里最大的票号接着数,读取照常被采用", async () => {
+    // 旧模块版本建的 __carbadiaPublisherState:没有 ticketSeq / balanceReads / orderReads / sweptAt / botUserIds,
+    // bookReads 的计数器随运行时长涨到了 N。若 ticketSeq 从 0 开始,新票号 1、2… 全都小于 applied,盘口读取被一律判为过期
+    globalThis.__carbadiaPublisherState = {
+      stats: new Map(),
+      bookReads: new Map([[assetId, { issued: 4_000, applied: 4_000 }]]),
+      candleMarks: new Map(),
+    } as unknown as NonNullable<typeof globalThis.__carbadiaPublisherState>;
+    await publisher._internal.flushBook(assetId);
+    expect(ofKind("book")).toHaveLength(1);
+    expect(globalThis.__carbadiaPublisherState?.ticketSeq).toBe(4_001);
+    // 余额表里更大的旧计数同样算进去(issued 与 applied 取大)
+    publisher._internal.reset();
+    globalThis.__carbadiaPublisherState = {
+      stats: new Map(),
+      bookReads: new Map([[assetId, { issued: 10, applied: 10 }]]),
+      balanceReads: new Map([["someone", { issued: 70, applied: 90 }]]),
+      candleMarks: new Map(),
+    } as unknown as NonNullable<typeof globalThis.__carbadiaPublisherState>;
+    received.length = 0;
+    await publisher._internal.flushBook(assetId);
+    expect(ofKind("book")).toHaveLength(1);
+    expect(globalThis.__carbadiaPublisherState?.ticketSeq).toBe(91);
+  });
+
+  it("对 book:SYM 无兴趣 → getOrderBook 零调用,trades 照发;candles / ticker 无兴趣也不派生", async () => {
+    presence([`trades:${symbol}`]);
+    const r = await buy(alice, 10_100, 5);
+    expect(r.trades).toHaveLength(1);
+    expect(ofKind("trades")).toHaveLength(1);
+    await settle(150);
+    expect(getOrderBook).not.toHaveBeenCalled();
+    expect(ofKind("book")).toHaveLength(0);
+    expect(ofKind("candle")).toHaveLength(0);
+    expect(ofKind("ticker")).toHaveLength(0);
+    expect(ofKind("account")).toHaveLength(0);
+  });
+
+  it("无人订 book 期间丢掉差分基线:兴趣恢复后第一次 flush 发整份快照(delta null)与书顶 ticker,不在停住的基线上叠增量", async () => {
+    await publisher._internal.flushBook(assetId); // 有人订时的基线(10_000 × 100)
+    presence([`trades:${symbol}`]); // 订阅者走了
+    await buy(alice, 10_100, 5); // 10_000 档 100 → 95,书顶价不变
+    await settle(150);
+    expect(getOrderBook).toHaveBeenCalledTimes(1); // 只有基线那次
+    presence(all()); // 又有人订
+    received.length = 0;
+    await publisher._internal.flushBook(assetId);
+    const books = ofKind("book");
+    expect(books).toHaveLength(1);
+    expect(books[0].delta).toBeNull(); // 整份,而不是 { asks: [10_000 × 95] }
+    expect(books[0].snapshot.asks[0]).toEqual({ price: 10_000, quantity: 95, orders: 1 });
+    // 书顶价没变也重发一次:hub 上的 bestBid / bestAsk 可能停在无人订阅之前(基线那次 flush 的 ticker 还在 250 ms 节流窗口里,这条尾随发出)
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(1), { timeout: 1_000 });
+    expect(ofKind("ticker")[0].ticker).toMatchObject({ symbol, bestBid: null, bestAsk: 10_000 });
+  });
+
+  it("ticker:* 有订阅视为对 ticker:SYM 有兴趣;只订了一个 interval 就只发那一档 candle", async () => {
+    presence(["ticker:*", `candles:${symbol}:5m`]);
+    await buy(alice, 10_100, 1);
+    await settle();
+    expect(ofKind("ticker")).toHaveLength(1);
+    expect(ofKind("ticker")[0].ticker.lastPrice).toBe(10_000);
+    expect(ofKind("candle")).toHaveLength(1);
+    expect(ofKind("candle")[0].interval).toBe("5m");
+    expect(getOrderBook).not.toHaveBeenCalled();
+  });
+
+  it("ticker 250 ms 节流:第一条立即发,窗口内的后续更新合并成一条尾随更新", async () => {
+    presence([`ticker:${symbol}`]);
+    await Promise.all([buy(alice, 10_100, 1), buy(alice, 10_100, 1)]);
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(1));
+    const first = ofKind("ticker")[0].ticker;
+    await sleep(100);
+    expect(ofKind("ticker")).toHaveLength(1); // 窗口内不发第二条
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(2), { timeout: 1_000 });
+    const second = ofKind("ticker")[1].ticker;
+    expect(second.ts - first.ts).toBeGreaterThanOrEqual(200);
+    expect(second.lastPrice).toBe(10_000);
+    expect(second.volume24h).toBeGreaterThanOrEqual(first.volume24h!);
+    await sleep(300);
+    expect(ofKind("ticker")).toHaveLength(2); // 没有更多更新就不再发
+  });
+
+  it("24 h 统计的刷新时刻取在查询返回之后:查询发出前刚提交的成交已在结果里,它自己的派生不再折一次(量不重复)", async () => {
+    presence([`ticker:${symbol}`]);
+    stats24h.mockImplementationOnce(async (id, lastPrice) => {
+      await sleep(5);
+      await buy(alice, 10_000, 20); // 刷新查询发出前另一笔成交落库并提交:createdAt 晚于「查询之前」那一刻,但已在查询结果里
+      return realStats24h(id, lastPrice);
+    });
+    await buy(alice, 10_000, 10);
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(2), { timeout: 1_000 }); // 第二条是后一笔的派生,落在节流窗口里尾随发出
+    await sleep(300);
+    // 刷新时刻若取在查询之前,后一笔(ts 晚于它)会被再折一次:30 → 50
+    expect(ofKind("ticker").map((t) => t.ticker.volume24h)).toEqual([30, 30]);
+  });
+
+  it("没人订 ticker 期间丢掉 24 h 统计缓存:兴趣恢复后的第一条 ticker 从库里刷新,不漏掉中断期间的成交", async () => {
+    presence([`ticker:${symbol}`]);
+    await buy(alice, 10_000, 10);
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(1)); // 刷新统计,量 10
+    presence([`trades:${symbol}`]); // ticker 的订阅者走了
+    await buy(alice, 10_000, 20); // 这笔不会被折进缓存
+    await settle();
+    expect(ofKind("ticker")).toHaveLength(1);
+    presence([`ticker:${symbol}`]); // 10 s 内又有人订
+    stats24h.mockClear();
+    await buy(alice, 10_000, 30);
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(2), { timeout: 1_000 });
+    // 缓存还在的话:10 + 30 = 40,少了中断期间那 20 吨,要到 10 s 后的刷新才补上
+    expect(ofKind("ticker")[1].ticker.volume24h).toBe(60);
+    expect(stats24h).toHaveBeenCalledTimes(1);
+  });
+
+  it("重放结果(replayed: true)→ 不标脏盘口、不发 account、不派生", async () => {
+    presence(all(), [alice]);
+    const key = "6f1d2c1e-3b0a-4c7d-9e8f-0123456789ab";
+    await buy(alice, 9_000, 2, key);
+    await settle();
+    received.length = 0;
+    getOrderBook.mockClear();
+    const replay = await buy(alice, 9_000, 2, key);
+    expect(replay.replayed).toBe(true);
+    await settle(150);
+    expect(received).toHaveLength(0);
+    expect(getOrderBook).not.toHaveBeenCalled();
+  });
+});
+
+describe("candle 稳态折桶(__carbadiaCandleState 已有当前桶)", () => {
+  it("第一笔从库里补桶;之后的成交按 bucketUpdate 折进去、不再查库:六个 interval 各一条,数值 = 补的桶折进新成交 = 库里该桶的聚合", async () => {
+    presence(candleTopics());
+    const getBars = vi.spyOn(barsSource, "getBars");
+    try {
+      await buy(alice, 10_000, 10); // 冷启动:六个 interval 各补一次桶
+      await settle();
+      expect(getBars).toHaveBeenCalledTimes(6);
+      const seeds = new Map(CANDLE_INTERVALS.map((i) => [i, lastCandle(i)!]));
+      received.length = 0;
+      getBars.mockClear();
+
+      const second = await buy(alice, 10_100, 100); // 一批两笔:90 @ 10_000 + 10 @ 10_100
+      expect(second.trades.map((t) => [t.price, t.quantity])).toEqual([[10_000, 90], [10_100, 10]]);
+      await settle();
+      expect(getBars).not.toHaveBeenCalled(); // 走的是折桶,不是补桶
+      expect(ofKind("candle").map((c) => c.interval).sort()).toEqual([...CANDLE_INTERVALS].sort());
+      const secondTs = second.trades[1].createdAt.getTime();
+      for (const interval of CANDLE_INTERVALS) {
+        const seed = seeds.get(interval)!;
+        const bar = lastCandle(interval)!;
+        if (Math.floor(secondTs / INTERVAL_MS[interval]) * INTERVAL_MS[interval] === seed.t) {
+          expect(bar).toEqual({ t: seed.t, o: seed.o, h: 10_100, l: 10_000, c: 10_100, v: seed.v + 100 });
+        }
+        expect(bar).toEqual(await bucketFromDb(interval, secondTs));
+      }
+
+      // 再一笔更低的价:低价与收盘价往下走
+      await quietly(() => buy(alice, 9_900, 10)); // alice 在 9_900 挂买单(不经发布器)
+      received.length = 0;
+      const third = await sell(bob, 9_900, 5); // bob 砸进去:5 @ 9_900
+      await settle();
+      expect(getBars).not.toHaveBeenCalled();
+      const thirdTs = third.trades[0].createdAt.getTime();
+      expect(ofKind("candle")).toHaveLength(6);
+      for (const interval of CANDLE_INTERVALS) {
+        const bar = lastCandle(interval)!;
+        expect(bar).toMatchObject({ l: 9_900, c: 9_900 });
+        expect(bar).toEqual(await bucketFromDb(interval, thirdTs));
+      }
+    } finally {
+      getBars.mockRestore();
+    }
+  });
+
+  it("当前桶是上一个桶(成交落进新桶)→ 开一根新 bar,t = 新桶起点;旧桶此前已发过,不重发", async () => {
+    presence(candleTopics());
+    const now = Date.now();
+    for (const interval of CANDLE_INTERVALS) {
+      const ms = INTERVAL_MS[interval];
+      const t = Math.floor(now / ms) * ms - ms;
+      (globalThis.__carbadiaCandleState ??= new Map()).set(`${assetId}:${interval}`, { t, o: 9_000, h: 9_000, l: 9_000, c: 9_000, v: 3 });
+    }
+    const getBars = vi.spyOn(barsSource, "getBars");
+    try {
+      const r = await buy(alice, 10_000, 10);
+      await settle();
+      expect(getBars).not.toHaveBeenCalled();
+      const ts = r.trades[0].createdAt.getTime();
+      expect(ofKind("candle")).toHaveLength(6);
+      for (const interval of CANDLE_INTERVALS) {
+        const ms = INTERVAL_MS[interval];
+        expect(lastCandle(interval)).toEqual({ t: Math.floor(ts / ms) * ms, o: 10_000, h: 10_000, l: 10_000, c: 10_000, v: 10 });
+        expect(globalThis.__carbadiaCandleState!.get(`${assetId}:${interval}`)).toEqual(lastCandle(interval));
+      }
+    } finally {
+      getBars.mockRestore();
+    }
+  });
+
+  it("一批成交跨桶:先发上一根的最终状态(含本批落在旧桶的那笔),再发新桶", async () => {
+    presence(candleTopics());
+    // 取一个整日边界 T0(也是其余五个 interval 的桶边界),构造一批横跨它的成交:T0 − 1 s 与 T0 + 1 s
+    const day = INTERVAL_MS["1d"];
+    const t0 = Math.floor(Date.now() / day) * day;
+    for (const interval of CANDLE_INTERVALS) {
+      const ms = INTERVAL_MS[interval];
+      (globalThis.__carbadiaCandleState ??= new Map()).set(`${assetId}:${interval}`, { t: t0 - ms, o: 9_000, h: 9_500, l: 8_900, c: 9_100, v: 7 });
+    }
+    const real = await quietly(() => buy(alice, 10_100, 110)); // 100 @ 10_000 + 10 @ 10_100,落库但不经发布器
+    expect(real.trades.map((t) => [t.price, t.quantity])).toEqual([[10_000, 100], [10_100, 10]]);
+    const crossing = {
+      ...real,
+      trades: [
+        { ...real.trades[0], createdAt: new Date(t0 - 1_000) },
+        { ...real.trades[1], createdAt: new Date(t0 + 1_000) },
+      ],
+    };
+    publisher.publishOrderResult(crossing);
+    await settle();
+    for (const interval of CANDLE_INTERVALS) {
+      const ms = INTERVAL_MS[interval];
+      expect(ofKind("candle").filter((c) => c.interval === interval).map((c) => c.candle)).toEqual([
+        { t: t0 - ms, o: 9_000, h: 10_000, l: 8_900, c: 10_000, v: 107 }, // 上一根的最终状态:折进了 T0 − 1 s 那笔
+        { t: t0, o: 10_100, h: 10_100, l: 10_100, c: 10_100, v: 10 }, // 新桶只有 T0 + 1 s 那笔
+      ]);
+    }
+  });
+});
+
+describe("account 事件(门控 ②:hasUser)", () => {
+  it("presence 不含用户 → 无 account 消息", async () => {
+    presence(all(), []);
+    await buy(alice, 10_100, 2);
+    await settle();
+    expect(ofKind("account")).toHaveLength(0);
+  });
+
+  it("含 taker 用户 → order / fill / balance / position 各一;fill 从 taker 视角、ledgerRefs 是本人账本行;maker 不在线则没有", async () => {
+    presence(all(), [alice]);
+    const r = await buy(alice, 10_100, 4); // 以 10_000 成交(价格改善)
+    await settle();
+    const mine = accountOf(alice).map((m) => m.event);
+    expect(mine.map((e) => e.t)).toEqual(["order", "fill", "balance", "position"]);
+    const order = mine[0].t === "order" ? mine[0].order : null;
+    expect(order).toMatchObject({ id: r.order.id, symbol, side: "BUY", status: "FILLED", filledQuantity: 4, avgFillPrice: 10_000, cancelReason: null });
+    const fill = mine[1].t === "fill" ? mine[1].fill : null;
+    expect(fill).toMatchObject({ id: r.trades[0].id, orderId: r.order.id, symbol, side: "BUY", role: "TAKER", price: 10_000, quantity: 4, notional: 40_000, feeCents: 0, auditRef: `SIM-TRD-${r.trades[0].id}` });
+    const ledger = await prisma.ledgerEntry.findMany({ where: { userId: alice, refType: "TRADE", refId: r.trades[0].id }, select: { id: true } });
+    expect(ledger.length).toBeGreaterThanOrEqual(2);
+    expect(fill!.ledgerRefs.sort()).toEqual(ledger.map((l) => l.id).sort());
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: alice } });
+    expect(mine[2]).toEqual({ t: "balance", balance: { cashBalance: Number(user.cashBalance), lockedCash: Number(user.lockedCash) } });
+    const holding = await prisma.holding.findUniqueOrThrow({ where: { userId_assetId: { userId: alice, assetId } } });
+    expect(holding.quantity).toBe(4);
+    expect(mine[3].t === "position" && mine[3].position).toMatchObject({ assetId, symbol, quantity: 4, locked: holding.locked, available: 4 - holding.locked, retired: 0, isScenario: false });
+    expect(accountOf(bob)).toHaveLength(0);
+  });
+
+  it("含 maker 用户 → maker 收到自己的 order(均价按实际成交重算)/ fill(MAKER)/ balance / position", async () => {
+    presence(all(), [bob]);
+    const r = await buy(alice, 10_000, 3);
+    await settle();
+    expect(accountOf(alice)).toHaveLength(0);
+    const events = accountOf(bob).map((m) => m.event);
+    expect(events.map((e) => e.t)).toEqual(["order", "fill", "balance", "position"]);
+    const maker = r.makerOrders[0];
+    expect(events[0].t === "order" && events[0].order).toMatchObject({ id: maker.id, side: "SELL", status: "PARTIAL", filledQuantity: 3, avgFillPrice: 10_000 });
+    expect(events[1].t === "fill" && events[1].fill).toMatchObject({ id: r.trades[0].id, orderId: maker.id, side: "SELL", role: "MAKER", quantity: 3 });
+    const holding = await prisma.holding.findUniqueOrThrow({ where: { userId_assetId: { userId: bob, assetId } } });
+    expect(events[3].t === "position" && events[3].position).toMatchObject({ assetId, quantity: holding.quantity, locked: holding.locked });
+  });
+
+  it("撤单 → order 事件 CANCELLED / cancelReason USER + balance + position,盘口 delta 删档", async () => {
+    await quietly(() => buy(alice, 10_000, 5)); // alice 持有 5:撤单后照样收到该标的的持仓
+    const resting = await buy(alice, 9_100, 3);
+    await settle();
+    presence(all(), [alice]);
+    received.length = 0;
+    await matching.cancelOrder(alice, resting.order.id);
+    await settle();
+    const events = accountOf(alice).map((m) => m.event);
+    expect(events.map((e) => e.t)).toEqual(["order", "balance", "position"]);
+    expect(events[0].t === "order" && events[0].order).toMatchObject({ id: resting.order.id, status: "CANCELLED", cancelReason: "USER" });
+    expect(events[2].t === "position" && events[2].position).toMatchObject({ assetId, quantity: 5 });
+    expect(ofKind("book")).toHaveLength(1);
+    expect(ofKind("book")[0].delta).toMatchObject({ bids: [{ price: 9_100, quantity: 0, orders: 0 }], asks: [] });
+  });
+
+  it("account 快照钩子 globalThis.__carbadiaAccountSnapshot:balance + 当前挂单 + 持仓(与 REST 同形),余额 / 挂单 / 持仓在一个事务里读", async () => {
+    await quietly(() => buy(alice, 10_000, 5)); // alice 持有 5
+    const open = await buy(alice, 9_200, 7);
+    sql.length = 0;
+    const transaction = vi.spyOn(prisma, "$transaction");
+    const snapshot = await globalThis.__carbadiaAccountSnapshot!(alice);
+    const statements = [...sql];
+    // 一个批量事务装下全部五个读取(不是 Promise.all 里各读各的,再加一个只管持仓的小事务)
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(transaction.mock.calls[0][0]).toHaveLength(5);
+    transaction.mockRestore();
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: alice } });
+    expect(snapshot.balance).toEqual({ cashBalance: Number(user.cashBalance), lockedCash: Number(user.lockedCash) });
+    expect(snapshot.orders).toEqual([expect.objectContaining({ id: open.order.id, symbol, side: "BUY", status: "OPEN", price: 9_200, quantity: 7 })]);
+    expect(snapshot.positions).toEqual([expect.objectContaining({ assetId, symbol, quantity: 5, locked: 0, available: 5 })]);
+    // 余额、挂单、持仓、账本、注销聚合五个读取夹在同一对 BEGIN / COMMIT 之间:不会拼出「余额含某笔成交、挂单还是成交前」的快照
+    const begin = statements.findIndex((s) => /^BEGIN/i.test(s));
+    const commit = statements.findIndex((s) => /^COMMIT/i.test(s));
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(commit).toBeGreaterThan(begin);
+    const inTx = statements.slice(begin + 1, commit).join("\n");
+    for (const table of ["User", "Order", "Holding", "LedgerEntry", "Retirement"]) expect(inTx).toContain(`\`${table}\``);
+    expect(statements.filter((s) => /^BEGIN/i.test(s))).toHaveLength(1);
+    await matching.cancelOrder(alice, open.order.id);
+  });
+});
+
+describe("两个 bundle(instrumentation 的 bot 与 route handler 的用户下单各有一份本模块)", () => {
+  it("24 h 统计缓存挂在 globalThis 上:两份模块交替发 ticker,volume24h 逐笔累加、不倒退也不重复", async () => {
+    vi.resetModules();
+    const other: Publisher = await import("./market-publisher"); // 第二份模块实例 = 另一个 bundle;总线、presence 与缓存经 globalThis 共用
+    presence([`ticker:${symbol}`]);
+    await buy(alice, 10_000, 10); // bundle A(本文件导入的那份):刷新统计后发 ticker,量 10
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(1));
+    const r = await quietly(() => buy(alice, 10_000, 20)); // 另一个 bundle 里的下单:由 bundle B 发布
+    other.publishOrderResult(r);
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(2));
+    await other._internal.idle();
+    await buy(alice, 10_000, 30); // 回到 bundle A(落在它 250 ms 节流窗口里就尾随发出)
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(3), { timeout: 1_000 });
+    // 各 bundle 一份缓存时:B 从库里刷新得 30,A 仍在自己的 10 上累加得 40——相邻两条先 30 再 40,第三条少算了 B 那笔
+    expect(ofKind("ticker").map((t) => t.ticker.volume24h)).toEqual([10, 30, 60]);
+    expect(ofKind("ticker").map((t) => t.ticker.lastPrice)).toEqual([10_000, 10_000, 10_000]);
+  });
+
+  it("K 线:另一个 bundle 先提交、后发布的成交已在本 bundle 补的桶里 → 跳过(水位 seedTo),量不翻倍、收盘价不倒回", async () => {
+    vi.resetModules();
+    const other: Publisher = await import("./market-publisher");
+    presence(candleTopics());
+    const early = await quietly(() => buy(alice, 10_000, 100)); // bundle B 的成交:先提交(吃光 10_000 档),派生还没跑
+    const late = await buy(alice, 10_100, 5); // bundle A:冷启动补桶,库里的桶已含 B 那 100 吨
+    await settle();
+    const lateTs = late.trades[0].createdAt.getTime();
+    for (const interval of CANDLE_INTERVALS) expect(lastCandle(interval)).toEqual(await bucketFromDb(interval, lateTs));
+    received.length = 0;
+    other.publishOrderResult(early); // B 的派生这时才跑
+    await settle();
+    await other._internal.idle();
+    expect(ofKind("candle")).toHaveLength(0); // 桶没变,不发
+    for (const interval of CANDLE_INTERVALS) {
+      // 再折一次的话:量 105 → 205,收盘 10_100 → 10_000
+      expect(globalThis.__carbadiaCandleState?.get(`${assetId}:${interval}`)).toEqual(await bucketFromDb(interval, lateTs));
+    }
+  });
+
+  it("K 线:比已折进来的最新成交更早、又不在补桶里的成交晚到(另一个 bundle)→ 只补量与高低,收盘价不倒回", async () => {
+    vi.resetModules();
+    const other: Publisher = await import("./market-publisher");
+    presence(candleTopics());
+    await buy(alice, 10_000, 10); // bundle A:冷启动补桶(10 @ 10_000)
+    await settle();
+    await quietly(() => buy(alice, 9_900, 20)); // alice 在 9_900 挂买单
+    const early = await quietly(() => sell(bob, 9_900, 20)); // bundle B 的成交:20 @ 9_900,先提交,派生还没跑
+    const late = await buy(alice, 10_000, 5); // bundle A:5 @ 10_000,正常折进当前桶
+    await settle();
+    received.length = 0;
+    other.publishOrderResult(early);
+    await settle();
+    await other._internal.idle();
+    const lateTs = late.trades[0].createdAt.getTime();
+    for (const interval of CANDLE_INTERVALS) {
+      // 开盘价比不了:晚到的那笔若恰好是新桶的第一笔(跨桶),开盘价应是它,但桶已按后一笔开好;其余四项与库一致
+      const expected = await bucketFromDb(interval, lateTs);
+      const bar = globalThis.__carbadiaCandleState!.get(`${assetId}:${interval}`)!;
+      // 同一桶时:高 10_000、低 9_900、收 10_000(按 bucketUpdate 折的话收盘退回 9_900)、量 35
+      expect({ ...bar, o: expected.o }).toEqual(expected);
+    }
+    for (const { interval, candle } of ofKind("candle")) expect(candle).toEqual(globalThis.__carbadiaCandleState!.get(`${assetId}:${interval}`));
+    expect(ofKind("candle").length).toBeGreaterThan(0);
+  });
+});
+
+describe("盘口全量刷新钩子 globalThis.__carbadiaBookRefresh(hub 在 book 订阅时没有这本簿的缓存)", () => {
+  beforeEach(() => {
+    // 前面「两个 bundle」的用例 vi.resetModules() 过,钩子此刻是最后加载的那份模块挂的;这里要的是打了 getOrderBook 桩的这一份
+    globalThis.__carbadiaBookRefresh = publisher.refreshBook;
+  });
+
+  it("模块加载即挂钩子(与 account 快照钩子一样不用 ??=:最后加载的一份生效)", async () => {
+    vi.resetModules();
+    const other: Publisher = await import("./market-publisher");
+    expect(globalThis.__carbadiaBookRefresh).toBe(other.refreshBook);
+    expect(globalThis.__carbadiaAccountSnapshot).toBe(other.loadAccountSnapshot);
+    expect(globalThis.__carbadiaRecentTrades).toBe(other.recentTrades);
+  });
+
+  it("同步丢掉差分基线,再读一次盘口发整份快照(delta null)与书顶 ticker——即使基线还在、库也没变", async () => {
+    await publisher._internal.flushBook(assetId); // 基线(hub 那边的缓存已因无人订阅被淘汰,发布器的基线还在)
+    received.length = 0;
+    getOrderBook.mockClear();
+    const pending = globalThis.__carbadiaBookRefresh!(symbol);
+    // 同步部分已丢基线:此后先完成的任何一次读取(包括别的 bundle 在途的那次)都发整份快照,不会先来一条叠在旧基线上的 delta
+    expect(globalThis.__carbadiaBookCache?.has(assetId)).toBe(false);
+    await pending;
+    expect(getOrderBook).toHaveBeenCalledTimes(1);
+    const books = ofKind("book");
+    expect(books).toHaveLength(1);
+    expect(books[0].delta).toBeNull();
+    expect(books[0].snapshot.asks).toEqual([
+      { price: 10_000, quantity: 100, orders: 1 },
+      { price: 10_100, quantity: 50, orders: 1 },
+    ]);
+    await vi.waitFor(() => expect(ofKind("ticker")).toHaveLength(1), { timeout: 1_000 });
+    expect(ofKind("ticker")[0].ticker).toMatchObject({ symbol, bestBid: null, bestAsk: 10_000 });
+  });
+
+  it("刷新开始前已在途、刷新之后才返回的读取:基线已丢,它发的也是整份快照(不是对旧基线的 delta)", async () => {
+    await publisher._internal.flushBook(assetId); // 基线:10_000 / 10_100
+    await quietly(() => sell(bob, 10_200, 10));
+    received.length = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const inflight = new Promise<void>((resolve) => (reached = resolve));
+    getOrderBook.mockImplementationOnce(async (id, depth) => {
+      const book = await realGetOrderBook(id, depth);
+      reached();
+      await gate;
+      return book;
+    });
+    getOrderBook.mockImplementationOnce(async () => {
+      throw new Error("refresh read failed"); // 让刷新自己的那次读取失败:只看在途的那次发了什么
+    });
+    const slow = publisher._internal.flushBook(assetId);
+    await inflight;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(globalThis.__carbadiaBookRefresh!(symbol)).rejects.toThrow("refresh read failed");
+    errors.mockRestore();
+    release();
+    await slow;
+    const books = ofKind("book");
+    expect(books).toHaveLength(1);
+    expect(books[0].delta).toBeNull(); // 不丢基线的话这里是 { asks: [10_200 × 10] } 的 delta,新订阅者手里没有簿,拼不出来
+    expect(books[0].snapshot.asks.map((l) => l.price)).toEqual([10_000, 10_100, 10_200]);
+  });
+
+  it("没人订 book:SYM(hub 已退订)或 symbol 不存在:不读盘口、不发;结果区分两者(found),hub 据此对不存在的 symbol 不再请", async () => {
+    presence([`trades:${symbol}`]);
+    await expect(globalThis.__carbadiaBookRefresh!(symbol)).resolves.toEqual({ found: true });
+    await expect(globalThis.__carbadiaBookRefresh!("NO-SUCH-SYMBOL")).resolves.toEqual({ found: false });
+    expect(getOrderBook).not.toHaveBeenCalled();
+    expect(ofKind("book")).toHaveLength(0);
+  });
+
+  it("找到了且有人订:{ found: true } 并发出整份快照", async () => {
+    await expect(globalThis.__carbadiaBookRefresh!(symbol)).resolves.toEqual({ found: true });
+    expect(ofKind("book")).toHaveLength(1);
+  });
+
+  it("接上真实的 hub:订阅一个不存在的 symbol 的盘口,asset.findUnique 只查一次,之后多少个冷却期都不再查(修复前每个冷却期一次,没有尽头)", async () => {
+    const { createHub } = await import("../../../server/ws-hub.mjs");
+    const ghost = `NO-SUCH-${run}`;
+    const findUnique = vi.spyOn(prisma.asset, "findUnique");
+    const lookups = () => findUnique.mock.calls.filter(([args]) => (args as { where: { symbol?: string } }).where.symbol === ghost).length;
+    const logs: string[] = [];
+    const saved = { presence: globalThis.__carbadiaPresence, stats: globalThis.__carbadiaWsStats, seq: globalThis.__carbadiaTopicSeq };
+    // 标的列表从没出现过时 symbolVerdict 放行任何 symbol(部署后的那段窗口,按连接限流);冷却调到 20 ms,300 ms 里修复前会查十几次
+    const hub = createHub({ bus, log: (line) => logs.push(line), batchMs: 5, bookRefreshCooldownMs: 20, isKnownSymbol: () => true });
+    // 最小的假 socket(同 ws-hub.test.ts 的 FakeWs):hub 只用 send / close / terminate / ping、readyState、bufferedAmount 与事件
+    class GhostSocket extends EventEmitter {
+      readyState = 1;
+      bufferedAmount = 0;
+      frames: unknown[][] = [];
+      send(data: string) {
+        this.frames.push(JSON.parse(data));
+      }
+      close(code?: number) {
+        this.readyState = 3;
+        queueMicrotask(() => this.emit("close", code ?? 1005, ""));
+      }
+      terminate() {
+        this.close(1006);
+      }
+      ping() {}
+    }
+    const socket = new GhostSocket();
+    try {
+      hub.accept(socket, { userId: null, ip: "local" });
+      socket.emit("message", JSON.stringify({ op: "subscribe", topics: [`book:${ghost}`] }), false);
+      await vi.waitFor(() => expect(lookups()).toBe(1));
+      await sleep(300);
+      expect(lookups()).toBe(1);
+      expect(socket.frames.flat()).toContainEqual({ t: "subscribed", topic: `book:${ghost}`, seq: 0 });
+      expect(logs.filter((l) => l.includes("book refresh failed"))).toEqual([]);
+    } finally {
+      await hub.close(1001, "test over");
+      findUnique.mockRestore();
+      globalThis.__carbadiaPresence = saved.presence;
+      globalThis.__carbadiaWsStats = saved.stats;
+      globalThis.__carbadiaTopicSeq = saved.seq;
+    }
+  });
+});
+
+describe("成交带预读钩子 globalThis.__carbadiaRecentTrades(hub 的成交环在重启后是空的;终审 P1-25a)", () => {
+  it("读库里最近 64 笔,时间升序,takerSide 与 auditRef 同 REST;查无此 symbol → found: false", async () => {
+    expect(globalThis.__carbadiaRecentTrades).toEqual(expect.any(Function)); // 最后加载的一份(见上面「模块加载即挂钩子」)
+    const made: string[] = [];
+    for (let i = 0; i < 3; i += 1) made.push(...(await quietly(() => buy(alice, 10_000, 1))).trades.map((t) => t.id));
+    const result = await globalThis.__carbadiaRecentTrades!(symbol);
+    expect(result.found).toBe(true);
+    expect(result.trades.map((t) => t.id)).toEqual(made);
+    expect(result.trades[0]).toMatchObject({ symbol, price: 10_000, quantity: 1, takerSide: "BUY", auditRef: `SIM-TRD-${made[0]}` });
+    await expect(globalThis.__carbadiaRecentTrades!("NO-SUCH-SYMBOL")).resolves.toEqual({ found: false, trades: [] });
+  });
+
+  it("接上真实的 hub:进程刚起(环是空的)时第一次订阅 trades:SYM 拿到库里的成交,之后的成交照常增量", async () => {
+    const { createHub } = await import("../../../server/ws-hub.mjs");
+    const before: string[] = [];
+    for (let i = 0; i < 3; i += 1) before.push(...(await quietly(() => buy(alice, 10_000, 1))).trades.map((t) => t.id));
+    const saved = { presence: globalThis.__carbadiaPresence, stats: globalThis.__carbadiaWsStats, seq: globalThis.__carbadiaTopicSeq };
+    const hub = createHub({ bus, log: () => {}, batchMs: 5, isKnownSymbol: () => true });
+    class TapeSocket extends EventEmitter {
+      readyState = 1;
+      bufferedAmount = 0;
+      frames: { t: string; seq?: number; trades?: { id: string }[] }[][] = [];
+      send(data: string) {
+        this.frames.push(JSON.parse(data));
+      }
+      close(code?: number) {
+        this.readyState = 3;
+        queueMicrotask(() => this.emit("close", code ?? 1005, ""));
+      }
+      terminate() {
+        this.close(1006);
+      }
+      ping() {}
+    }
+    const socket = new TapeSocket();
+    const tapeEvents = () => socket.frames.flat().filter((e) => e.t === "trades");
+    try {
+      hub.accept(socket, { userId: null, ip: "local" });
+      socket.emit("message", JSON.stringify({ op: "subscribe", topics: [`trades:${symbol}`] }), false);
+      await vi.waitFor(() => expect(tapeEvents()).toHaveLength(1));
+      expect(tapeEvents()[0].trades!.map((t) => t.id)).toEqual(before); // 修复前:[](直到下一笔成交)
+      const r = await buy(alice, 10_000, 1); // 经发布器:hub 的环接着收增量
+      await vi.waitFor(() => expect(tapeEvents()).toHaveLength(2));
+      expect(tapeEvents()[1]).toMatchObject({ seq: 1, trades: [{ id: r.trades[0].id }] });
+    } finally {
+      await hub.close(1001, "test over");
+      globalThis.__carbadiaPresence = saved.presence;
+      globalThis.__carbadiaWsStats = saved.stats;
+      globalThis.__carbadiaTopicSeq = saved.seq;
+    }
+  });
+});
+
+/** 让 userId 的下一次余额读取在读完库之后停住,等 release 才返回:一次读得早、发得晚的慢派生 */
+function holdNextBalanceRead(userId: string) {
+  const real = prisma.user.findUniqueOrThrow.bind(prisma.user);
+  let readDone!: () => void;
+  const read = new Promise<void>((resolve) => (readDone = resolve));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let armed = true;
+  const spy = vi.spyOn(prisma.user, "findUniqueOrThrow").mockImplementation(((args: { where: { id?: string } }) => {
+    const query = real(args as Parameters<typeof real>[0]);
+    if (!armed || args.where.id !== userId) return query; // 其余调用原样(快照的批量事务要的是 PrismaPromise)
+    armed = false;
+    return (async () => {
+      const row = await query;
+      readDone();
+      await gate;
+      return row;
+    })();
+  }) as unknown as typeof real);
+  return { read, release, restore: () => spy.mockRestore() };
+}
+async function balanceNow(userId: string) {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  return { cashBalance: Number(user.cashBalance), lockedCash: Number(user.lockedCash) };
+}
+
+describe("余额读取票号(余额按用户,派生按标的、按 bundle 排队)", () => {
+  it("较早发出、较晚返回的余额读取不发:另一个 bundle 已发了更晚读到的余额(否则客户端整行覆盖成旧余额,空闲用户一直错下去)", async () => {
+    vi.resetModules();
+    const other: Publisher = await import("./market-publisher"); // 另一个 bundle
+    presence([], [alice]);
+    const r1 = await quietly(() => buy(alice, 10_000, 10)); // C1 已提交,派生还没跑
+    const hold = holdNextBalanceRead(alice);
+    try {
+      publisher.publishOrderResult(r1); // bundle A 派生 C1:余额读在 C2 之前,停住
+      await hold.read;
+      const r2 = await quietly(() => buy(alice, 10_000, 20)); // C2
+      other.publishOrderResult(r2); // bundle B 派生 C2:读到 C2 之后的余额,先发出
+      await other._internal.idle();
+      hold.release();
+      await settle();
+    } finally {
+      hold.restore();
+    }
+    const events = accountOf(alice).map((m) => m.event);
+    expect(events.filter((e) => e.t === "balance")).toEqual([{ t: "balance", balance: await balanceNow(alice) }]);
+    // 其余事件照发:B 的 order / fill / balance / position,A 的 order / fill / position(只丢了那条旧余额)
+    expect(events.map((e) => e.t)).toEqual(["order", "fill", "balance", "position", "order", "fill", "position"]);
+  });
+
+  it("按发出顺序返回时两条都发;票号跨 bundle 单调,之后较晚发出的读取照常发", async () => {
+    vi.resetModules();
+    const other: Publisher = await import("./market-publisher");
+    presence([], [alice]);
+    await buy(alice, 10_000, 10); // bundle A
+    await settle();
+    const r2 = await quietly(() => buy(alice, 10_000, 20));
+    other.publishOrderResult(r2); // bundle B
+    await other._internal.idle();
+    await buy(alice, 10_000, 5); // 回到 bundle A
+    await settle();
+    const balances = accountOf(alice).filter((m) => m.event.t === "balance");
+    expect(balances).toHaveLength(3);
+    expect(balances.at(-1)!.event).toEqual({ t: "balance", balance: await balanceNow(alice) });
+  });
+
+  it("OTC 路径同样领票:OTC 派生的余额读取较早发出、较晚返回时不发", async () => {
+    vi.resetModules();
+    const other: Publisher = await import("./market-publisher");
+    presence([], [alice, bob]);
+    const listing = await otc.createListing({ sellerId: bob, assetId, quantity: 20, pricePerUnit: 12_000 });
+    received.length = 0;
+    const hold = holdNextBalanceRead(alice);
+    try {
+      await otc.buyListing(alice, listing.id, 5); // 提交后 publishLastPrice(bundle A):alice 的余额读完停住
+      await hold.read;
+      const r2 = await quietly(() => buy(alice, 10_000, 20));
+      other.publishOrderResult(r2); // bundle B:更晚的余额先发出
+      await other._internal.idle();
+      hold.release();
+      await settle();
+    } finally {
+      hold.restore();
+    }
+    expect(accountOf(alice).filter((m) => m.event.t === "balance").map((m) => m.event)).toEqual([{ t: "balance", balance: await balanceNow(alice) }]);
+    // 别的用户的票号各自独立:bob 是 C2 的 maker(bundle B 先发一条),OTC 派生里他的余额读取发出得更晚,照常发出
+    const bobBalances = accountOf(bob).filter((m) => m.event.t === "balance").map((m) => m.event);
+    expect(bobBalances).toHaveLength(2);
+    expect(bobBalances.at(-1)).toEqual({ t: "balance", balance: await balanceNow(bob) });
+    await otc.cancelListing(bob, listing.id);
+  });
+});
+
+describe("订单事件票号(按订单,在提交后同步领票;终审 P1-25a)", () => {
+  /** alice 的一张挂单 O(9_500 买 10,低于 bob 的卖价,不成交);bob 吃掉 O 的 4 吨(r1:O PARTIAL);alice 撤掉 O(r2:O CANCELLED)。都不经发布器 */
+  async function partialThenCancel() {
+    const resting = await quietly(() => buy(alice, 9_500, 10));
+    const r1 = await quietly(() => sell(bob, 9_500, 4));
+    const r2 = await quietly(() => matching.cancelOrder(alice, resting.order.id));
+    return { id: resting.order.id, r1, r2 };
+  }
+  const orderEvents = (userId: string) =>
+    accountOf(userId)
+      .map((m) => m.event)
+      .flatMap((e) => (e.t === "order" ? [[e.order.id, e.order.status] as const] : []));
+
+  it("较早提交的结果(bot 部分成交,instrumentation bundle)派生慢、晚到:不覆盖较晚提交、已发布的撤单(否则撤掉的单以 PARTIAL 回到挂单列表)", async () => {
+    vi.resetModules();
+    const other: Publisher = await import("./market-publisher"); // route handler bundle(REST 撤单)
+    presence([], [alice]);
+    const { id, r1, r2 } = await partialThenCancel();
+    const hold = holdNextBalanceRead(alice);
+    try {
+      publisher.publishOrderResult(r1); // 按提交顺序领票:r1 先
+      await hold.read; // bundle A 的派生停在读库之后(chain 里排着 stats24h、K 线、五个账户读取……)
+      other.publishOrderResult(r2); // bundle B:撤单没有成交,只读账户,先发出
+      await other._internal.idle();
+      hold.release();
+      await settle();
+    } finally {
+      hold.restore();
+    }
+    expect(orderEvents(alice)).toEqual([[id, "CANCELLED"]]); // 修复前:[CANCELLED, PARTIAL]
+    // 其余事件照发(余额按余额票号裁决:A 的余额读在 B 之前、晚到,也不发)
+    expect(accountOf(alice).map((m) => m.event.t)).toEqual(["order", "balance", "position", "fill", "position"]);
+  });
+
+  it("按提交顺序到达时两条都发:PARTIAL 之后 CANCELLED;票号跨 bundle 单调", async () => {
+    vi.resetModules();
+    const other: Publisher = await import("./market-publisher");
+    presence([], [alice]);
+    const { id, r1, r2 } = await partialThenCancel();
+    publisher.publishOrderResult(r1);
+    await settle();
+    other.publishOrderResult(r2);
+    await other._internal.idle();
+    expect(orderEvents(alice)).toEqual([
+      [id, "PARTIAL"],
+      [id, "CANCELLED"],
+    ]);
+  });
+
+  it("提交时用户不在线(没领票)、派生时才上线:不发这张单的行(他订阅时拿到的快照读在提交之后,不比它旧),成交 / 余额 / 持仓照发", async () => {
+    presence([], []);
+    const { r1 } = await partialThenCancel();
+    publisher.publishOrderResult(r1);
+    presence([], [alice]); // 派生是异步的:在它跑之前上线
+    await settle();
+    expect(accountOf(alice).map((m) => m.event.t)).toEqual(["fill", "balance", "position"]);
+  });
+});
+
+describe("做市机器人账户与每用户状态回收(终审 P1-25a)", () => {
+  /** 一个做市机器人账户(isBot)在 9_900 挂卖 5(比 bob 的 10_000 便宜):alice 买它时机器人是 maker */
+  async function botQuote() {
+    const bot = await prisma.user.create({
+      data: { email: `bot-${run}@publisher.test`, name: "Bot", passwordHash: "x", isBot: true, cashBalance: BigInt(10_000_000_00) },
+    });
+    await prisma.holding.create({ data: { userId: bot.id, assetId, quantity: 1_000, locked: 0 } });
+    await quietly(() => matching.placeOrder({ userId: bot.id, assetId, side: "SELL", type: "LIMIT", price: 9_900, quantity: 5 }));
+    return bot.id;
+  }
+  const botQueries = () => sql.filter((q) => /isBot`?\s*=/.test(q)).length;
+
+  it("机器人不发 account 事件,即使它有 account 订阅(P1-25b 之前签出的旧会话);名单首次需要时查一次库、挂在 globalThis 上;快照钩子拒绝机器人", async () => {
+    const botId = await botQuote();
+    presence(all(), [alice, botId]);
+    sql.length = 0;
+    await buy(alice, 9_900, 2); // taker alice,maker 机器人
+    await settle();
+    await buy(alice, 9_900, 1);
+    await settle();
+    expect(accountOf(alice).map((m) => m.event.t)).toEqual(["order", "fill", "balance", "position", "order", "fill", "balance", "position"]);
+    expect(accountOf(botId)).toHaveLength(0);
+    expect(botQueries()).toBe(1);
+    expect(globalThis.__carbadiaPublisherState?.botUserIds).toContain(botId);
+    await expect(globalThis.__carbadiaAccountSnapshot!(botId)).rejects.toThrow(/bot/i);
+    expect(globalThis.__carbadiaPublisherState?.orderReads.size).toBe(0); // 机器人的挂单不领票;alice 的两张都已 FILLED,发布即回收
+  });
+
+  it("没人在线时不为机器人名单查库", async () => {
+    await botQuote();
+    presence(all(), []);
+    sql.length = 0;
+    await buy(alice, 9_900, 1);
+    await settle();
+    expect(botQueries()).toBe(0);
+  });
+
+  it("余额 / 订单票号有界:终结的挂单一发布就回收;用户离线后下一次清扫(每分钟至多一次,随发布触发)回收他的全部票号", async () => {
+    const users: string[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      const u = await prisma.user.create({ data: { email: `many-${run}-${i}@publisher.test`, name: "U", passwordHash: "x", cashBalance: BigInt(10_000_000_00) } });
+      users.push(u.id);
+    }
+    presence(all(), [alice, ...users]);
+    const state = () => globalThis.__carbadiaPublisherState!;
+    for (const u of users) {
+      await buy(u, 10_000, 1); // FILLED:终结
+      await buy(u, 9_000, 1); // 挂着:OPEN,用户在线期间票号保留
+    }
+    await settle();
+    expect(state().balanceReads.size).toBe(20);
+    expect(state().orderReads.size).toBe(20); // 只剩 20 张挂着的
+    presence(all(), [alice]); // 20 个用户下线
+    state().sweptAt = 0; // 距上次清扫已超过一分钟
+    await buy(alice, 10_000, 1); // 任何一次发布都会顺带清扫
+    await settle();
+    expect([...state().balanceReads.keys()]).toEqual([alice]);
+    expect(state().orderReads.size).toBe(0);
+  });
+
+  it("回收之后才返回的旧读取不发:用户下线、票号被回收、又上线,那次在途的派生(读在回收之前)的余额与订单行都丢掉", async () => {
+    presence([], [alice]);
+    await quietly(() => buy(alice, 9_500, 10));
+    const r1 = await quietly(() => sell(bob, 9_500, 4)); // alice 的挂单 PARTIAL
+    const hold = holdNextBalanceRead(alice);
+    try {
+      publisher.publishOrderResult(r1); // 领了订单票与余额票
+      await hold.read;
+      presence([], []); // 下线
+      globalThis.__carbadiaPublisherState!.sweptAt = 0;
+      await sell(bob, 10_200, 1); // 与 alice 无关的任何一次发布都会触发清扫
+      presence([], [alice]); // 又上线(hub 此时给他发了一份新快照)
+      hold.release();
+      await settle();
+    } finally {
+      hold.restore();
+    }
+    expect(accountOf(alice).map((m) => m.event.t)).toEqual(["fill", "position"]);
+  });
+});
+
+describe("成本价读取收窄到该标的(终审 P1-25a,minor)", () => {
+  it("成交 / 撤单后的持仓只读该标的买入引用的现金行(不再整本扫描用户的现金账),成本价与整本账本的算法(快照 / REST)逐字段一致", async () => {
+    // 另一个标的上的成交:它的现金行与本标的无关
+    const other = await prisma.asset.create({
+      data: { symbol: `${symbol}-B`, name: "Other", standard: "VCS", projectType: "Forestry", vintage: 2026, country: "Example", registry: "Demo", lastPrice: 5_000 },
+    });
+    await prisma.holding.create({ data: { userId: bob, assetId: other.id, quantity: 1_000, locked: 0 } });
+    await quietly(() => matching.placeOrder({ userId: bob, assetId: other.id, side: "SELL", type: "LIMIT", price: 5_000, quantity: 10 }));
+    const elsewhere = await quietly(() => matching.placeOrder({ userId: alice, assetId: other.id, side: "BUY", type: "LIMIT", price: 5_000, quantity: 3 }));
+    const earlier = await quietly(() => buy(alice, 10_100, 2)); // 价格改善:成交 10_000,另有 PRICE_IMPROVE_REFUND
+    presence([], [alice]);
+    const findMany = vi.spyOn(prisma.ledgerEntry, "findMany");
+    try {
+      const r = await buy(alice, 10_000, 3);
+      await settle();
+      const position = accountOf(alice)
+        .map((m) => m.event)
+        .find((e) => e.t === "position");
+      const snapshot = await globalThis.__carbadiaAccountSnapshot!(alice); // 整本账本的算法(与 /api/account/positions 同一 toPosition)
+      expect(position?.t === "position" && position.position).toEqual(snapshot.positions.find((p) => p.assetId === assetId));
+      expect(position?.t === "position" && position.position).toMatchObject({ quantity: 5, averagePurchasePrice: 10_000, costBasisStatus: "complete" });
+      // 派生里读现金行的那一次按引用取,只含本标的的两笔买入;另一个标的的成交不在其中
+      type Where = { where?: { account?: { in?: string[] }; refId?: { in?: string[] } } };
+      const cashReads = findMany.mock.calls
+        .map(([args]) => (args as Where)?.where)
+        .filter((where) => where?.account?.in?.includes("CASH"))
+        .map((where) => where?.refId?.in)
+        .filter((ids): ids is string[] => Array.isArray(ids));
+      expect(cashReads.length).toBeGreaterThan(0);
+      expect(new Set(cashReads.flat())).toEqual(new Set([...earlier.trades, ...r.trades].map((t) => t.id)));
+      expect(cashReads.flat()).not.toContain(elsewhere.trades[0].id);
+    } finally {
+      findMany.mockRestore();
+    }
+  });
+});
+
+describe("现金结算行的查询计划不依赖 sqlite_stat1(P1-25a 复审)", () => {
+  it("按引用取现金行的那条 SQL 在没有统计信息的库上走 (refType, refId) 索引,而不是按用户扫整本现金账", async () => {
+    // 迁移出来的临时库从没 ANALYZE 过,与丢了 sqlite_stat1 的生产库同一处境
+    const stat1 = await prisma.$queryRawUnsafe<{ n: bigint | number }[]>(`SELECT count(*) AS n FROM sqlite_master WHERE name = 'sqlite_stat1'`);
+    expect(Number(stat1[0]?.n)).toBe(0);
+    await quietly(() => buy(alice, 10_000, 2));
+    presence([], [alice]);
+    sql.length = 0;
+    await buy(alice, 10_000, 3);
+    await settle();
+    // 现金行那一条:account IN (CASH, CASH_LOCKED) + reason IN (…) + refId IN (…)(ledgerIdsByTrade 那条也按 refId 取,但不带 account / reason)
+    const cashRead = sql.find((q) => /LedgerEntry/.test(q) && /`account` IN \(/.test(q) && /`reason` IN \(/.test(q) && /`refId` IN \(/.test(q));
+    expect(cashRead).toBeDefined();
+    const placeholders = (cashRead!.match(/\?/g) ?? []).length;
+    const plan = await prisma.$queryRawUnsafe<{ detail: string }[]>(`EXPLAIN QUERY PLAN ${cashRead}`, ...Array.from({ length: placeholders }, () => null));
+    const details = plan.map((row) => row.detail).join(" | ");
+    expect(details).toContain("LedgerEntry_refType_refId_idx");
+    expect(details).not.toContain("LedgerEntry_userId_account_createdAt_idx");
+  });
+});
+
+describe("OTC 与总线隔离", () => {
+  it("buyListing 事务提交后 → ticker(lastPrice = 挂牌价);在线的买卖双方各收 balance + position", async () => {
+    presence(["ticker:*"], [alice, bob]);
+    const listing = await otc.createListing({ sellerId: bob, assetId, quantity: 20, pricePerUnit: 12_000 });
+    received.length = 0;
+    await otc.buyListing(alice, listing.id, 5);
+    await settle();
+    expect(ofKind("ticker")).toHaveLength(1);
+    expect(ofKind("ticker")[0].ticker).toMatchObject({ symbol, lastPrice: 12_000 });
+    expect(accountOf(alice).map((m) => m.event.t)).toEqual(["balance", "position"]);
+    expect(accountOf(bob).map((m) => m.event.t)).toEqual(["balance", "position"]);
+    expect(ofKind("trades")).toHaveLength(0); // OTC 不是撮合成交,不进 tape
+    await otc.cancelListing(bob, listing.id);
+  });
+
+  it("OTC 成交作废标的列表缓存:在成交前开始读库、在作废后才返回的 listInstruments 不把旧价写回缓存", async () => {
+    const cached = () => globalThis.__carbadiaInstrumentsCache; // 函数里读:赋值后的直接读取会被 TS 收窄成 undefined
+    globalThis.__carbadiaInstrumentsCache = undefined;
+    const inflight = snapshots.listInstruments(); // 同步部分已记下代数、发出读库;结果还没回来
+    publisher.publishLastPrice({ assetId, symbol, lastPrice: 12_345, buyerId: alice, sellerId: bob });
+    const stale = await inflight;
+    expect(stale.instruments.find((i) => i.instrument.symbol === symbol)?.ticker.lastPrice).toBe(10_000); // 这个请求照常拿到它读到的
+    expect(cached()).toBeUndefined(); // 但没写回:只清空的话这里会挂着旧价 2 s
+    // 下一次查询照常写缓存
+    const fresh = await snapshots.listInstruments();
+    expect(cached()?.value).toBe(fresh);
+  });
+
+  it("某个订阅者抛错不影响其它订阅者与后续发布", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const off = bus.subscribe(() => {
+      throw new Error("boom");
+    });
+    try {
+      await buy(alice, 10_100, 1);
+      expect(ofKind("trades")).toHaveLength(1);
+      await buy(alice, 10_100, 1);
+      expect(ofKind("trades")).toHaveLength(2);
+      await settle();
+      expect(bus.subscriberErrors()).toBeGreaterThanOrEqual(2);
+      expect(ofKind("book").length).toBeGreaterThanOrEqual(1); // 派生照常
+    } finally {
+      off();
+      errors.mockRestore();
+    }
+  });
+});

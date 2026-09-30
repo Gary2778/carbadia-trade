@@ -9,6 +9,8 @@
 //    退化为围绕自身最新价的纯随机游走——做市不锚定任何外部价格。
 // 3. ShadowSnapshot.realClose 仅内部研究用, 任何 API 路由不得 select/返回本表;
 //    UI 不展示真实价、不展示偏离度(可反推)。
+//    Asset.anchorPrice(bot 的均值回归锚定价)同理不外露: 公开路由只 select INSTRUMENT_SELECT
+//    (src/lib/server/instrument-select.ts), 不得整行 findMany / spread(2026-09-26 起, 计划 §3.4)。
 //
 // ===== 行情采集提醒 =====
 // - CEA 只走 overview.cneeex.com 子域(**不请求 www.cneeex.com**: WAF 420 + 站点条款限制);

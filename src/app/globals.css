@@ -5,14 +5,101 @@
   --background: #ffffff;
   --surface: #ffffff;
   --surface-2: #f5f5f7;
+  --surface-solid: #ffffff; /* 卡面的等效不透明色(浅色下卡面本来就不透明);dark 的值在星空块里 */
+  --surface-overlay: #ffffff; /* 浮层(菜单、对话框、Toast)的底 */
   --border: #e5e5ea;
+  --border-strong: #d1d1d6;
   --foreground: #1d1d1f;
   --muted: #6e6e73;
-  --up: #00a15f;
-  --down: #e0352b;
+  /* 三级灰(终端的列头、单位、标的名、「未提供」):WCAG AA 要求 ≥ 4.5:1。浅色原值 #a1a1a6 只有 2.4–2.6:1;
+     #717177 在终端面板 #fff 上 4.85:1、二级面板 #f7f7f9 上 4.53:1。浅色里它与 --muted(#6e6e73,白底 5.07:1)实际上已并成一级
+     (对比度之比约 1.05):列头、单位、标的名读起来与 --muted 的字一样深 —— lead 接受这个状态(P1-25e);
+     门禁 terminal/contrast.test.ts 在浅色只守「不倒挂」,dark 仍要求 --muted-2 比 --muted 低一阶(≥ 1.2×) */
+  --muted-2: #717177;
+  /* 方向色只表示涨 / 跌、买 / 卖、盈 / 亏。原料色按外观定义,--up / --down 是别名:
+     文件末尾的 html[data-updown="red-up"] 只换别名的指向,约 70 处旧调用(text-up、bg-down/15……)不改一行就跟着翻转。
+     主题块里只定义 --palette-*,不再直接写 --up / --down(否则 (0,2,0) 的特异性会压过翻转规则) */
+  --palette-green: #00a15f;
+  --palette-red: #e0352b;
+  --up: var(--palette-green);
+  --down: var(--palette-red);
+  --up-soft: color-mix(in srgb, var(--up) 12%, transparent); /* 深度条、闪烁底、涨 badge 底 */
+  --down-soft: color-mix(in srgb, var(--down) 12%, transparent);
+  /* 语义色:错误、成功、警告、说明,固定不随涨跌轴翻转(错误态禁用 --down) */
+  --danger: #d0342c;
+  --danger-soft: color-mix(in srgb, var(--danger) 12%, transparent);
+  --success: #0a8a52;
+  --success-soft: color-mix(in srgb, var(--success) 12%, transparent);
+  --warning: #b45309;
+  --warning-soft: color-mix(in srgb, var(--warning) 12%, transparent);
+  --info: #2563eb;
+  --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --focus: #2563eb; /* 键盘焦点环,经 --shadow-focus 使用 */
   --accent: #0a8a52;
   --accent-strong: #097a48;
   --series: var(--accent); /* 数据标记(折线、条形、比例条)的颜色;浅色主题与品牌绿相同 */
+  --series-2: #6685ac; /* MA / EMA 等第二到第四条线 */
+  --series-3: #b98b37;
+  --series-4: #89709b;
+  /* 终端字号阶梯:前缀 t-,不碰 Tailwind 的 --text-xs/sm/base(那会让全站 text-sm / text-xs 回流) */
+  --text-t-2xs: 0.625rem;
+  --text-t-xs: 0.6875rem;
+  --text-t-sm: 0.75rem;
+  --text-t-base: 0.8125rem;
+  --text-t-md: 0.875rem;
+  --text-t-lg: 1rem;
+  --text-t-xl: 1.25rem;
+  --text-t-2xl: 1.5rem;
+  --leading-t-tight: 1.2;
+  --leading-t-base: 1.45;
+  /* 间距:面板间隙、面板内边距、页面侧边距、固定行高(盘口 / tape / 虚拟列表)、紧凑行高(Phase 2)、触控目标、终端头部 */
+  --spacing-gap: 0.25rem;
+  --spacing-panel: 0.75rem;
+  --spacing-gutter: 1rem;
+  --spacing-row: 1.375rem;
+  --spacing-row-dense: 1.25rem;
+  /* 触屏行高(P1-17):(pointer: coarse) 或 < 64rem 时标的列表的行(与 VirtualList 的行高)换成它,星标 / 行链接的命中区够一个触控目标 */
+  --spacing-row-touch: 2.75rem;
+  --spacing-touch: 2.75rem;
+  --spacing-header: 3.5rem;
+  /* 站点导航条(Nav 的 h-14 / md:h-12)的高度:终端头部 sticky 的 top、抽屉的上沿;md 起见下方 @media */
+  --spacing-nav: 3.5rem;
+  /* 圆角:语义名,避开 Tailwind 的 rounded-t-* */
+  --radius-chip: 0.25rem;
+  --radius-control: 0.375rem;
+  --radius-panel: 0.5rem;
+  --radius-dialog: 0.75rem;
+  --radius-pill: 9999px;
+  /* 阴影:浮层与焦点环(--shadow-card / --shadow-soft 仍在 @theme inline 里,现状不动) */
+  --shadow-overlay: 0 24px 60px -20px rgba(0, 0, 0, 0.35);
+  --shadow-focus: 0 0 0 2px var(--focus);
+  /* 动效:hover / 面板展开 / 对话框 / 价格闪烁;减弱动效时四个时长归零(见文件下方) */
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-slow: 350ms;
+  --motion-flash: 600ms;
+  --motion-shimmer: calc(var(--motion-slow) * 4); /* 骨架屏一趟 shimmer(§4.5);减弱动效时随 --motion-slow 归零 */
+  --ease-standard: cubic-bezier(0.21, 0.7, 0.3, 1); /* 与 template.tsx 同曲线 */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  /* z-index:用法 z-(--z-toast);层级值与现有裸数字一致 */
+  --z-below: -1;
+  --z-base: 0;
+  --z-readout: 10;
+  --z-sticky: 15;
+  --z-nav: 20;
+  --z-menu: 30;
+  --z-toast: 50;
+  --z-dialog: 60;
+  --z-popover: 90;
+  /* 模态背景(对话框 ::backdrop、终端抽屉的遮罩) */
+  --scrim: rgba(0, 0, 0, 0.4);
+}
+
+/* Nav 在 md(48rem)起是 h-12 */
+@media (width >= 48rem) {
+  :root {
+    --spacing-nav: 3rem;
+  }
 }
 
 @theme inline {
@@ -22,14 +109,65 @@
   --color-border: var(--border);
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
+  --color-surface-solid: var(--surface-solid);
+  --color-surface-overlay: var(--surface-overlay);
+  --color-border-strong: var(--border-strong);
+  --color-muted-2: var(--muted-2);
   --color-up: var(--up);
   --color-down: var(--down);
+  --color-up-soft: var(--up-soft);
+  --color-down-soft: var(--down-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-focus: var(--focus);
   --color-accent: var(--accent);
   --color-accent-strong: var(--accent-strong);
   --color-series: var(--series);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
+  --color-scrim: var(--scrim);
+  /* 终端阶梯 → text-t-sm / leading-t-tight;间距 → p-panel / h-row / gap-gap / min-h-touch;圆角 → rounded-panel;
+     阴影 → shadow-overlay / shadow-focus;缓动 → ease-standard。同名桥接:Tailwind 在 @layer theme 里发出的
+     `--x: var(--x)` 被上面无 layer 的 :root 原始值压过,工具类落到的仍是 :root 与主题块的值 */
+  --text-t-2xs: var(--text-t-2xs);
+  --text-t-xs: var(--text-t-xs);
+  --text-t-sm: var(--text-t-sm);
+  --text-t-base: var(--text-t-base);
+  --text-t-md: var(--text-t-md);
+  --text-t-lg: var(--text-t-lg);
+  --text-t-xl: var(--text-t-xl);
+  --text-t-2xl: var(--text-t-2xl);
+  --leading-t-tight: var(--leading-t-tight);
+  --leading-t-base: var(--leading-t-base);
+  --spacing-gap: var(--spacing-gap);
+  --spacing-panel: var(--spacing-panel);
+  --spacing-gutter: var(--spacing-gutter);
+  --spacing-row: var(--spacing-row);
+  --spacing-row-dense: var(--spacing-row-dense);
+  --spacing-row-touch: var(--spacing-row-touch);
+  --spacing-touch: var(--spacing-touch);
+  --spacing-header: var(--spacing-header);
+  --spacing-nav: var(--spacing-nav);
+  --radius-chip: var(--radius-chip);
+  --radius-control: var(--radius-control);
+  --radius-panel: var(--radius-panel);
+  --radius-dialog: var(--radius-dialog);
+  --radius-pill: var(--radius-pill);
+  --shadow-overlay: var(--shadow-overlay);
+  --shadow-focus: var(--shadow-focus);
+  --ease-standard: var(--ease-standard);
+  --ease-out: var(--ease-out);
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
     "Helvetica Neue", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  /* Windows / Linux 补 Consolas / Liberation Mono / Roboto Mono,不再退到通用 monospace;不引任何 web 字体 */
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Roboto Mono", monospace;
   --font-serif: Georgia, "Times New Roman", "Songti SC", "STSong", "Noto Serif CJK SC", serif;
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 32px -16px rgba(0, 0, 0, 0.12);
   --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.03), 0 4px 14px -8px rgba(0, 0, 0, 0.08);
@@ -76,11 +214,8 @@ h3 {
   unicode-bidi: isolate;
 }
 
-/* ── 深色系 ─────────────────────────────────────────────────────────
-   <html data-theme="dark"> 只表示色系,底下有两种外观:
-   · dark            —— carbadia.co 同款星空 + 液态玻璃          [data-theme="dark"]:not([data-kids])
-   · 儿童护眼模式     —— 第一版的手绘夜空 + 深蓝卡片(原样保留)  [data-theme="dark"][data-kids]
-   两者共用文字、涨跌、品牌绿;现有的深色适配(Ransom 标题、各横带的深色分支)对两者都生效。 */
+/* ── Dark 模式：carbadia.co 同款星空 + 液态玻璃 ─────────────────────
+   <html data-theme="dark"> 选中;外观只有浅色与 dark 两种。 */
 html[data-theme="dark"] {
   color-scheme: dark;
 }
@@ -88,15 +223,29 @@ html[data-theme="dark"] {
 :root[data-theme="dark"] {
   --foreground: #f2f5ff;
   --muted: #aab2e0;
-  --up: #34d399;
-  --down: #fb7185;
+  --muted-2: #8891bb; /* 原 #6f78a3 在 dark 面板上 4.29:1;调亮后 dark ≥ 5.6:1 */
+  --border-strong: rgba(205, 218, 255, 0.22);
+  --palette-green: #34d399; /* --up / --down 仍是 :root 里的别名,这里只换原料 */
+  --palette-red: #fb7185;
+  --up-soft: color-mix(in srgb, var(--up) 14%, transparent);
+  --down-soft: color-mix(in srgb, var(--down) 14%, transparent);
+  --danger: #fb7185;
+  --danger-soft: color-mix(in srgb, var(--danger) 14%, transparent);
+  --success: #34d399;
+  --success-soft: color-mix(in srgb, var(--success) 14%, transparent);
+  --warning: #fbbf24;
+  --warning-soft: color-mix(in srgb, var(--warning) 14%, transparent);
+  --info: #60a5fa;
+  --info-soft: color-mix(in srgb, var(--info) 14%, transparent);
+  --focus: #60a5fa;
   --accent: #2ee27f;
   --accent-strong: #1fcf6e;
   --series: #16a34a; /* 深色主题:品牌绿 #2ee27f 做大面积数据标记太亮(dataviz 校验 L 0.805 > 0.67),数据标记用更深的一阶 */
-}
-
-/* ── Dark 模式：carbadia.co 同款星空 + 液态玻璃 ───────────────────── */
-:root[data-theme="dark"]:not([data-kids]) {
+  --series-2: #7aa7ff;
+  --series-3: #f5b64a;
+  --series-4: #c9a6ff;
+  --shadow-overlay: 0 24px 60px -20px rgba(0, 0, 0, 0.85);
+  /* 底与面:星空 + 全透明液态玻璃 */
   --background: #06080f; /* 与 carbadia.co 的深色底色相同;星点由 StarfieldCanvas 画在它上面 */
   /* 面不再是深蓝色块,而是压在星空上的透明玻璃:极淡的一层,颜色取星光的冷白(205,218,255),背后的星空原样透过来 */
   --surface: rgba(205, 218, 255, 0); /* 面板中央一点白都不铺:再淡的平铺白压在黑底上也是灰 */
@@ -123,7 +272,7 @@ html[data-theme="dark"] {
 }
 
 /* 夜空底色就是 --background 的纯色:关掉浅色模式的光晕与网格 */
-html[data-theme="dark"]:not([data-kids]) body {
+html[data-theme="dark"] body {
   background-image: none;
   /* 卡片的「阴影」= 沿边一圈方向性高光(左上亮、右下次亮)+ 向下的浮起阴影 */
   --shadow-card: var(--glass-rim), 0 18px 40px -20px rgba(0, 0, 0, 0.7);
@@ -148,24 +297,24 @@ html[data-theme="dark"]:not([data-kids]) body {
    里面的后代再写也只能看到祖先内部,看不到页面——白费性能。 */
 
 /* Tailwind 的 shadow-card / shadow-soft 把阴影值内联了,不跟 token 走:这里接回 token */
-html[data-theme="dark"]:not([data-kids]) .shadow-card {
+html[data-theme="dark"] .shadow-card {
   --tw-shadow: var(--shadow-card);
 }
-html[data-theme="dark"]:not([data-kids]) .shadow-soft {
+html[data-theme="dark"] .shadow-soft {
   --tw-shadow: var(--shadow-soft);
 }
 
 /* 显式类:.glass-panel / .glass-control / .glass-overlay / .glass-bar,写在组件的 className 里 */
-html[data-theme="dark"]:not([data-kids]) .glass-panel {
+html[data-theme="dark"] .glass-panel {
   box-shadow: var(--shadow-card);
 }
-html[data-theme="dark"]:not([data-kids]) :is(.shadow-card, .glass-panel):not(.glass-overlay) {
+html[data-theme="dark"] :is(.shadow-card, .glass-panel):not(.glass-overlay) {
   background-image: var(--glass-sheen);
 }
 
 /* 控件中央不着色(盖掉组件上的 bg-surface-2),边框透明(1px 灰边框和 1px 高光在左上挤成一道粗灰弧),
    轮廓全交给 --glass-rim-strong 那一圈高光 */
-html[data-theme="dark"]:not([data-kids]) .glass-control {
+html[data-theme="dark"] .glass-control {
   background-color: transparent;
   border-color: transparent;
   background-image: var(--glass-sheen-control);
@@ -173,14 +322,14 @@ html[data-theme="dark"]:not([data-kids]) .glass-control {
   transition: background-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
 }
 /* 悬停:不往中间铺白(那又是一层灰),把边上的高光再点亮一档 */
-html[data-theme="dark"]:not([data-kids]) .glass-control:hover {
+html[data-theme="dark"] .glass-control:hover {
   box-shadow: inset 1px 1px 0 rgba(255, 255, 255, 0.95), inset -1px -1px 0 rgba(200, 222, 255, 0.5), 0 6px 18px -10px rgba(0, 0, 0, 0.7);
 }
-html[data-theme="dark"]:not([data-kids]) .glass-control:active {
+html[data-theme="dark"] .glass-control:active {
   background-color: rgba(205, 218, 255, 0.06);
 }
 
-html[data-theme="dark"]:not([data-kids]) .glass-overlay {
+html[data-theme="dark"] .glass-overlay {
   background-color: var(--surface-overlay);
   box-shadow: var(--glass-rim), 0 24px 60px -20px rgba(0, 0, 0, 0.85);
   -webkit-backdrop-filter: blur(24px) saturate(180%);
@@ -190,7 +339,7 @@ html[data-theme="dark"]:not([data-kids]) .glass-overlay {
 /* 导航条:手机端不开模糊(性能),没有模糊的半透明只会透出一层脏字,所以填充不透明。
    桌面端条本身完全透明、不做 backdrop-filter——它一做,里面的胶囊按钮就只能看见它、看不见页面,折射就空了;
    正文从它底下滚过时的可读性交给身后的 .glass-scrim(iOS 26 导航条的「滚动边缘」做法:一层向下渐隐的模糊 + 暗色)。 */
-html[data-theme="dark"]:not([data-kids]) .glass-bar {
+html[data-theme="dark"] .glass-bar {
   background-color: #080a12;
   border-color: rgba(255, 255, 255, 0.09);
   box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.05);
@@ -199,14 +348,14 @@ html[data-theme="dark"]:not([data-kids]) .glass-bar {
   display: none;
 }
 @media (min-width: 768px) {
-  html[data-theme="dark"]:not([data-kids]) .glass-bar {
+  html[data-theme="dark"] .glass-bar {
     background-color: transparent;
     border-color: rgba(255, 255, 255, 0.06);
     box-shadow: none;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
   }
-  html[data-theme="dark"]:not([data-kids]) .glass-scrim {
+  html[data-theme="dark"] .glass-scrim {
     display: block;
     position: absolute;
     inset: 0 0 auto 0;
@@ -221,97 +370,171 @@ html[data-theme="dark"]:not([data-kids]) .glass-bar {
   }
 }
 /* 手机 / 平板的展开菜单压在正文上:按浮层处理,不透明 */
-html[data-theme="dark"]:not([data-kids]) .glass-menu {
+html[data-theme="dark"] .glass-menu {
   background-color: var(--surface-overlay);
 }
 
 /* 系统开了「降低透明度」:面改回不透明的深灰,不做模糊 */
 @media (prefers-reduced-transparency: reduce) {
-  :root[data-theme="dark"]:not([data-kids]) {
+  :root[data-theme="dark"] {
     --surface: #11141c;
     --surface-2: #1a1e29;
     --border: #2a2f3d;
     --surface-overlay: #0d101b;
   }
-  html[data-theme="dark"]:not([data-kids]) :is(.glass-bar, .glass-overlay) {
+  html[data-theme="dark"] :is(.glass-bar, .glass-overlay) {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
   }
-  html[data-theme="dark"]:not([data-kids]) .glass-bar {
+  html[data-theme="dark"] .glass-bar {
     background-color: #080a12;
   }
-  html[data-theme="dark"]:not([data-kids]) .glass-scrim {
+  html[data-theme="dark"] .glass-scrim {
     display: none;
   }
 }
 
-/* ── 儿童护眼模式:第一版 dark 原样保留(Peppa 星空夜色)──────────── */
-:root[data-theme="dark"][data-kids] {
-  --background: #0c1330;
-  --surface: #141b3d;
-  --surface-2: #1d2552;
-  --border: #2c3568;
+/* ── 终端专用 token(src/app/terminal.css 只消费,不定义)─────────────
+   按两种外观各写一组;data-terminal 与 data-glass="off" 同挂在 TerminalShell 根节点上。 */
+[data-terminal] {
+  --terminal-bg: #f0f1f4;
+  --terminal-panel: var(--surface-solid);
+  --terminal-panel-2: #f7f7f9;
+  --terminal-border: #e3e4e8;
+  --terminal-row-hover: rgba(0, 0, 0, 0.03); /* 0.04 时 --muted-2 在悬停行上 4.45:1;0.03 ≈ 二级面板的深浅,4.5:1 以上(门禁 terminal/contrast.test.ts) */
+  --terminal-selected: rgba(10, 138, 82, 0.1);
+  --terminal-mine: var(--accent); /* 盘口自家档 */
+  /* 盘口次要列(累计、笔数)的字色:它们压在深度条(--up-soft / --down-soft)上,悬停时还叠着 --terminal-row-hover。
+     浅色 --muted 在「悬停 + 跌色深度条」上只有 4.01:1、--muted-2 3.83:1;#5c5c61 在白底 6.65:1,「悬停 + 跌色深度条」5.26:1,
+     再叠上数量变化时的闪烁起点 4.51:1(P1-25e;P1-26 起门禁 terminal/contrast.test.ts 把闪烁底算进来)。
+     只用在盘口行里,终端别处的次要字仍是 --muted / --muted-2 */
+  --terminal-book-muted: #5a5a5f; /* P1-26 复审:#5c5c61 的最差 4.50:1 只靠浮点合成的舍入过线,逐层 8 位合成约 4.45–4.48:1;#5a5a5f 逐层 4.59:1 */
+  /* 盘口价格列的方向色(P1-25e 复审,P1-26 按闪烁底重取):深度条从行尾长出来,长的时候会盖到价格列,悬停时还叠着
+     --terminal-row-hover,数量变化时整行再闪一层同方向的 --up-soft / --down-soft。浅色 --palette-green #00a15f 在白底只有 3.35:1、
+     --palette-red 4.46:1,所以盘口价格用更深一级的同色相;P1-25e 的 #007546 / #bc2b22 在「悬停 + 深度条 + 闪烁起点」上只有 4.21 / 4.06:1,
+     P1-26 再压一点:#006f43 白底 6.26:1、最差 4.56:1;#ad281f 白底 6.77:1、最差 4.60:1。
+     深度条、闪烁底本身仍是 --up-soft / --down-soft(站点原料色),买卖按钮的底与 K 线仍是站点的 --up / --down。
+     --terminal-book-green / -red 是按外观取值的原料,--terminal-book-up / -down 是别名,只在这一块里定义:
+     涨跌轴翻转靠文件末尾的 html[data-updown="red-up"] [data-terminal](外观块若也写别名,就和翻转规则抢同一个属性:
+     dark 块与它同为 (0,2,1),胜负只剩先后顺序;所以外观块只写原料) */
+  --terminal-book-green: #006f43;
+  --terminal-book-red: #ad281f;
+  --terminal-book-up: var(--terminal-book-green);
+  --terminal-book-down: var(--terminal-book-red);
+  /* 终端别处的涨跌文字(P1-26,用户决定 §9.1 第 43 条「只改终端」):成交带价格、头部最新价 / 24h 涨跌 / 买一卖一、标的列表涨跌幅、
+     底部 Tab 的方向与盈亏、持仓行的卖出按钮、成交详情的分录、确认框的方向标签,一律 text-(--terminal-up / -down),不用 text-up / text-down。
+     浅色与盘口价格列同一套(站点 --up / --down 白底 3.35 / 4.46:1);dark 在自己的外观块里按外观取值,已达标的沿用站点原料色。
+     --terminal-green / -red 是原料,--terminal-up / -down 是别名,规则同上:只在这一块里定义,红涨绿跌由文件末尾的翻转规则换指向。
+     主站(非 /trade)不受影响:这些 token 只在 [data-terminal] 的子树里有值(门禁 terminal/contrast.test.ts、app/tokens.test.ts) */
+  --terminal-green: var(--terminal-book-green);
+  --terminal-red: var(--terminal-book-red);
+  --terminal-up: var(--terminal-green);
+  --terminal-down: var(--terminal-red);
+}
+html[data-theme="dark"] [data-terminal] {
+  --terminal-bg: #0b0e14;
+  --terminal-panel: var(--surface-solid); /* #11141c */
+  --terminal-panel-2: #161a24;
+  --terminal-border: #232838;
+  --terminal-row-hover: rgba(205, 218, 255, 0.06);
+  --terminal-selected: rgba(46, 226, 127, 0.12);
+  --terminal-mine: var(--accent);
+  /* 盘口累计 / 笔数:--muted 在深度条上最差 5.95:1,但「悬停 + 深度条 + 闪烁起点」上 4.46:1;提亮一点到 4.55:1(P1-26)。--muted-2 只有 4.00:1 */
+  --terminal-book-muted: #acb4e1;
+  --terminal-book-green: var(--palette-green); /* 悬停 + 深度条 + 闪烁起点上最差 4.80:1 */
+  --terminal-book-red: #fc8899; /* --palette-red #fb7185 在「悬停 + 深度条 + 闪烁起点」上 3.94:1;提亮一级到 4.60:1(P1-26) */
+  --terminal-green: var(--palette-green); /* 终端别处的涨跌文字:站点原料色在它们的底上都 ≥ 4.5:1,不动 */
+  --terminal-red: var(--palette-red); /* 最差「悬停 + 跌色染色」(持仓行的卖出按钮)4.92:1 */
 }
 
-/* 夜空底色：上深下浅的靛蓝渐变 + 右上方一抹紫光晕；卡通星星/弯月由 StarrySky 叠加 */
-html[data-theme="dark"][data-kids] body {
-  background-color: #0a1130;
-  background-image:
-    radial-gradient(60rem 42rem at 82% -6rem, rgba(124, 96, 210, 0.28), transparent 70%),
-    linear-gradient(180deg, #080d28 0%, #0b1336 46%, #122a4c 100%);
-  background-size: 100% 100%, 100% 100%;
-  background-position: 0 0, 0 0;
-  background-attachment: fixed;
-  background-repeat: no-repeat, no-repeat;
-  /* 卡片更通透，让星空透出来一点 */
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 40px -20px rgba(0, 0, 0, 0.7);
-  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 22px -12px rgba(0, 0, 0, 0.55);
+/* ── 终端退出玻璃 ─────────────────────────────────────────────────
+   星空 + 全透明液态玻璃是站点设计,不改;终端在 data-glass="off" 之下把面切成不透明面板:
+   dark 的 --surface alpha 0 在这个子树里换成终端面板色,阴影(沿边高光)归零。
+   light 的 --surface 本就不透明,这条规则只写 dark。 */
+html[data-theme="dark"] [data-glass="off"] {
+  --surface: var(--terminal-panel);
+  --surface-2: var(--terminal-panel-2);
+  --border: var(--terminal-border);
+  --surface-overlay: #0d101b;
+  --shadow-card: none;
+  --shadow-soft: none;
+}
+/* Tailwind 把 shadow-card 的值内联了,只能经 --tw-shadow 覆写 */
+[data-glass="off"] .shadow-card {
+  --tw-shadow: none;
 }
 
-/* ── 星星眨眼(StarrySky)──────────────────────────────────────── */
-@keyframes carbadia-twinkle {
-  0%,
-  100% {
-    opacity: 0.35;
+/* ── 价格闪烁:keyframes 只引用 --up-soft / --down-soft,随涨跌轴翻转;FlashCell 与终端盘口共用 ── */
+@keyframes t-flash-up {
+  from {
+    background: var(--up-soft);
   }
-  50% {
-    opacity: 1;
-  }
-}
-
-/* ── 流星:偶尔划过(大半个周期隐身,短暂加速掠过后淡出) ── */
-@keyframes carbadia-shoot {
-  0%,
-  4% {
-    opacity: 0;
-    transform: translate(0, 0);
-  }
-  8% {
-    opacity: 1;
-  }
-  20% {
-    opacity: 1;
-  }
-  26%,
-  100% {
-    opacity: 0;
-    transform: translate(330px, 150px);
+  to {
+    background: transparent;
   }
 }
-
-.carbadia-shoot {
-  animation: carbadia-shoot 9s ease-in infinite;
+@keyframes t-flash-down {
+  from {
+    background: var(--down-soft);
+  }
+  to {
+    background: transparent;
+  }
+}
+.flash-up {
+  animation: t-flash-up var(--motion-flash) var(--ease-out);
+}
+.flash-down {
+  animation: t-flash-down var(--motion-flash) var(--ease-out);
 }
 
+/* ── 骨架屏 shimmer(ui/Skeleton,§4.5):一道淡光从左扫到右;只动 transform(合成层,不重绘),
+   时长 --motion-shimmer 随 --motion-slow 在减弱动效下归零,再加一道 animation: none 兜底 ── */
+@keyframes t-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+.t-shimmer {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--surface-2);
+}
+.t-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(90deg, transparent, color-mix(in srgb, var(--foreground) 6%, transparent), transparent);
+  transform: translateX(-100%);
+  animation: t-shimmer var(--motion-shimmer) var(--ease-standard) infinite;
+}
 @media (prefers-reduced-motion: reduce) {
-  .carbadia-star {
-    animation: none !important;
-    opacity: 0.9;
+  .t-shimmer::after {
+    animation: none;
   }
-  /* 减弱动效时:流星静止显示在起点,不再循环掠过 */
-  .carbadia-shoot {
-    animation: none !important;
-    opacity: 0.85;
+}
+
+/* ── 终端(/trade/[symbol])逃出根布局的 max-w-7xl 与内边距:无 JS、SSR HTML 即全宽,无 CLS(§4.1.5)──
+   Tailwind 工具类在 @layer utilities 里,这里无 layer 的规则直接压过它们 */
+body:has([data-terminal]) main {
+  max-width: none;
+  padding: 0;
+}
+/* 手机版底部固定的买入 / 卖出条:页尾留出同样的高度,页脚不被压住 */
+body:has([data-terminal][data-layout="mobile"]) {
+  padding-bottom: calc(var(--spacing-touch) + var(--spacing-panel) * 2 + env(safe-area-inset-bottom));
+}
+
+/* 减弱动效:四个时长归零(与 MotionConfig reducedMotion="user" 一起构成三重门控) */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+    --motion-slow: 0ms;
+    --motion-flash: 0ms;
   }
 }
 
@@ -340,4 +563,20 @@ html[data-theme="dark"][data-kids] body {
     padding: 0.02em 0.1em;
     margin: 0 0.02em;
   }
+}
+
+/* ── 涨跌轴:红涨绿跌 ─────────────────────────────────────────────
+   写在所有主题块之后、与主题无关(原料色已按主题定义),只换别名的指向;语义色(--danger 等)不受影响。
+   属性由 layout.tsx 的 THEME_INIT 在首帧前写、ThemeProvider 接管;存储键 carbadia-updown。 */
+html[data-updown="red-up"] {
+  --up: var(--palette-red);
+  --down: var(--palette-green);
+}
+/* 终端涨跌文字的别名跟着翻转(原料 --terminal-book-green / -red、--terminal-green / -red 在两个 [data-terminal] 外观块里按外观定义)。
+   外观块 html[data-theme="dark"] [data-terminal] 与这条同为 (0,2,1):外观块只写原料、不写别名,这条又写在它之后,翻转不受外观影响 */
+html[data-updown="red-up"] [data-terminal] {
+  --terminal-book-up: var(--terminal-book-red);
+  --terminal-book-down: var(--terminal-book-green);
+  --terminal-up: var(--terminal-red);
+  --terminal-down: var(--terminal-green);
 }

@@ -59,7 +59,7 @@ export function LanguageToggle() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.97 }}
             transition={{ duration: 0.16, ease: [0.21, 0.7, 0.3, 1] }}
-            className="glass-overlay absolute end-0 top-full mt-2 z-30 w-44 rounded-2xl border border-border bg-surface shadow-card p-1.5"
+            className="glass-overlay absolute end-0 top-full mt-2 z-(--z-menu) w-44 rounded-2xl border border-border bg-surface shadow-card p-1.5"
           >
             {LANGS.map((code) => {
               const active = code === lang;

@@ -60,7 +60,7 @@ export default function FeedbackPage() {
                   className="w-full mt-1 bg-surface-2 border border-border rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-accent"
                 />
               </label>
-              {err && <div className="text-down text-xs">{err}</div>}
+              {err && <div className="text-danger text-xs">{err}</div>}
               <button
                 disabled={busy}
                 className="w-full py-2.5 rounded-full bg-accent text-background font-medium hover:bg-accent-strong transition-colors disabled:opacity-40"

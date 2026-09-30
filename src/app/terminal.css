@@ -1,0 +1,255 @@
+/* 终端专用规则:只匹配 [data-terminal],由 src/app/trade/[symbol]/layout.tsx 导入(P1-16),其它页面不受影响。
+   只消费 globals.css 里的 token,不写原始值:没有 hex、rgb 函数色、Tailwind 调色板与 px 字面量(1px 边框除外);
+   断点一律 rem:@media (width >= 48rem | 64rem | 80rem) 对应 768 / 1024 / 1280(tokens-only.test.ts 把关)。
+   终端 token(--terminal-bg / -panel / -panel-2 / -border / -row-hover / -selected / -mine)按两种外观定义在 globals.css。
+
+   布局(计划 §4.7):桌面 / 平板的差异全部由这里的断点完成,SSR HTML 与首帧一致、无跳变;
+   TerminalShell 的 data-layout(useTerminalLayout:服务端快照恒 desktop)只决定手机变体挂哪些子树。
+     ≥ 80rem   17.5rem | 图表 + 盘口·成交 | 20rem 下单,底部 Tab 16.25rem
+     64–80rem  左栏收成抽屉(--z-menu),其余同桌面
+     48–64rem  两栏:图表 + 盘口 + 成交一列,下单 + 碳元数据一列,底部 Tab 保留
+     < 48rem   头部 + 页签条(图表 / 盘口·成交 / 下单)+ 当前页签的面板 + 底部固定买卖条,侧边距 --spacing-gutter;
+               页签条总在 HTML 里,这里按断点显示 / 隐藏,手机的 SSR 首帧就占好位置(P1-25f) */
+
+[data-terminal] {
+  background: var(--terminal-bg); /* 不透明;面板底 bg-(--terminal-panel),间隙 gap-gap */
+  font-size: var(--text-t-base); /* 终端基准 0.8125rem(13 px),只引 token */
+  line-height: var(--leading-t-base);
+  font-variant-numeric: tabular-nums; /* 全终端等宽数字;价格 / 数量 / 金额列再加 .tnum(mono 栈) */
+  display: grid;
+  gap: var(--spacing-gap);
+  padding: var(--spacing-gap) var(--spacing-gutter);
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  /* < 48rem 不写 grid-template-areas:子节点按 DOM 顺序单列排(头部、页签条、面板;抽屉与遮罩是 fixed,不占格)。
+     display: none 的面板不生成网格项,也就不留空行与行间隙 —— 手机的 SSR 首帧与水合后的手机子树同高(P1-25f) */
+}
+
+/* 面板格子:允许收缩到 0,内容在面板内部滚动,永远不把页面撑出横向滚动 */
+[data-terminal] > [data-area] {
+  min-width: 0;
+  min-height: 0;
+}
+[data-terminal] > [data-area="header"] {
+  position: sticky;
+  top: var(--spacing-nav);
+  z-index: var(--z-sticky);
+}
+/* 图表面板(含手机页签里的那一个)至少 18rem 高:懒加载前的 Skeleton 与加载后的图表同高,无位移 */
+[data-terminal] [data-area="chart"] {
+  min-height: 18rem;
+}
+
+/* 标的面板:< 80rem 是从左侧滑出的抽屉(打开由 data-drawer="open" 决定),≥ 80rem 回到网格左栏。
+   抽屉自带不透明底与内边距:顶部是关闭按钮([data-drawer-close],触屏上遮罩之外唯一可见的关闭方式),下面是面板 */
+[data-terminal] > [data-area="instruments"] {
+  grid-area: instruments;
+  position: fixed;
+  inset-block: var(--spacing-nav) 0;
+  inset-inline-start: 0;
+  width: min(17.5rem, 85%);
+  z-index: var(--z-menu);
+  background: var(--terminal-bg);
+  padding: var(--spacing-gap);
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition:
+    transform var(--motion-base) var(--ease-standard),
+    visibility 0s linear var(--motion-base);
+}
+[data-terminal][data-drawer="open"] > [data-area="instruments"] {
+  transform: none;
+  visibility: visible;
+  transition: transform var(--motion-base) var(--ease-standard);
+}
+[data-terminal] > [data-drawer-scrim] {
+  position: fixed;
+  inset: var(--spacing-nav) 0 0 0;
+  z-index: calc(var(--z-menu) - 1);
+  background: var(--scrim);
+  border: 0;
+}
+
+/* 手机的 SSR 首帧(data-layout 仍是服务端快照 desktop):头部、页签条之后只露当前页签(data-mobile-tab)的那几块面板,
+   顺序与 MobileTabs 的页签面板相同(图表 / 盘口 + 成交 / 下单 + 碳元数据 + 底部 Tab)—— 水合后换成手机子树时同高同位 */
+@media (width < 48rem) {
+  [data-terminal][data-layout="desktop"][data-mobile-tab="chart"] > :is([data-area="book"], [data-area="tape"], [data-area="order"], [data-area="meta"], [data-area="tabs"]),
+  [data-terminal][data-layout="desktop"][data-mobile-tab="book"] > :is([data-area="chart"], [data-area="order"], [data-area="meta"], [data-area="tabs"]),
+  [data-terminal][data-layout="desktop"][data-mobile-tab="order"] > :is([data-area="chart"], [data-area="book"], [data-area="tape"]) {
+    display: none;
+  }
+}
+
+/* 手机子树(data-layout="mobile"):头部、页签条、激活页签单列排布(< 48rem 的基础网格本就如此;这里兜住视口刚跨过
+   48rem、matchMedia 的 change 还没到的那一瞬,不让手机子树落进宽屏的网格区);底部买卖条固定在视口底 */
+[data-terminal][data-layout="mobile"] {
+  grid-template-areas: none;
+  grid-auto-rows: auto;
+}
+[data-terminal][data-layout="mobile"] > [data-area] {
+  grid-area: auto;
+}
+[data-terminal] [data-mobile-actions] {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: var(--z-sticky);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-gap);
+  padding: var(--spacing-panel) var(--spacing-gutter) calc(var(--spacing-panel) + env(safe-area-inset-bottom));
+  background: var(--terminal-panel);
+  border-top: 1px solid var(--terminal-border);
+}
+
+/* ── 盘口与成交 tape(P1-18,计划 §3.1、§3.6、§4.3)──────────────────────────
+   列:盘口 价 | 量 | 累计 | 单数;tape 时间 | 价 | 量。行高固定 h-row(--spacing-row),contain: content 让一行的
+   重绘不外溢、也不推挤邻行。 */
+[data-terminal] .t-book-grid,
+[data-terminal] .t-tape-grid {
+  display: grid;
+  align-items: center;
+  column-gap: var(--spacing-gap);
+}
+[data-terminal] .t-book-grid {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 2rem);
+}
+[data-terminal] .t-tape-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr);
+  contain: content;
+}
+
+/* 盘口一行:isolation 自成层叠上下文,z-index -1 的深度条与闪烁底落在行的 hover 底色之上、文字之下 */
+[data-terminal] .t-book-row {
+  position: relative;
+  isolation: isolate;
+  contain: content;
+}
+
+/* 深度条基类:宽度只由行内 transform: scaleX(pct) 决定(合成层,不触发布局),从行尾长出;底色 bg-up-soft / bg-down-soft
+   由组件给。闪烁底同样铺满整行:.flash-up / .flash-down 的 keyframes 与时长(--motion-flash)在 globals.css,
+   FlashCell 与盘口共用一套,这里只给定位 */
+[data-terminal] .t-depth-bar,
+[data-terminal] .t-row-flash {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+[data-terminal] .t-depth-bar {
+  transform-origin: 100% 50%;
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+/* 自家档(data-mine):行首一道 --terminal-mine 竖条,不占列宽(行的 px-gap 内边距比竖条宽) */
+[data-terminal] [data-mine] > .t-book-row::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 0.1875rem;
+  background: var(--terminal-mine);
+}
+
+/* 手机与触屏(同 useLowPower 的口径;减弱动效时 --motion-flash 本就归零):盘口 / tape 的行闪烁关闭 */
+@media (width < 48rem), (pointer: coarse) {
+  [data-terminal] .t-row-flash {
+    animation: none;
+  }
+}
+
+/* 手机:盘口与成交在同一个页签里上下排,各给定高 —— 两侧的滚动区与 tape 的虚拟列表都要有界的容器,
+   否则会被内容撑开(虚拟列表就会把 200 行全画出来);按断点而不是 data-layout 写,SSR 首帧与手机子树同高 */
+@media (width < 48rem) {
+  [data-terminal] [data-area="book"] {
+    height: 28rem;
+  }
+  [data-terminal] [data-area="tape"] {
+    height: 20rem;
+  }
+}
+
+/* ?perf=1 的 PerfHud(终端根的直接子节点,fixed + z-popover,压在抽屉与底部条之上):
+   手机布局抬到底部买卖条上方,不挡买入 / 卖出按钮;高度与 globals.css 给页尾留的白同一算式 */
+[data-terminal][data-layout="mobile"] > [data-perf-hud] {
+  bottom: calc(var(--spacing-touch) + var(--spacing-panel) * 2 + env(safe-area-inset-bottom) + var(--spacing-gutter));
+}
+
+@media (width >= 48rem) {
+  [data-terminal] {
+    padding: var(--spacing-gap);
+    grid-template-columns: minmax(0, 1fr) 20rem;
+    grid-template-rows: auto minmax(22rem, 1fr) 20rem 16rem 16.25rem;
+    grid-template-areas:
+      "header header"
+      "chart order"
+      "book order"
+      "tape meta"
+      "tabs tabs";
+  }
+  [data-terminal] > [data-area="header"] {
+    grid-area: header;
+  }
+  [data-terminal] > [data-area="chart"] {
+    grid-area: chart;
+  }
+  [data-terminal] > [data-area="book"] {
+    grid-area: book;
+  }
+  [data-terminal] > [data-area="tape"] {
+    grid-area: tape;
+  }
+  [data-terminal] > [data-area="order"] {
+    grid-area: order;
+  }
+  [data-terminal] > [data-area="meta"] {
+    grid-area: meta;
+  }
+  [data-terminal] > [data-area="tabs"] {
+    grid-area: tabs;
+  }
+  /* 页签条只属于手机(它总在 HTML 里,见 MobileTabs) */
+  [data-terminal] > [data-area="mobile-tabs"] {
+    display: none;
+  }
+}
+
+@media (width >= 64rem) {
+  [data-terminal] {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 20rem;
+    grid-template-rows: auto minmax(24rem, 1fr) 22rem 16.25rem;
+    grid-template-areas:
+      "header header header"
+      "chart chart order"
+      "book tape order"
+      "tabs tabs meta";
+  }
+}
+
+@media (width >= 80rem) {
+  [data-terminal] {
+    grid-template-columns: 17.5rem minmax(0, 1fr) minmax(0, 1fr) 20rem;
+    grid-template-rows: auto minmax(26rem, 1fr) 24rem 16.25rem;
+    grid-template-areas:
+      "header header header header"
+      "instruments chart chart order"
+      "instruments book tape order"
+      "instruments tabs tabs meta";
+  }
+  /* 左栏回到网格:不再是抽屉,也不需要开关、关闭按钮与遮罩;contain: size 让列表多长都不撑高网格行,只在面板内滚动 */
+  [data-terminal] > [data-area="instruments"] {
+    position: static;
+    width: auto;
+    background: none;
+    padding: 0;
+    transform: none;
+    visibility: visible;
+    transition: none;
+    z-index: auto;
+    contain: size;
+  }
+  [data-terminal] :is([data-drawer-toggle], [data-drawer-close]),
+  [data-terminal] > [data-drawer-scrim] {
+    display: none;
+  }
+}
