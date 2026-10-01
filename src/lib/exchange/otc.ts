@@ -1,5 +1,5 @@
 import { prisma } from "../server/db";
-import { publishLastPrice } from "../server/market-publisher";
+import { publishLastPrice, publishPositionChange } from "../server/market-publisher";
 import { MAX_NOTIONAL_CENTS, MAX_PRICE_CENTS } from "./limits";
 import { writeLedger } from "./ledger";
 
@@ -13,7 +13,10 @@ interface CreateListingInput {
   minQuantity?: number;
 }
 
-/** 创建 OTC 挂牌: 冻结卖方对应持仓。金额语义: 整数分。 */
+/**
+ * 创建 OTC 挂牌: 冻结卖方对应持仓。金额语义: 整数分。
+ * 事务提交后把卖方在该标的上的持仓交给发布器(计划 §6.2.2 C2: locked 与 lockedBy.otc 增加,现金不变);发布不 await。
+ */
 export async function createListing(input: CreateListingInput) {
   const quantity = Math.trunc(input.quantity);
   const pricePerUnit = input.pricePerUnit;
@@ -26,7 +29,7 @@ export async function createListing(input: CreateListingInput) {
   if (pricePerUnit * quantity > MAX_NOTIONAL_CENTS) throw new OtcError("Listing notional exceeds maximum");
   if (minQuantity > quantity) throw new OtcError("Min buy cannot exceed listing quantity");
 
-  return prisma.$transaction(async (tx) => {
+  const listing = await prisma.$transaction(async (tx) => {
     const holding = await tx.holding.findUnique({
       where: { userId_assetId: { userId: input.sellerId, assetId: input.assetId } },
     });
@@ -54,11 +57,13 @@ export async function createListing(input: CreateListingInput) {
 
     return listing;
   });
+  publishPositionChange(listing.sellerId, listing.assetId);
+  return listing;
 }
 
-/** 撤销 OTC 挂牌: 解冻剩余持仓 */
+/** 撤销 OTC 挂牌: 解冻剩余持仓。事务提交后同样把卖方的持仓交给发布器(locked 与 lockedBy.otc 复原) */
 export async function cancelListing(sellerId: string, listingId: string) {
-  return prisma.$transaction(async (tx) => {
+  const cancelled = await prisma.$transaction(async (tx) => {
     const listing = await tx.otcListing.findUnique({ where: { id: listingId } });
     if (!listing) throw new OtcError("Listing not found");
     if (listing.sellerId !== sellerId) throw new OtcError("Not your listing");
@@ -75,6 +80,8 @@ export async function cancelListing(sellerId: string, listingId: string) {
 
     return tx.otcListing.update({ where: { id: listingId }, data: { status: "CANCELLED" } });
   });
+  publishPositionChange(cancelled.sellerId, cancelled.assetId);
+  return cancelled;
 }
 
 /** 购买 OTC 挂牌(可部分成交)。事务提交后把成交价交给发布器(ticker 最后价 + 双方账户事件),发布不 await、失败的事务永不进总线 */

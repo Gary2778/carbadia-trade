@@ -54,6 +54,7 @@ const position = (symbol: string): Position => ({
   symbol,
   quantity: 10,
   locked: 2,
+  lockedBy: { orders: 2, otc: 0 },
   available: 8,
   retired: 0,
   lastPrice: 1234,

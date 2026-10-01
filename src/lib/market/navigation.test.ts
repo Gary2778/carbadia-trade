@@ -5,6 +5,7 @@ import { generateMetadata } from "@/app/trade/[symbol]/layout";
 import { PREFS_KEY } from "./prefs";
 import {
   filtersToSearch,
+  marketTerminalRedirect,
   readFiltersFromUrl,
   readSideFromUrl,
   switchSymbol,
@@ -198,5 +199,45 @@ describe("switchSymbol", () => {
     switchSymbol("VCS-FOR-2021");
     expect(browser.replaceState).not.toHaveBeenCalled();
     expect(browser.doc.title).toBe("VCS-FOR-2021 · Terminal · Carbadia Trade");
+  });
+});
+
+describe("marketTerminalRedirect(旧标的页的交易入口哪些交给终端)", () => {
+  const scenarios = new Set(["CEA-SCEN-2026"]);
+  const lookup = () => vi.fn(async (symbol: string) => scenarios.has(symbol));
+
+  it("tab=trade 且 mode=advanced:不查标的,直接给 /trade/<symbol>?side=", async () => {
+    const isScenario = lookup();
+    expect(await marketTerminalRedirect("VCS-FOR-2021", { tab: "trade", mode: "advanced", side: "SELL" }, isScenario)).toBe("/trade/VCS-FOR-2021?side=SELL");
+    expect(await marketTerminalRedirect("VCS-FOR-2021", new URLSearchParams("tab=trade&mode=advanced"), isScenario)).toBe("/trade/VCS-FOR-2021?side=BUY");
+    // 不存在的 symbol 也照跳(终端自己 404),与原来客户端「不等数据就跳」一致;路径段照常编码
+    expect(await marketTerminalRedirect("A/B", { tab: "trade", mode: "advanced" }, isScenario)).toBe("/trade/A%2FB?side=BUY");
+    expect(isScenario).not.toHaveBeenCalled();
+  });
+
+  it("tab=trade 的情景标的也去终端;普通标的留在旧页面的简易交易", async () => {
+    const isScenario = lookup();
+    expect(await marketTerminalRedirect("CEA-SCEN-2026", { tab: "trade" }, isScenario)).toBe("/trade/CEA-SCEN-2026?side=BUY");
+    expect(await marketTerminalRedirect("CEA-SCEN-2026", { tab: "trade", side: "SELL" }, isScenario)).toBe("/trade/CEA-SCEN-2026?side=SELL");
+    expect(await marketTerminalRedirect("VCS-FOR-2021", { tab: "trade", side: "SELL" }, isScenario)).toBeNull();
+    expect(await marketTerminalRedirect("VCS-FOR-2021", { tab: "trade", mode: "simple" }, isScenario)).toBeNull();
+    expect(isScenario.mock.calls.map(([symbol]) => symbol)).toEqual(["CEA-SCEN-2026", "CEA-SCEN-2026", "VCS-FOR-2021", "VCS-FOR-2021"]);
+  });
+
+  it("不是交易页签(总览)一律不跳,也不查标的 —— 情景标的的总览留在旧页面", async () => {
+    const isScenario = lookup();
+    expect(await marketTerminalRedirect("CEA-SCEN-2026", {}, isScenario)).toBeNull();
+    expect(await marketTerminalRedirect("CEA-SCEN-2026", { mode: "advanced", side: "SELL" }, isScenario)).toBeNull();
+    expect(await marketTerminalRedirect("VCS-FOR-2021", { tab: "overview", mode: "advanced" }, isScenario)).toBeNull();
+    expect(isScenario).not.toHaveBeenCalled();
+  });
+
+  it("side 与旧页面同一读法:只有恰好是 SELL 才是卖出;重复的键取第一个", async () => {
+    const isScenario = lookup();
+    const to = (query: Record<string, string | string[]>) => marketTerminalRedirect("VCS-FOR-2021", { tab: "trade", mode: "advanced", ...query }, isScenario);
+    expect(await to({ side: "sell" })).toBe("/trade/VCS-FOR-2021?side=BUY");
+    expect(await to({ side: "short" })).toBe("/trade/VCS-FOR-2021?side=BUY");
+    expect(await to({ side: ["SELL", "BUY"] })).toBe("/trade/VCS-FOR-2021?side=SELL");
+    expect(await marketTerminalRedirect("VCS-FOR-2021", { tab: ["trade", "overview"], mode: ["advanced"] }, isScenario)).toBe("/trade/VCS-FOR-2021?side=BUY");
   });
 });

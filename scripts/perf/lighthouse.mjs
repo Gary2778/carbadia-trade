@@ -2,8 +2,9 @@
 // @ts-check
 // Lighthouse 首屏度量(计划 §7.1「首屏 LCP」、§7.2;P1-24,P1-26 改移动门禁口径)。对着已经在跑的生产构建(`node server.mjs`,bot 开)运行:
 //
-//   npm run perf:lh -- http://localhost:3940                  # 默认两页 × 移动真实节流 3 次 + 移动模拟节流 3 次 + 桌面 3 次
+//   npm run perf:lh -- http://localhost:3940                  # 默认三页 × 移动真实节流 5 次 + 移动模拟节流 3 次 + 桌面 3 次
 //   npm run perf:lh -- http://localhost:3940 --runs 3 --sim-runs 0 --desktop-runs 1 --paths /trade/VCS-FOR-2021,/ [--json]
+//   npm run perf:lh -- http://localhost:3940 --paths /trade/account --cookie-file <文件>   # 已登录态(P2-11,只报告用)
 //   npm run perf:lh -- --help
 //
 // 每次调用 `npx --yes lighthouse@12 <url> --only-categories=performance --output=json --chrome-flags="--headless=new"`
@@ -18,9 +19,17 @@
 // 以免参数被静默改掉;表头打印实际生效的节流参数。
 // 每页每种形态对 LCP / FCP / TBT / CLS / Speed Index **各自**取中位数(偶数次取较大的中间值,偏保守),门禁形态按各项中位数断言;
 // 性能分与 LCP 元素选择器只报告,取 LCP 中位数的那一次。
+// 移动真实节流默认每页 5 次(P2-13;原来 3 次):无头 Chrome 在 DevTools 节流下偶发「整页慢一拍」(首次绘制在 DCL 之后约 1.4 s 才发生,
+// LCP = FCP ≈ 2.68 s,网络与主线程与正常的一次逐项相同;docs/perf-report.md「Phase 2 · 2026-10-01」§2),P2-11 那轮 35 次里 14 次。
+// 3 次取中位时两次落在慢档门禁就红;5 次要三次都慢才红。不做自动识别与重跑。桌面与模拟节流仍各 3 次。
 // 预算(计划 §7.1,移动与桌面同一套):LCP < 2.0 s、TBT < 200 ms、CLS < 0.1;门禁形态的任一中位数超出 exit 1(模拟节流超出只打印 INFO)。
 // Lighthouse 自身失败(非零退出、runtimeError、缺指标、节流口径不符)exit 2;临时目录在任何情况下都会删掉(先抛错、finally 清理、再退出)。
 // 本地没有 Cloudflare 边缘与 brotli,数字偏保守;部署后对线上地址再跑一遍记入 docs/perf-report.md。
+// 默认页面(P2-11 加资产页):终端 /trade/VCS-FOR-2021、首页 /、资产页 /trade/account(未登录态,即 AccountGate 与演示账号入口)。
+// 已登录态(P2-11):--cookie-file 指向一个只含 Cookie 请求头值的文件(如 `cx_session=…`),经 Lighthouse 的
+// --extra-headers 带给页面的每个请求(文档、脚本、fetch);头写进临时目录里的 JSON 文件再传路径,cookie 不出现在命令行与进程列表里。
+// 带 --cookie-file 时整次运行只报告(计划 §7.2、§6.2 P2-11:已登录的数字只报告):所有形态都不作门禁,预算三项照常算、
+// 打印成 INFO,退出码不受它们影响(只有 Lighthouse 自身失败仍是 exit 2)。
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -28,7 +37,7 @@ import path from "node:path";
 import process from "node:process";
 
 const DEFAULT_BASE = "http://localhost:3940";
-const DEFAULT_PATHS = ["/trade/VCS-FOR-2021", "/"];
+const DEFAULT_PATHS = ["/trade/VCS-FOR-2021", "/", "/trade/account"];
 const BUDGET = { lcpMs: 2000, tbtMs: 200, cls: 0.1 };
 const LIGHTHOUSE = "lighthouse@12";
 
@@ -55,14 +64,18 @@ const HELP = `用法:npm run perf:lh -- [baseUrl] [选项]
   桌面(门禁)                 --preset=desktop
 
 选项:
-  --runs N           每页移动真实节流的次数(门禁),默认 3,至少 1
+  --runs N           每页移动真实节流的次数(门禁),默认 5,至少 1(5 次取中位:偶发的「整页慢一拍」
+                     要占到三次才会打红门禁,见 docs/perf-report.md「Phase 2 · 2026-10-01」§2)
   --sim-runs N       每页移动模拟节流的次数(只报告),默认 3;0 = 不跑
   --desktop-runs N   每页桌面的次数(门禁),默认 3;0 = 不跑
   --paths a,b        页面路径,逗号分隔,默认 ${DEFAULT_PATHS.join(",")}
+  --cookie-file F    已登录态:F 里是 Cookie 请求头的值(一行,如 cx_session=…),经 --extra-headers 带给每个请求;
+                     这时整次运行只报告(三种形态都不作门禁,超预算只打印 INFO,退出码不因此变 1)
   --json             输出 JSON(含每次运行、各项中位数、实际节流设置、门禁断言与只报告的对照)
   -h, --help         打印本说明
 
-退出码:0 门禁全过;1 门禁有超预算(模拟节流不计);2 参数错误或 Lighthouse 自身失败(含节流口径与所要的不符)。
+退出码:0 门禁全过(带 --cookie-file 时恒为 0,除非 Lighthouse 失败);1 门禁有超预算(模拟节流与已登录态不计);
+2 参数错误或 Lighthouse 自身失败(含节流口径与所要的不符)。
 口径依据:计划 §7.1、§7.2 与 §9.1 第 46 条(用户 2026-09-30 决定本地移动 LCP 按真实节流判定)。`;
 
 /**
@@ -82,7 +95,7 @@ function die(msg) {
 
 /** @param {string[]} argv */
 function parseArgs(argv) {
-  const o = { base: DEFAULT_BASE, runs: 3, simRuns: 3, desktopRuns: 3, paths: DEFAULT_PATHS, json: false };
+  const o = { base: DEFAULT_BASE, runs: 5, simRuns: 3, desktopRuns: 3, paths: DEFAULT_PATHS, json: false, cookie: /** @type {string | null} */ (null) };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const [flag, inline] = a.startsWith("--") && a.includes("=") ? [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)] : [a, undefined];
@@ -100,6 +113,17 @@ function parseArgs(argv) {
     else if (flag === "--sim-runs") o.simRuns = int(value());
     else if (flag === "--desktop-runs") o.desktopRuns = int(value());
     else if (flag === "--paths") o.paths = value().split(",").map((s) => s.trim()).filter(Boolean);
+    else if (flag === "--cookie-file") {
+      const file = value();
+      let text = "";
+      try {
+        text = fs.readFileSync(file, "utf8").trim();
+      } catch {
+        die(`--cookie-file ${file} is not readable`);
+      }
+      if (!text || text.includes("\n")) die(`--cookie-file ${file} must hold one non-empty line (the Cookie header value)`);
+      o.cookie = text;
+    }
     else if (!a.startsWith("-")) o.base = a.replace(/\/+$/, "");
     else die(`unknown argument ${a} (see --help)`);
   }
@@ -118,11 +142,12 @@ function lcpSelector(/** @type {any} */ lhr) {
   return null;
 }
 
-/** @param {string} url @param {Form} form @param {string} outDir @param {number} n @returns {Run} */
-function runOnce(url, form, outDir, n) {
+/** @param {string} url @param {Form} form @param {string} outDir @param {number} n @param {string | null} headersFile @returns {Run} */
+function runOnce(url, form, outDir, n, headersFile) {
   const spec = FORMS[form];
   const out = path.join(outDir, `${form}-${n}.json`);
   const args = ["--yes", LIGHTHOUSE, url, "--only-categories=performance", "--output=json", `--output-path=${out}`, "--quiet", "--chrome-flags=--headless=new", ...spec.flags];
+  if (headersFile) args.push(`--extra-headers=${headersFile}`);
   const r = spawnSync("npx", args, { encoding: "utf8", stdio: ["ignore", "ignore", "pipe"], timeout: 180_000 });
   if (r.status !== 0 || !fs.existsSync(out)) throw new LighthouseError(`lighthouse failed for ${url} (${form}), exit ${r.status}: ${(r.stderr ?? "").trim().split("\n").slice(-5).join(" | ")}`);
   const lhr = JSON.parse(fs.readFileSync(out, "utf8"));
@@ -179,13 +204,19 @@ function describeThrottling(r) {
     : `simulate(Lantern):RTT ${t("rttMs")} ms、${t("throughputKbps")} Kbps、CPU ${t("cpuSlowdownMultiplier")}×`;
 }
 
-/** 预算三项;gate 决定它们是门禁还是只报告 @param {Result} r */
+/** 只报告的理由:已登录态(整次运行)优先,其次是模拟节流 @param {Result} r @param {boolean} loggedIn */
+function reportOnlyWhy(r, loggedIn) {
+  if (loggedIn) return "已登录态";
+  return r.gate ? null : "模拟节流";
+}
+
+/** 预算三项;gate 决定它们是门禁还是只报告(已登录态整次运行只报告) @param {Result} r */
 function budgetChecks(r) {
   const at = `${r.path} ${r.form}`;
   return [
-    { label: `${at} LCP ${Math.round(r.median.lcp)} ms < ${BUDGET.lcpMs} ms`, pass: r.median.lcp < BUDGET.lcpMs, gate: r.gate },
-    { label: `${at} TBT ${Math.round(r.median.tbt)} ms < ${BUDGET.tbtMs} ms`, pass: r.median.tbt < BUDGET.tbtMs, gate: r.gate },
-    { label: `${at} CLS ${r.median.cls.toFixed(3)} < ${BUDGET.cls}`, pass: r.median.cls < BUDGET.cls, gate: r.gate },
+    { label: `${at} LCP ${Math.round(r.median.lcp)} ms < ${BUDGET.lcpMs} ms`, pass: r.median.lcp < BUDGET.lcpMs, gate: r.gate, form: r.form },
+    { label: `${at} TBT ${Math.round(r.median.tbt)} ms < ${BUDGET.tbtMs} ms`, pass: r.median.tbt < BUDGET.tbtMs, gate: r.gate, form: r.form },
+    { label: `${at} CLS ${r.median.cls.toFixed(3)} < ${BUDGET.cls}`, pass: r.median.cls < BUDGET.cls, gate: r.gate, form: r.form },
   ];
 }
 
@@ -198,19 +229,26 @@ function main() {
   let failure = null;
   /** @type {[Form, number][]} */
   const plan = [["mobile-devtools", o.runs], ["mobile-simulate", o.simRuns], ["desktop", o.desktopRuns]];
+  /** @type {string | null} */
+  let headersFile = null;
   try {
+    if (o.cookie) {
+      headersFile = path.join(outDir, "extra-headers.json");
+      fs.writeFileSync(headersFile, JSON.stringify({ Cookie: o.cookie }), { mode: 0o600 });
+    }
     for (const p of o.paths) {
       for (const [form, count] of plan) {
         if (count === 0) continue;
         /** @type {Run[]} */
         const runs = [];
         for (let n = 1; n <= count; n++) {
-          const run = runOnce(`${o.base}${p}`, form, outDir, n);
+          const run = runOnce(`${o.base}${p}`, form, outDir, n, headersFile);
           runs.push(run);
           if (!o.json) console.error(`[lighthouse] ${p} ${form} #${n}: LCP ${Math.round(run.lcp)} ms · FCP ${Math.round(run.fcp)} ms · TBT ${Math.round(run.tbt)} ms · CLS ${run.cls.toFixed(3)} · SI ${Math.round(run.si)} ms · score ${run.score}`);
         }
         const spec = FORMS[form];
-        results.push({ path: p, form, gate: spec.gate, throttlingMethod: spec.method, throttling: runs[0].throttling, runs, ...summarize(runs) });
+        // 已登录态只报告(计划 §7.2):带 cookie 时三种形态都不作门禁
+        results.push({ path: p, form, gate: spec.gate && o.cookie === null, throttlingMethod: spec.method, throttling: runs[0].throttling, runs, ...summarize(runs) });
       }
     }
   } catch (err) {
@@ -229,13 +267,14 @@ function main() {
   const reports = all.filter((c) => !c.gate);
   const failed = checks.filter((c) => !c.pass);
   if (o.json) {
-    console.log(JSON.stringify({ base: o.base, lighthouse: LIGHTHOUSE, budget: BUDGET, forms: FORMS, results, checks, reports, ok: failed.length === 0 }, null, 2));
+    console.log(JSON.stringify({ base: o.base, lighthouse: LIGHTHOUSE, loggedIn: o.cookie !== null, budget: BUDGET, forms: FORMS, results, checks, reports, ok: failed.length === 0 }, null, 2));
   } else {
     const s = (/** @type {number} */ ms) => `${(ms / 1000).toFixed(2)} s`;
+    console.log(`[lighthouse] 会话:${o.cookie ? "带 cookie(已登录态,整次运行只报告,不作门禁)" : "不带 cookie(未登录态)"}`);
     // 每种形态实际生效的节流参数(取自 Lighthouse 报告的 configSettings,同一形态各页相同,打印第一页的)
     for (const form of /** @type {Form[]} */ (Object.keys(FORMS))) {
       const r = results.find((x) => x.form === form);
-      if (r) console.log(`[lighthouse] ${FORMS[form].label}(${FORMS[form].gate ? "门禁" : "只报告,不作门禁"}):${describeThrottling(r)}`);
+      if (r) console.log(`[lighthouse] ${FORMS[form].label}(${r.gate ? "门禁" : "只报告,不作门禁"}):${describeThrottling(r)}`);
     }
     // LCP 到 Speed Index 是各项中位数;性能分与 LCP 元素取 LCP 中位数的那一次
     console.log(`| 页面 | 形态 · 口径 | 门禁 | 次数 | LCP | FCP | TBT | CLS | Speed Index | 性能分(LCP 中位那次) | LCP 元素(同) |`);
@@ -245,7 +284,10 @@ function main() {
       console.log(`| \`${r.path}\` | ${FORMS[r.form].label} | ${r.gate ? "**门禁**" : "只报告"} | ${r.runs.length} | ${s(m.lcp)} | ${s(m.fcp)} | ${Math.round(m.tbt)} ms | ${m.cls.toFixed(3)} | ${s(m.si)} | ${r.lcpRun.score} | \`${(r.lcpRun.lcpElement ?? "—").replace(/\|/g, "\\|")}\` |`);
     }
     for (const c of checks) console.log(`[lighthouse] ${c.pass ? "PASS" : "FAIL"} ${c.label}`);
-    for (const c of reports) console.log(`[lighthouse] INFO(模拟节流,不作门禁)${c.pass ? "在预算内" : "超预算"} ${c.label}`);
+    for (const c of reports) {
+      const r = /** @type {Result} */ (results.find((x) => x.form === c.form));
+      console.log(`[lighthouse] INFO(${reportOnlyWhy(r, o.cookie !== null)},不作门禁)${c.pass ? "在预算内" : "超预算"} ${c.label}`);
+    }
   }
   process.exit(failed.length ? 1 : 0);
 }

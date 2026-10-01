@@ -7,6 +7,8 @@ Carbadia Trade（cbda.trade）是 Carbadia 的碳信用交易模拟盘：真实�
 - **自绘 K 线 / 深度图**：前端从成交记录实时聚合 OHLCV 并手写渲染。
 - **做市机器人**：7x24 随机游走报价、多档买卖盘挂单、概率吃单。
 - **模拟注销与私有凭证**：按账户记录模拟注销，幂等请求防重复扣减，不产生登记簿注销或真实减排声明。
+- **资产页**（`/trade/account`）：总资产、可用与冻结现金、持仓市值、24 小时变化与未实现盈亏；持仓按项目与年份分组，显示锁定来源（挂单 / 场外）与已注销数量；持仓分布、本人 OTC 挂单与撤单;注销在对话框里分三步确认。旧地址 `/portfolio`、`/dashboard` 308 跳到这里。演示资金不能充值、提现或转出，站内没有这类入口。
+- **CSV 导出**：委托、成交与资金流水各有一个导出（`/api/account/orders.csv`、`/api/account/fills.csv`、`/api/transactions.csv`），筛选条件与页面相同；文件名带 `simulated`，每行末列 `environment` 恒为 `SIMULATED`。
 - **影子价格实验**：情景标的价格纯由本盘交易形成；每日快照与真实收盘的内部对照只供研究，任何接口都不返回真实价格。
 - **两种界面语言**：English、简体中文。
 - **两种外观**：浅色、深色（星空 + 液态玻璃）。
@@ -51,21 +53,25 @@ server/                      纯 JS 的 server 模块:事件总线、WebSocket h
 src/
   app/
     page.tsx                 行情(现货市场)
-    trade/[symbol]/          交易终端:标的列表、K 线、盘口与成交、下单、委托 / 成交 / 持仓
+    trade/layout.tsx         /trade 下共用的布局:终端样式与终端文案(只随 /trade 加载)
+    trade/[symbol]/          交易终端:标的列表、K 线、盘口与成交、下单、委托 / 成交 / 持仓 / 流水
+    trade/account/           资产页(/portfolio、/dashboard 307 跳到这里)
     market/[symbol]/         标的页:总览与简易交易(高级交易进终端)
-    otc/ portfolio/ dashboard/ orders/ transactions/ retirement/ account/
+    otc/ orders/ transactions/ retirement/ account/
     projects/ watchlist/ research/ learn/
     login/ register/ feedback/ terms/ privacy/
     api/                     Route Handlers(认证、行情、交易、持仓、注销、反馈、埋点、健康检查)
-    api/market/ api/account/ 终端的公开行情快照与私有账户接口
+    api/market/ api/account/ 终端的公开行情快照与私有账户接口(含资产总览 overview、委托与成交的 .csv 导出)
+    api/transactions/ api/transactions.csv/   资金流水(筛选、键集分页)与流水导出
     api/real/[...path]/      登记簿数据代理(→ carbadia.io/api/real/*)
   components/
     terminal/                交易终端的面板、快捷键帮助与布局
+    account/                 资产页的组件与注销对话框(终端持仓页签共用)
     ui/                      全站共用的骨架、空态、错误态、对话框与虚拟列表
     exchange/                交易页组件及专属界面逻辑
     charts/ anim/            图表与动效
     Nav, Footer, 主题与语言切换、星空与液态玻璃
-  hooks/ providers/ i18n/    hooks、主题状态、语言(en + zh-CN)
+  hooks/ providers/ i18n/    hooks、主题状态、语言(en + zh-CN;文案分 core / terminal / account 三包,后两者只随各自页面加载)
   shared/                    前后端共用的类型、WebSocket 协议与纯函数(不依赖 React / Next / Prisma)
   lib/
     market/                  终端的行情与账户 store、WebSocket / 轮询传输、选择器、下单草稿、快捷键
@@ -76,7 +82,7 @@ src/
     http/client.ts format.ts redirects.ts
   instrumentation.ts         做市机器人与影子价格同步入口
 prisma/                      数据模型、迁移、种子
-scripts/perf/                性能度量脚本(chunk 预算、Lighthouse、WebSocket 压测)
+scripts/perf/                性能度量与核对脚本(chunk 预算、Lighthouse、WebSocket 压测、注销时延、本地大账本、CSV 对 JSON、资产页对终端合计)
 scripts/smoke-ws.mjs         /ws 冒烟
 infra/cloudflare-proxy/      cbda.trade 反代 Worker(内部)
 scripts/prod/                生产检查与诊断脚本(内部)
@@ -135,7 +141,7 @@ npm run dev:plain     # next dev 逃生口:没有 /ws,终端自动降级轮询,�
 npm run start         # 生产模式的 server.mjs(先 npm run build);npm run start:plain = next start
 npm run smoke:ws -- ws://localhost:3000/ws VCS-FOR-2021   # /ws 冒烟:10 s 内收到 hello、subscribed 与一帧 book 即 exit 0
 npm run perf:chunks  # 首屏 JS 体积门禁(先 npm run build):各路由 gzip 预算、库检测与阳性对照,超标 exit 1;--json 输出明细
-npm run perf:lh -- http://localhost:3000       # Lighthouse:终端页与首页各跑移动 3 次 + 桌面 3 次,取中位数(npx lighthouse@12,需本机 Chrome)
+npm run perf:lh -- http://localhost:3000       # Lighthouse:终端页、首页与资产页,移动真实节流(门禁)5 次、模拟节流(只报告)与桌面各 3 次,取中位数(npx lighthouse@12,需本机 Chrome)
 npm run perf:ws-flood -- --url ws://localhost:3000/ws --clients 300 --seconds 60   # /ws 压测
 ```
 

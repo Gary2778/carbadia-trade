@@ -19,14 +19,25 @@
 // 体积:node:zlib gzip level 9(断言用);brotli 只报告。1 KB = 1024 字节。
 // 库检测用压缩后仍存在的属性名(压缩后的 chunk 里没有 node_modules 路径,按路径检测会空通过,见计划 R25),一个标记命中即算:
 //   motion = whileHover / layoutId / reducedMotion;lightweight-charts = lastValueVisible / priceLineVisible;
-//   市场 store(src/lib/market/store.ts)= tickersVersion / instrumentsVersion / evictSymbol(它的状态键与 action 名)。
-// 断言(预算按 Phase 1 收尾时的实测重定,理由见 docs/perf-report.md 与计划 §7.1):
-//   floor ≤ 211 KB;/ 首屏 ≤ 228 KB 且自有 ≤ 20 KB;/market/[symbol] 首屏 ≤ 231 KB;
-//   /trade/[symbol] 自有 ≤ 70 KB 且首屏 ≤ 290 KB;图表懒加载组 ≤ 64 KB;
+//   市场 store(src/lib/market/store.ts)= tickersVersion / instrumentsVersion / evictSymbol(它的状态键与 action 名);
+//   终端文案(src/i18n/messages/terminal/*,P2-01)= 其中三条文案的原文(字符串字面量压缩后原样保留):
+//   "Includes your order"、"Resting on the book"(英文)与「含你的委托」(中文);改这三条文案时同步改这里的标记;
+//   资产页文案(src/i18n/messages/account/*,P2-10)= "Retirements and certificates"、"Minimum fill (t)"(英文)与「注销记录与证书」(中文),
+//   改这三条文案时同样同步改这里。
+// 断言(预算:Phase 1 收尾按实测重定;P2-01 把终端文案移出全站公共包后按新实测 + 约 3 KB 下调 floor 与受它影响的首屏数,
+// 理由见 docs/perf-report.md 与计划 §7.1):
+//   floor ≤ 201 KB;/ 首屏 ≤ 217 KB 且自有 ≤ 20 KB;/market/[symbol] 首屏 ≤ 221 KB;
+//   /trade/[symbol] 自有 ≤ 70 KB 且首屏 ≤ 271 KB(= floor 预算 + 自有预算);图表懒加载组 ≤ 64 KB;
+//   /trade/account 自有 ≤ 42 KB 且首屏 ≤ 243 KB(= floor 预算 + 自有预算;P2-11 按实测 39.0 KB + 约 3 KB 定);
 //   lightweight-charts 不在任何路由的首屏集合;motion 不在 /trade 的自有集合;
-//   市场 store 不在 /trade 以外任何路由(/、/market/[symbol])的首屏集合(计划 §7.1:它只在 /trade 的自有 chunk 里)。
+//   市场 store 不在 /trade 以外任何路由(/、/market/[symbol])的首屏集合(计划 §7.1:它只在 /trade 的自有 chunk 里);
+//   终端文案不在 /trade 以外任何路由(/、/market/[symbol])的首屏集合(计划 §6.2.2 C9:它只随 /trade 的 chunk 加载);
+//   资产页文案不在 /、/market/[symbol]、/trade/[symbol] 的首屏集合(P2-10:它只随 /trade/account 的 chunk 加载,终端首屏不背它)。
+// 资产页 /trade/account 也在读取之列(P2-10):表格里照常列出、lightweight-charts 的断言照样覆盖它;体积预算见上(P2-11)。
+// 市场 store 与终端文案的「不在」断言只针对 /trade 之外的路由(资产页挂着 AccountFeed、在 /trade 布局之下,两者都在它的首屏里是预期)。
 // 阳性对照(失败即打印「检测失效」并 exit 1,说明标记过期或清单读错):
-//   / 的首屏集合必须检出 motion;/trade 的懒加载组里必须有一组检出 lightweight-charts;/trade 的自有集合必须检出市场 store。
+//   / 的首屏集合必须检出 motion;/trade 的懒加载组里必须有一组检出 lightweight-charts;/trade 的自有集合必须检出市场 store;
+//   /trade 的自有集合必须检出终端文案;/trade/account 的自有集合必须检出资产页文案。
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -40,10 +51,14 @@ const ROUTES = /** @type {const} */ ([
   { key: "/page", manifest: "page_client-reference-manifest.js" },
   { key: "/market/[symbol]/page", manifest: "market/[symbol]/page_client-reference-manifest.js" },
   { key: "/trade/[symbol]/page", manifest: "trade/[symbol]/page_client-reference-manifest.js" },
+  { key: "/trade/account/page", manifest: "trade/account/page_client-reference-manifest.js" },
 ]);
 const HOME = "/page";
 const MARKET = "/market/[symbol]/page";
 const TRADE = "/trade/[symbol]/page";
+const ACCOUNT = "/trade/account/page";
+/** /trade 下的路由(终端页与资产页):市场 store 与终端文案都在它们的首屏里是预期 */
+const underTrade = (/** @type {string} */ key) => key.startsWith("/trade/");
 
 /** 底价的两个入口(根布局与根模板) */
 const FLOOR_ENTRIES = ["[project]/src/app/layout", "[project]/src/app/template"];
@@ -52,18 +67,26 @@ const MARKERS = /** @type {const} */ ({
   motion: ["whileHover", "layoutId", "reducedMotion"],
   lightweightCharts: ["lastValueVisible", "priceLineVisible"],
   marketStore: ["tickersVersion", "instrumentsVersion", "evictSymbol"],
+  terminalCopy: ["Includes your order", "Resting on the book", "含你的委托"],
+  accountCopy: ["Retirements and certificates", "Minimum fill (t)", "注销记录与证书"],
 });
 /** @typedef {keyof typeof MARKERS} Lib */
 const LIBS = /** @type {Lib[]} */ (Object.keys(MARKERS));
 
-/** 预算(gzip KB) */
+/**
+ * 预算(gzip KB)。P2-01(终端文案移出全站公共包)实测 floor 198.2、/ 首屏 214.3、/market/[symbol] 首屏 218.2,
+ * 三项按实测 + 约 3 KB 下调(原 211 / 228 / 231);/trade 自有不变,/trade 首屏取 floor 预算 + 自有预算(原 290)。
+ * 资产页(P2-11,Phase 2 收尾实测自有 39.0、首屏 237.1):自有按实测 + 约 3 KB,首屏同 /trade 的取法 = floor 预算 + 自有预算。
+ */
 const BUDGET = {
-  floor: 211,
-  homeFirst: 228,
+  floor: 201,
+  homeFirst: 217,
   homeOwn: 20,
-  marketFirst: 231,
+  marketFirst: 221,
   tradeOwn: 70,
-  tradeFirst: 290,
+  tradeFirst: 271,
+  accountOwn: 42,
+  accountFirst: 243,
   chartLazy: 64,
 };
 
@@ -236,6 +259,7 @@ function main() {
   const home = routes[HOME];
   const market = routes[MARKET];
   const trade = routes[TRADE];
+  const account = routes[ACCOUNT];
   const chartGroups = trade.lazy.filter((g) => g.detected.lightweightCharts);
   const kb = (/** @type {number} */ b) => Math.round((b / KB) * 10) / 10;
   /** @type {{ label: string; pass: boolean; control?: boolean }[]} */
@@ -246,16 +270,28 @@ function main() {
     { label: `/market/[symbol] first load ${kb(market.firstLoad.gzip)} KB <= ${BUDGET.marketFirst} KB`, pass: market.firstLoad.gzip <= BUDGET.marketFirst * KB },
     { label: `/trade/[symbol] own ${kb(trade.own.gzip)} KB <= ${BUDGET.tradeOwn} KB`, pass: trade.own.gzip <= BUDGET.tradeOwn * KB },
     { label: `/trade/[symbol] first load ${kb(trade.firstLoad.gzip)} KB <= ${BUDGET.tradeFirst} KB`, pass: trade.firstLoad.gzip <= BUDGET.tradeFirst * KB },
+    { label: `/trade/account own ${kb(account.own.gzip)} KB <= ${BUDGET.accountOwn} KB`, pass: account.own.gzip <= BUDGET.accountOwn * KB },
+    { label: `/trade/account first load ${kb(account.firstLoad.gzip)} KB <= ${BUDGET.accountFirst} KB`, pass: account.firstLoad.gzip <= BUDGET.accountFirst * KB },
     ...chartGroups.map((g) => ({ label: `chart lazy group ${g.files.join(" + ")} ${kb(g.gzip)} KB <= ${BUDGET.chartLazy} KB`, pass: g.gzip <= BUDGET.chartLazy * KB })),
     ...Object.entries(routes).map(([key, r]) => ({ label: `lightweight-charts not in ${key} first load`, pass: !r.firstLoad.detected.lightweightCharts })),
     { label: "motion not in /trade/[symbol] own chunks", pass: !trade.own.detected.motion },
-    // 市场 store 只允许出现在 /trade 的自有 chunk 里(floor 属于每个路由的首屏,所以也一并排除了 floor)
+    // 市场 store 只允许出现在 /trade 下路由的自有 chunk 里(floor 属于每个路由的首屏,所以也一并排除了 floor)
     ...Object.entries(routes)
-      .filter(([key]) => key !== TRADE)
+      .filter(([key]) => !underTrade(key))
       .map(([key, r]) => ({ label: `market store not in ${key} first load`, pass: !r.firstLoad.detected.marketStore })),
+    // 终端文案只随 /trade 加载(计划 §6.2.2 C9):别的路由的首屏(含 floor)里一条都不该有
+    ...Object.entries(routes)
+      .filter(([key]) => !underTrade(key))
+      .map(([key, r]) => ({ label: `terminal copy not in ${key} first load`, pass: !r.firstLoad.detected.terminalCopy })),
+    // 资产页文案只随 /trade/account 加载(P2-10):终端页的首屏也不背它
+    ...Object.entries(routes)
+      .filter(([key]) => key !== ACCOUNT)
+      .map(([key, r]) => ({ label: `portfolio page copy not in ${key} first load`, pass: !r.firstLoad.detected.accountCopy })),
     { label: "control: motion detected in / first load", pass: home.firstLoad.detected.motion, control: true },
     { label: "control: lightweight-charts detected in a /trade lazy group", pass: chartGroups.length > 0, control: true },
     { label: "control: market store detected in /trade own chunks", pass: trade.own.detected.marketStore, control: true },
+    { label: "control: terminal copy detected in /trade own chunks", pass: trade.own.detected.terminalCopy, control: true },
+    { label: "control: portfolio page copy detected in /trade/account own chunks", pass: account.own.detected.accountCopy, control: true },
   ];
   const failed = checks.filter((c) => !c.pass);
   const controlFailed = failed.some((c) => c.control);

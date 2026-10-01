@@ -35,6 +35,7 @@ function position(patch: Partial<Position> = {}): Position {
     symbol: "VCS-FOR-2021",
     quantity: 20,
     locked: 0,
+    lockedBy: { orders: 0, otc: 0 },
     available: 20,
     retired: 0,
     lastPrice: 6800,

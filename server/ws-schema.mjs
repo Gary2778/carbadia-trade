@@ -103,6 +103,7 @@ export const positionSchema = z.object({
   symbol: z.string().min(1),
   quantity: tonnes,
   locked: tonnes,
+  lockedBy: z.object({ orders: tonnes, otc: tonnes }), // 锁定来源:未完结 SELL 挂单的剩余量 / ACTIVE 场外挂牌(计划 §6.2.2 C1)
   available: tonnes,
   retired: tonnes,
   lastPrice: cents.nullable(),

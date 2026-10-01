@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderToStaticMarkup } from "@/i18n/test-support"; // = react-dom/server 的同名函数 + /trade 布局登记终端文案的那层 Provider(P2-01)
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountStatus } from "@/lib/market/account-store";
 import { DEFAULT_FEE_SCHEDULE, type Order } from "@/shared";
@@ -12,17 +12,18 @@ import { ORDERS_HISTORY_HREF, placedNotice, type PlacedNotice } from "@/lib/mark
 import { FeeLine } from "./FeeLine";
 import { DemoFailureNotice, LoginGate, demoFailureOf, loginHrefFor } from "./LoginGate";
 import { OrderConfirmDialog, blockRepeatActivation } from "./OrderConfirmDialog";
-import { OrderPanel, placedToasts } from "./OrderPanel";
+import { OrderPanel, keepsFormHeight, placedToasts } from "./OrderPanel";
 import { PositionSlider } from "./PositionSlider";
 
 // 下单面板的服务端标记测试(计划 §3.1、§4.5、§9.1 第 7 条:node 环境,不引 jsdom;没有 LangProvider 时 useT 落到英文)。
 //
 // zustand 5 在服务端渲染时读 getInitialState()(账户 status 恒为 idle),store 里写什么都进不了 SSR 标记;
 // 要画出「未登录」这一支,只能在模块边界替换 useAccountStatus(同 Nav.ssr.test.ts 对 next/navigation 的打桩),其余导出保持真实实现。
-const account = vi.hoisted(() => ({ status: null as AccountStatus | null }));
+// sequence:同一次渲染里先后几次调用各返回什么(用完为止)—— 模拟登录态在两遍渲染之间变化(见「保持表单的高度」一组)。
+const account = vi.hoisted(() => ({ status: null as AccountStatus | null, sequence: [] as AccountStatus[] }));
 vi.mock("@/lib/market/account-store", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/market/account-store")>();
-  return { ...real, useAccountStatus: () => account.status ?? real.useAccountStatus() };
+  return { ...real, useAccountStatus: () => account.sequence.shift() ?? account.status ?? real.useAccountStatus() };
 });
 
 // 下单表单用 useRouter(toast 动作「去委托记录」/「登录」做客户端导航);App Router 之外没有上下文,按模块边界打桩,其余导出保持真实实现
@@ -48,6 +49,7 @@ vi.mock("@/components/ui/Dialog", async (importOriginal) => {
 
 afterEach(() => {
   account.status = null;
+  account.sequence = [];
   dialog.last = null;
 });
 
@@ -82,8 +84,9 @@ describe("OrderPanel(SSR 首屏:账户 status idle)", () => {
     // 类型按钮带 data-order-type(TerminalShell 的 l / m 按它找按钮);默认限价
     expect(html).toMatch(new RegExp(`data-order-type="LIMIT" aria-pressed="true"[^>]*>${en.terminal.order.limit}<`));
     expect(html).toMatch(new RegExp(`data-order-type="MARKET" aria-pressed="false"[^>]*>${en.terminal.order.market}<`));
-    // LoginGate 不出现
+    // LoginGate 不出现;面板是表单自己的高度,不带「保持表单高度」的标记
     expect(html).not.toContain("data-login-gate");
+    expect(html).not.toContain("data-keep-height");
     // 对话框只在打开时挂载
     expect(html).not.toContain("<dialog");
   });
@@ -122,6 +125,8 @@ describe("OrderPanel(未登录)", () => {
     expect(html).toContain(`>${escapeHtml(en.login.tryDemo)}<`);
     expect(html).not.toContain("<form");
     expect(html).not.toContain('type="submit"');
+    // 挂载时就已经是未登录(站内跳转、手机切到下单页签):没画过表单,面板保持紧凑
+    expect(html).not.toContain("data-keep-height");
   });
 
   it("LoginGate 单独渲染同样的入口", () => {
@@ -147,6 +152,89 @@ describe("OrderPanel(未登录)", () => {
     expect(failed).toContain(`>${escapeHtml(en.ui.error)}<`);
     expect(failed).toContain(`>${en.ui.retry}</button>`);
     expect(failed).not.toContain("Demo accounts are disabled");
+  });
+});
+
+// `?side=` 深链在手机上的布局偏移(P2-08;计划 §4.7、§7.1 CLS < 0.1):服务端不知道登录态,首帧画表单;匿名的登录态查询回来后
+// 换成矮得多的 LoginGate,下面的碳元数据、底部 Tab 与页脚上跳(改动前 CLS 约 0.11)。修法是「两者等高」:画过表单的面板换成
+// LoginGate 时保持表单的高度。状态切换要两次渲染,SSR 标记测不到,这里钉判定函数与样式规则;浏览器里的 CLS 数字在 docs/perf-report.md。
+describe("下单面板:画过表单之后换成 LoginGate 时保持表单的高度", () => {
+  it("keepsFormHeight:只有「画过表单、现在未登录」才保持;登录态未知 / 已登录时面板就是表单自己的高度", () => {
+    expect(keepsFormHeight("anon", true)).toBe(true);
+    expect(keepsFormHeight("anon", false)).toBe(false);
+    for (const status of ["idle", "loading", "ready"] as const) {
+      expect(keepsFormHeight(status, true)).toBe(false);
+      expect(keepsFormHeight(status, false)).toBe(false);
+    }
+  });
+
+  it("画过表单(登录态未知)之后变成未登录:LoginGate 所在的面板带 data-keep-height", () => {
+    // 面板第一遍渲染读到 idle,在渲染期记下「画过表单」(渲染期 setState,React 立刻重跑本组件);第二遍读到 anon ——
+    // 一次服务端渲染里走完「画过表单 → 未登录」
+    account.sequence = ["idle", "anon"];
+    const html = render(createElement(OrderPanel, { symbol: SYMBOL }));
+    expect(account.sequence).toEqual([]);
+    expect(html).toMatch(/<section data-area="order" data-keep-height=""/);
+    expect(html).toContain('data-login-gate=""');
+    expect(html).not.toContain("<form");
+  });
+
+  it("已登录之后退出(ready → anon)同样保持;登录态一直未知或已登录时不带标记", () => {
+    account.sequence = ["ready", "anon"];
+    expect(render(createElement(OrderPanel, { symbol: SYMBOL }))).toMatch(/<section data-area="order" data-keep-height=""/);
+    for (const status of ["idle", "loading", "ready"] as const) {
+      account.sequence = [status, status];
+      const html = render(createElement(OrderPanel, { symbol: SYMBOL }));
+      expect(html, status).toContain("<form");
+      expect(html, status).not.toContain("data-keep-height");
+    }
+  });
+
+  it("terminal.css:min-height 常数那条规则在;带这个标记的规则只在手机断点(< 48rem)里;常数与 OrderForm 上的提醒一致", () => {
+    const css = source("../../app/terminal.css").replace(/\/\*[\s\S]*?\*\//g, "");
+    const KEEP = '[data-terminal] [data-area="order"][data-keep-height]';
+    const MOBILE = "@media (width < 48rem)";
+    // 选择器里带这个标记的每一条规则:选择器、声明、包住它的那个块的开头(从规则往回数花括号;顶层规则为空串)
+    const rules: { selector: string; body: string; prelude: string }[] = [];
+    for (let at = css.indexOf(KEEP); at !== -1; at = css.indexOf(KEEP, at + KEEP.length)) {
+      const bodyStart = css.indexOf("{", at);
+      let depth = 0;
+      let open = -1;
+      for (let i = at; i >= 0 && open === -1; i--) {
+        if (css[i] === "}") depth++;
+        else if (css[i] === "{") {
+          if (depth === 0) open = i;
+          else depth--;
+        }
+      }
+      rules.push({
+        selector: css.slice(at, bodyStart).trim(),
+        body: css.slice(bodyStart + 1, css.indexOf("}", bodyStart)).trim(),
+        prelude: open === -1 ? "" : css.slice(css.lastIndexOf("}", open) + 1, open).trim(),
+      });
+    }
+
+    const height = rules.filter((rule) => rule.selector === KEEP);
+    expect(
+      height.map((rule) => rule.body),
+      `terminal.css 里应当恰好有一条 \`${KEEP} { min-height: <n>rem; }\`:OrderPanel 的 keepsFormHeight 靠它在手机上保持表单的高度。` +
+        "规则没了(或改了选择器 / 单位)的话,未登录的 ?side= 深链在手机上的布局偏移会回到约 0.12(docs/perf-report.md「Phase 2 · P2-08」§2)",
+    ).toEqual([expect.stringMatching(/^min-height:\s*[\d.]+rem;$/)]);
+    for (const rule of rules) {
+      expect(
+        rule.prelude,
+        `terminal.css 的 \`${rule.selector}\` 必须写在 \`${MOBILE}\` 块里(现在在 \`${rule.prelude || "顶层"}\`):` +
+          "≥ 48rem 下单面板的高度由网格行决定,带这个标记的规则漏到断点外面会改动桌面 / 平板的下单面板",
+      ).toBe(MOBILE);
+    }
+
+    // 常数跟着表单走:OrderForm 的 JSX 上写着同一个数(增减表单行要重新量),两边改了一边就在这里失败
+    const constant = /min-height:\s*([\d.]+rem)/.exec(height[0].body)?.[1];
+    expect(
+      source("./OrderPanel.tsx"),
+      `OrderPanel.tsx 的 OrderForm 上的提醒应当写着 terminal.css 现在的常数 \`min-height: ${constant}\`:` +
+        "改表单(增减一行、改行高 / 间距)或改这个常数之后,两处要一起更新,并重新量手机上的面板高度",
+    ).toContain(`min-height: ${constant}`);
   });
 });
 

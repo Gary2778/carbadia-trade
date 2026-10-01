@@ -512,14 +512,6 @@
 .ex-project-copy > .ex-button {
   width: 100%;
 }
-.ex-allocation-bar {
-  height: 9px;
-  display: flex;
-  gap: 3px;
-  border-radius: 8px;
-  overflow: hidden;
-  margin: 15px 0 24px;
-}
 .ex-allocation-row {
   display: flex;
   align-items: center;
@@ -531,11 +523,6 @@
   margin-inline-start: auto;
   font-variant-numeric: tabular-nums;
   font-weight: 500;
-}
-.ex-allocation-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
 }
 .ex-metric-big {
   font-size: 38px;

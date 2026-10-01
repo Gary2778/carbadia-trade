@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Retirement } from "../../generated/prisma";
 import { prisma } from "../server/db";
+import { publishPositionChange } from "../server/market-publisher";
+import { writeLedger } from "./ledger";
 import { isContentionError, prismaErrorCode } from "./matching";
 
 export const retirementInputSchema = z.object({
@@ -81,8 +83,19 @@ export function retirementRecord(record: Retirement): RetirementRecord {
   };
 }
 
-/** User identity comes from the authenticated session, never the submitted body. */
+/**
+ * User identity comes from the authenticated session, never the submitted body.
+ * 事务提交后把该标的交给发布器(计划 §6.2.2 C2:持仓数量减少、retired 增加,现金不变,只发 position 事件);发布不 await。
+ * 重放的请求(replayed: true,库没变)不发。
+ */
 export async function retireCredits(userId: string, rawInput: unknown) {
+  const result = await retireCreditsTx(userId, rawInput);
+  if (!result.replayed) publishPositionChange(userId, result.retirement.assetId);
+  return result;
+}
+
+/** 注销事务本体(不发布);导出的 retireCredits 包一层,同 matching.ts 的 placeOrderTx / placeOrder */
+async function retireCreditsTx(userId: string, rawInput: unknown) {
   const input = retirementInputSchema.parse(rawInput);
   const { idempotencyKey } = input;
   const details = { assetId: input.assetId, quantity: input.quantity, reason: input.reason, beneficiary: input.beneficiary, purpose: input.purpose, publicMessage: input.publicMessage };
@@ -138,9 +151,10 @@ export async function retireCredits(userId: string, rawInput: unknown) {
           requestFingerprint,
         },
       });
-      await tx.ledgerEntry.create({
-        data: { userId, assetId: input.assetId, account: "HOLDING", delta: BigInt(-input.quantity), reason: "SIMULATED_RETIREMENT", refType: "RETIREMENT", refId: record.id },
-      });
+      // 账本行与其它写入走同一个入口(计划 §6.2.2 C3):同一事务、同样的一行
+      await writeLedger(tx, [
+        { userId, account: "HOLDING", assetId: input.assetId, delta: -input.quantity, reason: "SIMULATED_RETIREMENT", refType: "RETIREMENT", refId: record.id },
+      ]);
       return { retirement: record, replayed: false };
     });
   } catch (error) {

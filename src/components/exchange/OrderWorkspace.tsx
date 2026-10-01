@@ -13,6 +13,7 @@ import { useExchangeText } from "./useExchange";
 import { AccountGate } from "./AccountData";
 import { ExchangeIcon } from "./ExchangeIcon";
 import { TableViewport } from "./TableViewport";
+import { legacyOrdersCsv } from "./csv-export-links";
 
 type Order = {
   id: string;
@@ -157,6 +158,17 @@ export function OrderWorkspace() {
     }
   }
 
+  // CSV 导出(P2-06):接口只分「未完成 / 终态 / 全部」、不分买卖,表达不了的筛选写进提示,不假装与屏幕一致
+  const csv = legacyOrdersCsv(status);
+  const csvTitle =
+    (csv.scope === "open"
+      ? c("Download all your open and partially filled orders as a CSV file.", "把你全部未完成（含部分成交）的订单下载为 CSV 文件。")
+      : csv.scope === "all"
+        ? c("Download all your orders as a CSV file.", "把你的全部订单下载为 CSV 文件。")
+        : c("Download your filled and cancelled orders together as a CSV file.", "把你已成交与已取消的订单一起下载为 CSV 文件。")) +
+    (side ? c(" Buy and sell orders are both included.", "买入与卖出都包含在内。") : "") +
+    c(" Simulated data.", "模拟数据。");
+
   const statusLabel = (status: string) =>
     status === "OPEN"
       ? c("Open", "待成交")
@@ -248,6 +260,19 @@ export function OrderWorkspace() {
                   "市价单若流动性不足，未成交部分会自动取消。",
                 )}
               </span>
+              {/* 有过一次已登录的结果才显示(未登录时 result 为空,且整块被 AccountGate 取代) */}
+              {result ? (
+                <a
+                  className="ex-button ms-auto"
+                  href={csv.href}
+                  download
+                  title={csvTitle}
+                  data-export-csv=""
+                >
+                  <ExchangeIcon name="download" size={14} />
+                  {c("Export CSV", "导出 CSV")}
+                </a>
+              ) : null}
             </div>
             {data && error && (
               <div role="alert" className="ex-error">
@@ -495,7 +520,7 @@ export function OrderWorkspace() {
                 )}
               </p>
             </div>
-            <Link href="/portfolio">
+            <Link href="/trade/account">
               {c("View holdings", "查看持仓")}
             </Link>
           </div>

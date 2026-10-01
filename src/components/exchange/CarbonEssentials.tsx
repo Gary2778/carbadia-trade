@@ -722,7 +722,7 @@ export function CarbonEssentials() {
             )}
           </p>
           <div className="ex-learning-links">
-            <Link href="/login?returnTo=%2Fportfolio">
+            <Link href="/login?returnTo=%2Ftrade%2Faccount">
               {c("Start a demo session", "开始示范体验")}
             </Link>
             <Link href="/projects?view=registry">
@@ -749,7 +749,7 @@ export function CarbonEssentials() {
                 "选择信用、输入数量并核对模拟成本。",
               ],
               [
-                "/portfolio",
+                "/trade/account",
                 "Review your portfolio",
                 "查看资产组合",
                 "Understand holdings, available credits and purchase cost.",

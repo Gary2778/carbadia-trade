@@ -144,7 +144,7 @@ const accountPosition = (seq: number, assetId: string, quantity = 5): ServerEven
   t: "position",
   topic: ACCOUNT,
   seq,
-  position: { assetId, symbol: SYM, quantity, locked: 0, available: quantity, retired: 0, lastPrice: 100, marketValue: quantity * 100, averagePurchasePrice: null, unrealisedPnl: null, costBasisStatus: "incomplete_ledger", isScenario: false },
+  position: { assetId, symbol: SYM, quantity, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: quantity, retired: 0, lastPrice: 100, marketValue: quantity * 100, averagePurchasePrice: null, unrealisedPnl: null, costBasisStatus: "incomplete_ledger", isScenario: false },
 });
 const tickerAll = (seq: number): ServerEvent => ({ t: "ticker", topic: TICKER_ALL, seq, symbol: SYM, ticker: { symbol: SYM, lastPrice: 1, ts: seq } });
 /** onEvent 里的 account-snapshot,集合转成排好序的数组便于比较 */

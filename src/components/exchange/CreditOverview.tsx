@@ -61,7 +61,7 @@ export function CreditOverview({
 }) {
   const { lang } = useLang();
   const zh = isChinese(lang);
-  const tm = useT("terminal").meta;
+  const ui = useT("ui");
   // 方法学 / 核证状态读 Instrument(getCreditProfile 原样透传,不补不猜);核证状态只可能是 SIMULATED_UNVERIFIED 或 null
   const profile = getCreditProfile(asset);
   const methodology = profile.methodology?.trim() ? profile.methodology : null;
@@ -266,7 +266,7 @@ export function CreditOverview({
               label={zh ? "查证机构与报告" : "Verifier and verification report"}
               value={
                 profile.verification === "SIMULATED_UNVERIFIED"
-                  ? tm.simulatedUnverified
+                  ? ui.simulatedUnverified
                   : notProvided
               }
               missing

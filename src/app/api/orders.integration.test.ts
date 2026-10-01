@@ -245,7 +245,7 @@ describe("POST /api/orders 自成交防护(EXPIRE_MAKER,计划 §9.1 第 41 条)
     expect([erinHolding.quantity, erinHolding.locked]).toEqual([103, 0]); // 被撤卖单的 5 吨解冻
     expect(await prisma.ledgerEntry.count({ where: { refType: "ORDER", refId: own.order.id, reason: "SELF_TRADE_UNLOCK" } })).toBe(1);
     // 资产流水里它是一条 RELEASE,标签点明是自成交防护
-    const activity = (await (await transactionsRoute.GET(new Request("http://localhost/api/transactions?limit=100"))).json()).data.entries;
+    const activity = (await (await transactionsRoute.GET(new Request("http://localhost/api/transactions?limit=100"))).json()).data.items;
     expect(activity.filter((e: { reason: string }) => e.reason === "SELF_TRADE_UNLOCK").map((e: { type: string; label: string; delta: number; refId: string }) => [e.type, e.label, e.delta, e.refId]))
       .toEqual([["RELEASE", "Credits released (self-trade prevention)", -5, own.order.id]]);
 

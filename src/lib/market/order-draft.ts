@@ -4,8 +4,9 @@
 //   其余两个由它派生(互算走 src/shared/order-math;市价单按对手盘逐档走 estimateMarketOrder / estimateMarketByAmount,
 //   市价卖单按金额换数量走本文件的 sellQtyForProceeds —— 买盘价降序,见该函数)。
 // - 可用资源 / 顶档 / 标的精度变了,面板派发 refresh:按 lastEdited 重算派生项,无变化返回同一引用。
-// - reduceDraft 是纯函数:上下文 ctx(标的精度、可用资源、盘口顶档与逐档)由调用方在事件发生时取好传入,
-//   这样盘口跳动不会让下单面板重渲染(面板只订阅 useBookTop,逐档在事件里从 store 现取)。
+// - reduceDraft 是纯函数:上下文 ctx(标的精度、可用资源、盘口顶档与逐档)由调用方在事件发生时取好传入(draftCtxOf),
+//   这样盘口跳动不会让下单面板重渲染:面板不在渲染期订阅盘口,顶档变化经 store.subscribe → bookTopWatcher →
+//   refreshChanges,派生项会变才派发 refresh(计划 §7.1、§9.1 第 45 条)。
 // - toReview 走 validateDraft,通过时给出可直接 POST /api/orders 的请求(带 clientOrderId)与名义额 / 手续费 / 均价预估;
 //   结果未确认的确认单(opts.reuse)里有参数完全相同的,沿用它的 clientOrderId(断网重试不会下出第二单,服务端按 userId + clientOrderId 幂等)。
 // - shouldConsumeSeed:草稿种子按 nonce 只消费一次、只认当前标的(OrderPanel 的门)。
@@ -419,4 +420,69 @@ export function bookLevels(book: BookMaps | undefined): { asks: OrderBookLevel[]
     asks: [...book.asks.values()].sort((a, b) => a.price - b.price),
     bids: [...book.bids.values()].sort((a, b) => b.price - a.price),
   };
+}
+
+/**
+ * 原始最优买卖价(聚合前):买盘最高价、卖盘最低价;没有盘口或该侧没有挂单为 null。
+ * 「顶档」的唯一定义 —— selectors.ts 的 useBookTop(盘口面板的价差行)也调它,不另写一份。
+ */
+export function bookTopOf(book: BookMaps | undefined): DraftBookTop {
+  let bestBid: number | null = null;
+  let bestAsk: number | null = null;
+  if (book) {
+    for (const price of book.bids.keys()) if (bestBid === null || price > bestBid) bestBid = price;
+    for (const price of book.asks.keys()) if (bestAsk === null || price < bestAsk) bestAsk = price;
+  }
+  return { bestBid, bestAsk };
+}
+
+/** 市场 store 里校验用得到的那一片(结构类型:本文件对 store 只有类型引用,MarketState 在结构上满足) */
+export type DraftBooksSlice = { books: Readonly<Record<string, BookMaps | undefined>> };
+
+/**
+ * 下单表单渲染期挂在市场 store 上的唯一一个读盘口的 selector(纯工厂,OrderPanel 把返回值交给 useMarketStore):
+ * 只返回校验结果(DraftError | null,原始值)—— 顶档怎么动,结果不变就不重渲染。还没点过「核对订单」(attempted = false)恒为 null。
+ * 校验里依赖顶档的只有市价单:对手盘空了 → noLiquidity,可用现金买不起卖一 → insufficientCash;限价草稿的结果与盘口无关。
+ */
+export function errorSelector(
+  d: Draft,
+  instrument: DraftInstrumentInfo,
+  avail: DraftAvail,
+  symbol: string,
+  attempted: boolean,
+): (state: DraftBooksSlice) => DraftError | null {
+  return (state) => (attempted ? draftError(d, { instrument, avail, bookTop: bookTopOf(state.books[symbol]) }) : null);
+}
+
+/** 事件(或 store 订阅回调)发生时的完整上下文:顶档与逐档取自同一份盘口(store.books[symbol],没有为 undefined) */
+export function draftCtxOf(instrument: DraftInstrumentInfo, avail: DraftAvail, book: BookMaps | undefined): DraftCtx {
+  return { instrument, avail, bookTop: bookTopOf(book), ...bookLevels(book) };
+}
+
+// ------------------------------------------------------------------ 顶档变化 → 要不要重算(不经渲染)
+
+/**
+ * 顶档变化探测(闭包,不碰 React 与 store;OrderPanel 把它接在 store.subscribe 上):每次喂当前的盘口,
+ * 最优买价或最优卖价与上一次不同才返回 true。同一个对象(store 在改别的标的 / 别的切片)与只改深度、数量、单数的更新都是 false
+ * —— 市价单只在顶档变化时重新走档,与改动前订阅 useBookTop 时同一口径。
+ */
+export function bookTopWatcher(initial: BookMaps | undefined): (book: BookMaps | undefined) => boolean {
+  let seen = initial;
+  let top = bookTopOf(initial);
+  return (book) => {
+    if (book === seen) return false;
+    seen = book;
+    const next = bookTopOf(book);
+    if (next.bestBid === top.bestBid && next.bestAsk === top.bestAsk) return false;
+    top = next;
+    return true;
+  };
+}
+
+/**
+ * 上下文(可用资源、标的精度、盘口)变了之后,草稿的派生项(数量 / 金额 / 滑杆 / 预估合计)会不会变 = 要不要派发 refresh。
+ * 限价草稿与没填数量的市价草稿不随盘口变(false:面板不派发,也就不渲染);市价草稿填了数量 / 金额 / 滑杆、走档结果变了才是 true。
+ */
+export function refreshChanges(d: Draft, ctx: DraftCtx): boolean {
+  return reduceDraft(d, { kind: "refresh" }, ctx) !== d;
 }

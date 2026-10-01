@@ -148,32 +148,45 @@ describe("toPosition", () => {
   const holding = (over: Partial<HoldingRow> = {}): HoldingRow => ({
     assetId: "a_1", quantity: 10, locked: 3, asset: { symbol: "VCS-FOR-2021", lastPrice: 10_000, isScenario: false }, ...over,
   });
+  const NO_LOCKS = { orders: 0, otc: 0 };
   const line = (over: Partial<CostBasisLedgerLine>): CostBasisLedgerLine => ({
     id: "led_1", account: "HOLDING", assetId: "a_1", delta: 10, reason: "TRADE_SETTLE", refType: "TRADE", refId: "trd_1", createdAt: T0, ...over,
   });
 
-  it("三态 + 市值 + 成本完整: available = quantity − locked, retired 来自参数, avg / pnl 由账本重建", () => {
+  it("三态 + 锁定来源 + 市值 + 成本完整: available = quantity − locked, retired 与 lockedBy 来自参数, avg / pnl 由账本重建", () => {
     const rows = [
       line({ id: "led_cash", account: "CASH", assetId: null, delta: -95_000 }),
       line({ id: "led_hold", account: "HOLDING", delta: 10 }),
     ];
-    expect(toPosition(holding(), 4, rows)).toEqual({
-      assetId: "a_1", symbol: "VCS-FOR-2021", quantity: 10, locked: 3, available: 7, retired: 4, lastPrice: 10_000, marketValue: 100_000,
+    expect(toPosition(holding(), 4, rows, { orders: 2, otc: 1 })).toEqual({
+      assetId: "a_1", symbol: "VCS-FOR-2021", quantity: 10, locked: 3, lockedBy: { orders: 2, otc: 1 }, available: 7, retired: 4, lastPrice: 10_000, marketValue: 100_000,
       averagePurchasePrice: 9_500, unrealisedPnl: 5_000, costBasisStatus: "complete", isScenario: false,
     });
   });
 
   it("成本不完整时 averagePurchasePrice / unrealisedPnl 为 null 而不是 0: 种子持仓 → unknown_acquisition_cost, 账本对不上 → incomplete_ledger", () => {
-    const seeded = toPosition(holding(), 0, [line({ reason: "SEED", refType: null, refId: null })]);
+    const seeded = toPosition(holding(), 0, [line({ reason: "SEED", refType: null, refId: null })], NO_LOCKS);
     expect(seeded).toMatchObject({ costBasisStatus: "unknown_acquisition_cost", averagePurchasePrice: null, unrealisedPnl: null, marketValue: 100_000 });
-    const missing = toPosition(holding(), 0, []);
+    const missing = toPosition(holding(), 0, [], NO_LOCKS);
     expect(missing).toMatchObject({ costBasisStatus: "incomplete_ledger", averagePurchasePrice: null, unrealisedPnl: null });
   });
 
   it("lastPrice 为 null → marketValue 0、lastPrice null; 情景标的带 isScenario true; locked 超过 quantity 时 available 不为负", () => {
-    const p = toPosition(holding({ quantity: 2, locked: 5, asset: { symbol: "CEA-SCENARIO", lastPrice: null, isScenario: true } }), 0, []);
+    const p = toPosition(holding({ quantity: 2, locked: 5, asset: { symbol: "CEA-SCENARIO", lastPrice: null, isScenario: true } }), 0, [], NO_LOCKS);
     expect(p).toMatchObject({ lastPrice: null, marketValue: 0, available: 0, isScenario: true });
     expect("userId" in p).toBe(false);
+  });
+
+  it("lockedBy 与 locked 对不上时两边都照实给出: locked / available 以 Holding 行为准, lockedBy 是传入的值(不改、不补差)", () => {
+    const source = { orders: 1, otc: 0 };
+    const p = toPosition(holding(), 0, [], source); // holding().locked = 3
+    expect(p).toMatchObject({ locked: 3, available: 7, lockedBy: { orders: 1, otc: 0 } });
+    expect(p.lockedBy).not.toBe(source); // 拷贝:调用方之后改自己的对象不影响已发出的行
+  });
+
+  it("整仓注销的行: quantity 0、retired > 0 → available 0、marketValue 0, 没有剩余数量所以没有均价", () => {
+    const retiredOut = toPosition(holding({ quantity: 0, locked: 0 }), 10, [line({ id: "led_in", delta: 10, reason: "SEED", refType: null, refId: null }), line({ id: "led_out", delta: -10, reason: "SIMULATED_RETIREMENT", refType: "RETIREMENT", refId: "ret_1" })], NO_LOCKS);
+    expect(retiredOut).toMatchObject({ quantity: 0, locked: 0, available: 0, retired: 10, marketValue: 0, averagePurchasePrice: null });
   });
 });
 
@@ -192,9 +205,9 @@ describe("avgFillPricesByOrder", () => {
         findMany: async (args: unknown) => {
           calls.push(args);
           return [
-            { buyOrderId: "ord_a", sellOrderId: "ord_x", quantity: 2, price: 9_000 },
-            { buyOrderId: "ord_a", sellOrderId: "ord_y", quantity: 1, price: 9_301 },
-            { buyOrderId: "ord_z", sellOrderId: "ord_b", quantity: 1, price: 5_000 },
+            { id: "t1", buyOrderId: "ord_a", sellOrderId: "ord_x", quantity: 2, price: 9_000 },
+            { id: "t2", buyOrderId: "ord_a", sellOrderId: "ord_y", quantity: 1, price: 9_301 },
+            { id: "t3", buyOrderId: "ord_z", sellOrderId: "ord_b", quantity: 1, price: 5_000 },
           ];
         },
       },
@@ -213,5 +226,29 @@ describe("avgFillPricesByOrder", () => {
 
     expect((await avgFillPricesByOrder(db, [{ id: "ord_c", filledQuantity: 0 }])).size).toBe(0);
     expect(calls).toHaveLength(1);
+  });
+
+  // P2-13:OR 两个 IN 列表超过 Prisma 的 999 个参数时,Prisma 自己拆批会把同一笔成交返回不止一次,所以这里每 400 张一批、按成交 id 去重
+  it("每 400 张订单一次查询;买卖两张单落在不同批里的成交只算一次", async () => {
+    const orders = Array.from({ length: 401 }, (_, i) => ({ id: `o${String(i).padStart(3, "0")}`, filledQuantity: 1 }));
+    const calls: string[][] = [];
+    const db = {
+      trade: {
+        findMany: async (args: { where: { OR: [{ buyOrderId: { in: string[] } }, unknown] } }) => {
+          const ids = args.where.OR[0].buyOrderId.in;
+          calls.push(ids);
+          // o000 买、o400 卖的那一笔两批都取得到;其余每张单一笔对外的成交
+          const cross = { id: "cross", buyOrderId: "o000", sellOrderId: "o400", quantity: 1, price: 7_000 };
+          return [cross, ...ids.filter((id) => id !== "o000" && id !== "o400").map((id) => ({ id: `t-${id}`, buyOrderId: id, sellOrderId: "bot", quantity: 1, price: 5_000 }))];
+        },
+      },
+    } as unknown as Parameters<typeof avgFillPricesByOrder>[0];
+    const avg = await avgFillPricesByOrder(db, orders);
+    expect(calls.map((ids) => ids.length)).toEqual([400, 1]);
+    expect(avg.size).toBe(401);
+    // 去重之后 o000 与 o400 各只有 1 吨成交,与 filledQuantity 对得上
+    expect(avg.get("o000")).toBe(7_000);
+    expect(avg.get("o400")).toBe(7_000);
+    expect(avg.get("o123")).toBe(5_000);
   });
 });

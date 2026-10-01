@@ -3,7 +3,12 @@ import { clientIpFromHeaders } from "../../../server/client-ip.mjs";
 
 // 进程内滑动窗口限流。本应用是结构性单实例(SQLite 卷 + 进程内机器人),
 // 进程内状态即全局状态;若未来多实例化,需换外部存储。
-const buckets = new Map<string, number[]>();
+// 计数放 globalThis:路由处理器、instrumentation 与 server.mjs 可能各自加载一份本模块,
+// 模块级 Map 会让同一个键在不同打包产物里各算各的(例如三个 CSV 路由共用的 csv:user:<id> 桶)。
+declare global {
+  var __carbadiaRateLimit: Map<string, number[]> | undefined;
+}
+const buckets: Map<string, number[]> = (globalThis.__carbadiaRateLimit ??= new Map());
 const MAX_KEYS = 10_000; // 防内存无限增长:超限时全量清一次(限流是尽力而为,不是账本)
 
 export function rateLimit(key: string, limit: number, windowMs: number, now = Date.now()): boolean {

@@ -1,6 +1,8 @@
 "use client";
 // MarketProvider(计划 §3.1 组件树、§3.2 客户端 realm 与降级路径、§3.6):终端里唯一挂 transport、batcher 与三个 usePolling 的地方,
 // 无渲染输出。transport / batcher 是模块级单例(首次在浏览器里创建,永不随路由重建);组件挂载 / 卸载只 start / stop。
+// 资产页 /trade/account 不订阅任何标的,挂的是 ./AccountFeed.tsx:它与这里共用 startFeed(ticker:* + transport 生命周期)、
+// subscribeAccountTopic(account)与 pollAccount,两个组件不会同时挂载(不同页面)。
 //
 //   - 首屏:挂载后的 effect 里 marketActions.setInstruments(initialInstruments, { onlyIfEmpty: true }) 灌入 SSR props —— 这是 store 的
 //     唯一初始写入口,不在渲染期写(zustand action 不是 React setState,react-hooks/set-state-in-effect 不触发);
@@ -12,7 +14,7 @@
 //     REST 结果经 poll-frames 翻成 ServerFrame 喂同一 batcher;失败 throw 让 usePolling 退避;
 //   - batcher 的 apply:marketActions.applyEvents(市场事件)+ applyAccountEvents(order / fill / balance / position 经 bridge 的
 //     批量入口转账户 store,一批一次 set());
-//   - 账户快照的收口:快照只能覆盖、表达不了「已经没有了」(已成交 / 已撤的单、卖光的持仓)。轮询路径在 push 快照帧前
+//   - 账户快照的收口:快照只能覆盖、表达不了「已经没有了」(已成交 / 已撤的单、卖光且没注销过的持仓)。轮询路径在 push 快照帧前
 //     retainOpenOrders(挂单翻完才调)+ retainPositions;WS 路径由 ws-client 识别 account 订阅快照的边界(account-snapshot 事件,
 //     帧在快照末尾切开交付),这里先 flush batcher 让快照落地,再按快照里的 id 收口(reconcileAccountSnapshot);
 //   - 账户列表:Nav 只拉身份与余额,挂单 / 持仓归终端 —— account 订阅快照、轮询,以及身份就绪时 transport 送不来的话
@@ -151,8 +153,9 @@ export async function pollMarket(symbol: string, rt: MarketRuntime): Promise<voi
 
 /**
  * 轮询降级 + 已登录:持仓 / 余额 + 当前挂单(按 nextCursor 翻完,见 fetchOpenOrders);先按快照收口挂单与持仓集合
- * (已成交 / 已撤的旧单、卖光的持仓移除 —— /api/account/positions 对卖光的持仓不返回数量 0 的行;它另外会返回整仓已注销的行
- *(数量 0、retired > 0,P1-25b),账户 store 的折叠目前只留数量 > 0 的行,这类行的显示归 Phase 2 的注销功能),再喂事件。
+ * (已成交 / 已撤的旧单、卖光的持仓移除 —— /api/account/positions 对卖光且没注销过的持仓不返回数量 0 的行),再喂事件。
+ * 整仓注销的行(数量 0、retired > 0)是持仓载荷的一部分(计划 §6.2.2 C1):REST 返回它,收口集合里有它,
+ * 账户 store 的折叠也保留它(holdsPosition)—— 注销之后这一行在 ≤ 5 s 内变成 quantity 0、retired 增加,而不是消失。
  * 挂单超过页数上限(complete: false)时不 retainOpenOrders:拿到的只是前 2000 张,其余可能还挂着;帧照常 push(只 upsert)。
  * 任一请求(含翻页中途)失败 → reject,usePolling 退避,本轮不 retain、不 push,保留现状。
  * 迟到的响应(在途时切回了 WS,或已登出 / 换了用户)丢弃:快照里的 OPEN 单会把 WS 刚删掉的已成交 / 已撤单救回来,
@@ -236,7 +239,8 @@ export function loadAccountListsUnlessStreamed(connection: ConnectionState = use
  * WS 模式下 account 订阅快照(hub 在 subscribe account 时发 balance → 逐条 order → 逐条 position,§3.3)的收口:
  * ws-client 把帧在快照末尾切开:快照及之前的部分交给 batcher 之后上报 account-snapshot(边界识别见 ws-client),此时快照还在 batcher 里没应用;
  * 先 flush 让它(连同之前积压的帧)落进账户 store,再只保留快照里的挂单 id / 持仓 assetId —— 断线期间成交或撤掉的委托、
- * 卖光的持仓不会出现在快照里,不收口就永远留着。ids 只是快照自己的行:订阅之后、快照之前到达的增量都比快照旧
+ * 卖光的持仓不会出现在快照里,不收口就永远留着。快照里的持仓与 REST 同一口径(计划 §6.2.2 C1):整仓注销的行
+ *(数量 0、retired > 0)在快照里,所以在收口集合里、不会被收走;卖光且没注销过的不在。ids 只是快照自己的行:订阅之后、快照之前到达的增量都比快照旧
  *(hub 查询期间有该用户的事件就重查,见 ws-client 的 accountWatch),它们碰过、快照里却没有的挂单 / 持仓已经没了;
  * 同一帧里跟在快照后面的增量(比快照新)要等这里返回之后才交给 batcher,所以这次 flush 应用不到、收口也删不到它们。
  * 前提:快照是全量(hub 的快照来源读全部 OPEN / PARTIAL 挂单与全部持仓,不设条数上限)。将来若给快照加上限,
@@ -284,6 +288,34 @@ export async function calibrateCandles(symbol: string, interval: CandleInterval,
   rt.batcher.push(framesFromCandles(symbol, interval, { ...r, candles: dropStaleLastBar(r.candles, live) }));
 }
 
+/**
+ * 与标的无关的那一半(终端的 MarketProvider 与资产页的 AccountFeed 共用,P2-10):登记登录 / 登出后的重连钩子、
+ * 常驻订阅 ticker:*、按服务端提示启动 transport(transportMode === "poll" 时首帧就轮询、不试 /ws);返回清理函数(effect 的清理)。
+ */
+export function startFeed(rt: MarketRuntime, transportMode?: TransportMode): () => void {
+  registerTransportReconnect(() => rt.transport.reconnect());
+  rt.transport.subscribe("ticker:*");
+  rt.transport.start(transportMode);
+  return () => {
+    registerTransportReconnect(null);
+    rt.transport.unsubscribe("ticker:*");
+    rt.transport.stop();
+  };
+}
+
+/**
+ * 登录后的 account 订阅(两处共用):订阅 account;挂单 / 持仓 transport 送不来(或一时送不来)时自己拉一次
+ *(loadAccountListsUnlessStreamed)。返回清理函数:登出、换人、离开页面时取消等待并退订。
+ */
+export function subscribeAccountTopic(rt: MarketRuntime): () => void {
+  rt.transport.subscribe("account");
+  const cancelLists = loadAccountListsUnlessStreamed();
+  return () => {
+    cancelLists();
+    rt.transport.unsubscribe("account");
+  };
+}
+
 export type MarketProviderProps = {
   symbol: string;
   /** 不传时读 usePrefs().interval(服务端与水合首帧为默认 1m) */
@@ -311,14 +343,7 @@ export function MarketProvider({ symbol, interval: intervalProp, initialInstrume
   useEffect(() => {
     const rt = getMarketRuntime();
     if (!rt) return;
-    registerTransportReconnect(() => rt.transport.reconnect());
-    rt.transport.subscribe("ticker:*");
-    rt.transport.start(transportMode);
-    return () => {
-      registerTransportReconnect(null);
-      rt.transport.unsubscribe("ticker:*");
-      rt.transport.stop();
-    };
+    return startFeed(rt, transportMode);
   }, [transportMode]);
 
   // 以 symbol 为 restartKey:book / trades;退订 90 s 后 evictSymbol
@@ -349,12 +374,7 @@ export function MarketProvider({ symbol, interval: intervalProp, initialInstrume
     if (!meId) return;
     const rt = getMarketRuntime();
     if (!rt) return;
-    rt.transport.subscribe("account");
-    const cancelLists = loadAccountListsUnlessStreamed();
-    return () => {
-      cancelLists();
-      rt.transport.unsubscribe("account");
-    };
+    return subscribeAccountTopic(rt);
   }, [meId]);
 
   // 自选镜像进 store(setWatchlist 同内容不 set)

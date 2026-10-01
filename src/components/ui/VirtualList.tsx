@@ -24,6 +24,15 @@ export type VirtualListProps<T> = {
   /** 空列表时渲染的插槽,缺省 <EmptyState /> */
   empty?: ReactNode;
   className?: string;
+  /**
+   * 滚动容器里、各行上方的一行(贴顶,--z-sticky;有它时空列表也照样显示)。给「横向滚动时首列 / 操作列贴边」的表用
+   *(TabTable 的 pinEdges,P2-12):position: sticky 只认最近的滚动容器,所以表头与各行要在同一个滚动容器(就是这里)里一起横向滚,
+   * 格子上的 sticky 才有参照。表头按一行(--spacing-row)高计,虚拟器的可视范围随之下移一行。
+   * 有表头时滚动容器自成层叠上下文(isolate),表头的 z-index 只在容器里面起作用,见组件体里的注释。
+   */
+  header?: ReactNode;
+  /** 表头与行轨道的最小宽度(如 "45.5rem"):容器更窄时由本组件的滚动容器横向滚动 */
+  minWidth?: string;
 };
 
 /**
@@ -43,10 +52,12 @@ export function VirtualList<T>({
   getKey,
   empty,
   className = "",
+  header,
+  minWidth,
 }: VirtualListProps<T>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const hintId = useId();
-  const t = useT("terminal");
+  const ui = useT("ui");
   // eslint-disable-next-line react-hooks/incompatible-library -- React Compiler 对 useVirtualizer 的返回值跳过自动记忆化(TanStack 官方说明),本组件不把它传给任何记忆化的子组件
   const virtualizer = useVirtualizer({
     count: items.length,
@@ -54,10 +65,17 @@ export function VirtualList<T>({
     estimateSize: () => rowHeight,
     overscan,
     getItemKey: (index) => getKey(items[index]),
+    // 贴顶的表头占去第一行的位置:各行实际从第二行起(位置由 CSS 给,这里只让可视范围算得一致)
+    paddingStart: header === undefined ? 0 : rowHeight,
     // 至少一行高:overscan 0 是合法值,但 virtual-core 在 outerSize 0 时 range 为 null,SSR 会一行都不出
     initialRect: { width: 0, height: rowHeight * Math.max(1, overscan) },
   });
   const rows = virtualizer.getVirtualItems();
+  // 有表头时滚动容器自成层叠上下文(isolate,P2-12):贴顶表头的 z-index(--z-sticky)只在容器里和各行比高低。
+  // 不隔离的话,它和页面上别的贴顶层在同一个层叠上下文里比:终端头部(terminal.css 的 [data-area="header"])也是 sticky + --z-sticky、
+  // DOM 在前,页面滚动、列表从头部底下经过时,表头就画在头部上面,还截走头部的点击(最新价、标的 / 年份切换、抽屉开关)。
+  // 不传 header 时不加,标记与原来逐字节一致。
+  const isolate = header === undefined ? "" : " isolate";
 
   return (
     <div
@@ -66,15 +84,20 @@ export function VirtualList<T>({
       aria-label={label}
       aria-describedby={hintId}
       tabIndex={0}
-      className={`relative overflow-auto tabular-nums focus-visible:outline-none focus-visible:shadow-focus ${className}`}
+      className={`relative overflow-auto tabular-nums focus-visible:outline-none focus-visible:shadow-focus${isolate} ${className}`}
     >
       <span className="sr-only" id={hintId}>
-        {t.a11y.listHint}
+        {ui.listHint}
       </span>
+      {header !== undefined ? (
+        <div className="sticky top-0 z-(--z-sticky)" style={{ minWidth }}>
+          {header}
+        </div>
+      ) : null}
       {items.length === 0 ? (
         (empty ?? <EmptyState />)
       ) : (
-        <div className="relative w-full" style={{ height: `calc(var(--spacing-row) * ${items.length})` }}>
+        <div className="relative w-full" style={{ height: `calc(var(--spacing-row) * ${items.length})`, minWidth }}>
           {rows.map((row) => (
             <div
               key={row.key}

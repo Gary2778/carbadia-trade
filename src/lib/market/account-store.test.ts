@@ -31,6 +31,7 @@ import {
   applyAccountEvent,
   applyAccountEvents,
   createInitialAccountState,
+  holdsPosition,
   hydrate,
   hydrateForNavigation,
   loadAccountLists,
@@ -87,6 +88,7 @@ const position = (assetId: string, partial: Partial<Position> = {}): Position =>
   symbol: assetId === "a-vcs" ? "VCS-FOR-2021" : "GS-REN-2020",
   quantity: 20,
   locked: 5,
+  lockedBy: { orders: 5, otc: 0 },
   available: 15,
   retired: 0,
   lastPrice: 7000,
@@ -413,7 +415,7 @@ describe("refreshOnNavigation (Nav's path effect): keeps cash and login fresh ou
     await hydrate(loggedIn(alice).fetchJson, "me"); // Nav 挂载那次
     vi.advanceTimersByTime(NAV_REFRESH_MIN_MS);
     const { fetchJson, calls } = loggedIn({ ...alice, cashBalance: alice.cashBalance - 120_00 });
-    const p = accountActions.refreshOnNavigation("/portfolio", fetchJson);
+    const p = accountActions.refreshOnNavigation("/orders", fetchJson);
     expect(p).not.toBeNull();
     await p;
     expect(calls).toEqual([ME_URL]);
@@ -427,13 +429,14 @@ describe("refreshOnNavigation (Nav's path effect): keeps cash and login fresh ou
     vi.advanceTimersByTime(NAV_REFRESH_MIN_MS - 1);
     expect(refreshOnNavigation("/otc", probe.fetchJson)).toBeNull();
     vi.advanceTimersByTime(1);
-    for (const path of ["/trade", "/trade/VCS-FOR-2021"]) expect(refreshOnNavigation(path, probe.fetchJson), path).toBeNull();
+    // 资产页 /trade/account(P2-10)同样不拉:它挂着 AccountFeed,余额由 account 推送 / 轮询维护
+    for (const path of ["/trade", "/trade/VCS-FOR-2021", "/trade/account"]) expect(refreshOnNavigation(path, probe.fetchJson), path).toBeNull();
     expect(probe.calls).toEqual([]);
     const first = refreshOnNavigation("/otc", probe.fetchJson);
     expect(first).not.toBeNull();
-    expect(refreshOnNavigation("/portfolio", probe.fetchJson)).toBeNull(); // 在途
+    expect(refreshOnNavigation("/orders", probe.fetchJson)).toBeNull(); // 在途
     await first;
-    expect(refreshOnNavigation("/portfolio", probe.fetchJson)).toBeNull(); // 刚刷过
+    expect(refreshOnNavigation("/orders", probe.fetchJson)).toBeNull(); // 刚刷过
     expect(probe.calls).toEqual([ME_URL]);
   });
 
@@ -1080,13 +1083,49 @@ describe("applyAccountEvent", () => {
     expect(s.me).toMatchObject({ id: "u-alice", name: "Alice", cashBalance: 42, lockedCash: 7 });
   });
 
-  it("upserts positions by assetId and drops a position whose quantity reached zero", () => {
+  it("upserts positions by assetId and drops a position whose quantity reached zero (and that was never retired)", () => {
     applyAccountEvent(positionEvent(position("a-gs")));
     expect([...useAccountStore.getState().positions.keys()]).toEqual(["a-vcs", "a-gs"]);
     applyAccountEvent(positionEvent(position("a-vcs", { quantity: 25, available: 20 })));
     expect(useAccountStore.getState().positions.get("a-vcs")?.quantity).toBe(25);
     applyAccountEvent(positionEvent(position("a-gs", { quantity: 0, locked: 0, available: 0 })));
     expect(useAccountStore.getState().positions.has("a-gs")).toBe(false);
+  });
+
+  it("keeps a fully retired position (quantity 0, retired > 0): the row is overwritten, not dropped (plan 6.2.2 C1)", () => {
+    // 部分注销:数量减少、retired 增加,整行覆盖
+    applyAccountEvent(positionEvent(position("a-vcs", { quantity: 12, locked: 5, available: 7, retired: 8 })));
+    expect(useAccountStore.getState().positions.get("a-vcs")).toMatchObject({ quantity: 12, retired: 8 });
+    // 整仓注销:quantity 0、retired > 0 → 行还在
+    const listener = vi.fn();
+    const unsub = useAccountStore.subscribe(listener);
+    const retiredOut = position("a-vcs", { quantity: 0, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 0, retired: 20, marketValue: 0 });
+    applyAccountEvent(positionEvent(retiredOut));
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(useAccountStore.getState().positions.get("a-vcs")).toBe(retiredOut);
+    expect(positionsOf(useAccountStore.getState().positions).map((p) => [p.assetId, p.quantity, p.retired])).toEqual([["a-vcs", 0, 20]]);
+    unsub();
+  });
+
+  it("a fully retired row that arrives for an asset the store does not hold yet is inserted (it counts as an applied event)", () => {
+    const retiredOut = position("a-gs", { quantity: 0, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 0, retired: 3, marketValue: 0 });
+    expect(applyAccountEvents([positionEvent(retiredOut)])).toBe(1);
+    expect(useAccountStore.getState().positions.get("a-gs")).toBe(retiredOut);
+  });
+
+  it("drops a row that was sold out and never retired (quantity 0, retired 0); an empty row for an unknown asset is a no-op", () => {
+    const before = useAccountStore.getState().positions;
+    expect(applyAccountEvents([positionEvent(position("a-other", { quantity: 0, locked: 0, available: 0, retired: 0 }))])).toBe(0);
+    expect(useAccountStore.getState().positions).toBe(before);
+    expect(applyAccountEvents([positionEvent(position("a-vcs", { quantity: 0, locked: 0, available: 0, retired: 0 }))])).toBe(1);
+    expect(useAccountStore.getState().positions.has("a-vcs")).toBe(false);
+  });
+
+  it("holdsPosition is the one rule: quantity > 0 or retired > 0", () => {
+    expect(holdsPosition({ quantity: 1, retired: 0 })).toBe(true);
+    expect(holdsPosition({ quantity: 0, retired: 1 })).toBe(true);
+    expect(holdsPosition({ quantity: 3, retired: 2 })).toBe(true);
+    expect(holdsPosition({ quantity: 0, retired: 0 })).toBe(false);
   });
 
   it("ignores account events while nobody is logged in", () => {
@@ -1250,6 +1289,26 @@ describe("retainPositions (snapshot reconciliation: fully sold positions never a
     expect(useAccountStore.getState().positions).toBe(before);
     expect(listener).toHaveBeenCalledTimes(1);
     unsub();
+  });
+
+  it("keeps fully retired rows that the snapshot lists (REST and the WS snapshot both carry them) and drops rows the snapshot no longer has", () => {
+    seedAlice();
+    const retiredOut = position("a-ret", { quantity: 0, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 0, retired: 9, marketValue: 0 });
+    applyAccountEvents([positionEvent(position("a-gs")), positionEvent(retiredOut)]);
+    expect([...useAccountStore.getState().positions.keys()]).toEqual(["a-vcs", "a-gs", "a-ret"]);
+    // 快照:a-vcs 卖光了(不在快照里),a-gs 还在,a-ret 整仓注销(在快照里)
+    retainPositions(new Set(["a-gs", "a-ret"]));
+    const kept = useAccountStore.getState().positions;
+    expect([...kept.keys()]).toEqual(["a-gs", "a-ret"]);
+    expect(kept.get("a-ret")).toBe(retiredOut);
+  });
+
+  it("hydrate from REST keeps the fully retired row the endpoint returns, by the same rule as the event fold", async () => {
+    const retiredOut = position("a-ret", { quantity: 0, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 0, retired: 9, marketValue: 0 });
+    const empty = position("a-empty", { quantity: 0, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 0, retired: 0, marketValue: 0 });
+    const { fetchJson } = loggedIn(alice, { [POSITIONS_URL]: { positions: [position("a-gs"), retiredOut, empty], balance: { cashBalance: 5, lockedCash: 0 } } });
+    await hydrate(fetchJson);
+    expect([...useAccountStore.getState().positions.keys()]).toEqual(["a-gs", "a-ret"]);
   });
 
   it("is exposed on accountActions", () => {

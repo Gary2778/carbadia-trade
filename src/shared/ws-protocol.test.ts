@@ -54,7 +54,7 @@ const fill: Fill = {
 };
 const balance: Balance = { cashBalance: 1_000_000, lockedCash: 68_000 };
 const position: Position = {
-  assetId: "ast_1", symbol: SYMBOL, quantity: 30, locked: 10, available: 20, retired: 3, lastPrice: 6800, marketValue: 204_000,
+  assetId: "ast_1", symbol: SYMBOL, quantity: 30, locked: 10, lockedBy: { orders: 6, otc: 4 }, available: 20, retired: 3, lastPrice: 6800, marketValue: 204_000,
   averagePurchasePrice: 6500, unrealisedPnl: 9_000, costBasisStatus: "complete", isScenario: false,
 };
 
@@ -180,6 +180,10 @@ describe("ServerEvent ↔ serverEventSchema", () => {
     ["resync reason 未知", { ...serverEvents.resync, reason: "because" }],
     ["seq 为负", { ...serverEvents.subscribed, seq: -1 }],
     ["position 的 costBasisStatus 未知", { ...serverEvents.position, position: { ...position, costBasisStatus: "guess" } }],
+    ["position 缺 lockedBy", { ...serverEvents.position, position: { ...position, lockedBy: undefined } }],
+    ["position 的 lockedBy 缺 otc", { ...serverEvents.position, position: { ...position, lockedBy: { orders: 6 } } }],
+    ["position 的 lockedBy.orders 不是整数吨", { ...serverEvents.position, position: { ...position, lockedBy: { orders: 1.5, otc: 0 } } }],
+    ["position 的 lockedBy.otc 为负", { ...serverEvents.position, position: { ...position, lockedBy: { orders: 0, otc: -1 } } }],
     ["order 的 status 未知", { ...serverEvents.order, order: { ...order, status: "NEW" } }],
   ])("拒绝 %s", (_label, bad) => {
     expect(serverEventSchema.safeParse(bad).success).toBe(false);

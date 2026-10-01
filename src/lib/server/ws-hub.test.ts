@@ -92,7 +92,7 @@ function order(id: string): Order {
 }
 function position(assetId: string): Position {
   return {
-    assetId, symbol: "VCS-FOR-2021", quantity: 10, locked: 0, available: 10, retired: 0, lastPrice: 6_800, marketValue: 68_000,
+    assetId, symbol: "VCS-FOR-2021", quantity: 10, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 10, retired: 0, lastPrice: 6_800, marketValue: 68_000,
     averagePurchasePrice: null, unrealisedPnl: null, costBasisStatus: "unknown_acquisition_cost", isScenario: false,
   };
 }

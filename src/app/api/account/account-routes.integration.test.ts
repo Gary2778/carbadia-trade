@@ -360,7 +360,7 @@ describe("GET /api/account/orders", () => {
 });
 
 describe("GET /api/account/positions", () => {
-  it("bob: retired = Retirement 汇总(4 + 6), locked 来自挂单, 无账本来源的持仓 costBasisStatus incomplete_ledger, 按 symbol 升序", async () => {
+  it("bob: retired = Retirement 汇总(4 + 6), locked 来自挂单(lockedBy.orders), 无账本来源的持仓 costBasisStatus incomplete_ledger, 按 symbol 升序", async () => {
     await createSession(ids.bob);
     const data = await expectPrivateOk(await getPositions());
     expect(Object.keys(data).sort()).toEqual(["balance", "positions"]);
@@ -370,7 +370,7 @@ describe("GET /api/account/positions", () => {
     const retiredSum = await prisma.retirement.aggregate({ where: { userId: ids.bob, assetId: ids.assetA }, _sum: { quantity: true } });
     expect(retiredSum._sum.quantity).toBe(10);
     expect(a).toEqual({
-      assetId: ids.assetA, symbol: "VCS-TEST-2021", quantity: 987, locked: 1, available: 986, retired: 10, lastPrice: 9_600, marketValue: 987 * 9_600,
+      assetId: ids.assetA, symbol: "VCS-TEST-2021", quantity: 987, locked: 1, lockedBy: { orders: 1, otc: 0 }, available: 986, retired: 10, lastPrice: 9_600, marketValue: 987 * 9_600,
       averagePurchasePrice: null, unrealisedPnl: null, costBasisStatus: "incomplete_ledger", isScenario: false,
     });
     expect(positions[0]).toMatchObject({ assetId: ids.assetB, quantity: 99, locked: 0, available: 99, retired: 0, lastPrice: 5_000 });
@@ -389,7 +389,7 @@ describe("GET /api/account/positions", () => {
     const positions = data.positions as Position[];
     expect(positions.map((p) => p.symbol)).toEqual(["CEA-SCENARIO", "GS-TEST-2022", "VCS-TEST-2021"]);
     expect(positions[2]).toEqual({
-      assetId: ids.assetA, symbol: "VCS-TEST-2021", quantity: 5, locked: 0, available: 5, retired: 0, lastPrice: 9_600, marketValue: 48_000,
+      assetId: ids.assetA, symbol: "VCS-TEST-2021", quantity: 5, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 5, retired: 0, lastPrice: 9_600, marketValue: 48_000,
       averagePurchasePrice: 9_540, unrealisedPnl: 300, costBasisStatus: "complete", isScenario: false, // (28500 + 19200) / 5
     });
     expect(positions[1]).toMatchObject({ quantity: 1, averagePurchasePrice: 5_000, unrealisedPnl: 0, costBasisStatus: "complete" });

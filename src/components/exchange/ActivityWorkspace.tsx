@@ -7,32 +7,29 @@ import { useExchangeText } from "./useExchange";
 import { AccountGate } from "./AccountData";
 import { ExchangeIcon } from "./ExchangeIcon";
 import { TableViewport } from "./TableViewport";
-type Entry = {
-  id: string;
-  account: string;
-  accountLabel: string;
-  delta: number | string;
-  deltaIsExactNumber: boolean;
-  type: string;
-  label: string;
-  unit: string;
-  refType: string | null;
-  refId: string | null;
-  createdAt: string;
-  asset: { symbol: string; name: string; isScenario: boolean } | null;
+import { legacyActivityCsv, type LegacyActivityFilter } from "./csv-export-links";
+import type {
+  LedgerAccount,
+  LedgerActivity,
+  LedgerActivityResponse,
+} from "@/shared/api-shapes";
+// 账户的英文标签:原来由接口随每行返回,新响应(计划 §6.2.2 C4)只给 account,标签搬到这里,文字不变
+const ACCOUNT_LABELS: Record<LedgerAccount, string> = {
+  CASH: "Available demo cash",
+  CASH_LOCKED: "Reserved demo cash",
+  HOLDING: "Credit balance",
+  HOLDING_LOCKED: "Reserved credits",
 };
-type Result = {
-  entries: Entry[];
-  pagination: { total: number; hasMore: boolean; nextCursor: string | null };
-};
+// CASH / CASH_LOCKED 的变动是整数分,HOLDING / HOLDING_LOCKED 是吨
+const isCash = (e: LedgerActivity) => !e.account.startsWith("HOLDING");
 export function ActivityWorkspace() {
   const c = useExchangeText();
-  const [data, setData] = useState<Result | null>(null),
+  const [data, setData] = useState<LedgerActivityResponse | null>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(true),
     [loaded, setLoaded] = useState(false),
     [unauthorized, setUnauthorized] = useState(false),
-    [filter, setFilter] = useState("all");
+    [filter, setFilter] = useState<LegacyActivityFilter>("all");
   const guard = useRef(false);
   const lastCursor = useRef<string | undefined>(undefined);
   const load = useCallback(async (cursor?: string) => {
@@ -41,18 +38,16 @@ export function ActivityWorkspace() {
     lastCursor.current = cursor;
     setBusy(true);
     try {
-      const r = await api<Result>(
+      const r = await api<LedgerActivityResponse>(
         `/api/transactions?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
       );
       setData((prev) =>
         cursor && prev
           ? {
               ...r,
-              entries: [
-                ...prev.entries,
-                ...r.entries.filter(
-                  (e) => !prev.entries.some((p) => p.id === e.id),
-                ),
+              items: [
+                ...prev.items,
+                ...r.items.filter((e) => !prev.items.some((p) => p.id === e.id)),
               ],
             }
           : r,
@@ -75,19 +70,36 @@ export function ActivityWorkspace() {
     void Promise.resolve().then(() => load());
   }, [load]);
   const rows =
-    data?.entries.filter(
+    data?.items.filter(
       (e) =>
         filter === "all" ||
-        (filter === "cash" && e.unit === "USD_CENTS") ||
+        (filter === "cash" && isCash(e)) ||
         (filter === "credits" && e.account === "HOLDING") ||
         (filter === "retirement" && e.type === "RETIREMENT"),
     ) || [];
-  const amount = (e: Entry) => {
-    if (!e.deltaIsExactNumber)
-      return `${e.delta} ${e.unit === "USD_CENTS" ? c("cents (exact)", "分（精确）") : c("units", "单位")}`;
-    const n = Number(e.delta);
-    return `${n > 0 ? "+" : n < 0 ? "−" : ""}${e.unit === "USD_CENTS" ? "$" + fmtMoney(Math.abs(n)) : fmtQty(Math.abs(n))}`;
-  };
+  // CSV 导出(P2-06):导出全部记录(不只是已加载的);「现金」是两个账户,接口一次只筛一个,就导出全部并在提示里说明
+  const csvHref = legacyActivityCsv(filter);
+  const csvTitle =
+    {
+      all: c(
+        "Download every account movement as a CSV file, not only the rows loaded here.",
+        "把全部资产流水下载为 CSV 文件，不只是这里已加载的记录。",
+      ),
+      credits: c(
+        "Download every credit balance movement as a CSV file, not only the rows loaded here.",
+        "把全部信用余额流水下载为 CSV 文件，不只是这里已加载的记录。",
+      ),
+      retirement: c(
+        "Download every retirement movement as a CSV file, not only the rows loaded here.",
+        "把全部注销流水下载为 CSV 文件，不只是这里已加载的记录。",
+      ),
+      cash: c(
+        "Download every account movement as a CSV file; use the account column to keep the cash rows.",
+        "把全部资产流水下载为 CSV 文件；可按账户列筛出现金流水。",
+      ),
+    }[filter] + c(" Simulated data.", "模拟数据。");
+  const amount = (e: LedgerActivity) =>
+    `${e.delta > 0 ? "+" : e.delta < 0 ? "−" : ""}${isCash(e) ? "$" + fmtMoney(Math.abs(e.delta)) : fmtQty(Math.abs(e.delta))}`;
   return (
     <>
       <div className="ex-page-heading">
@@ -100,18 +112,33 @@ export function ActivityWorkspace() {
             )}
           </p>
         </div>
-        <button
-          className="ex-button"
-          disabled={busy}
-          onClick={() => {
-            void load();
-          }}
-        >
-          <ExchangeIcon name="activity" size={14} />
-          {busy
-            ? c("Refreshing…", "更新中…")
-            : c("Refresh activity", "更新流水")}
-        </button>
+        <div className="ex-actions">
+          {/* 已登录且有数据才显示;放在「更新流水」之前,出现时不挪动它 */}
+          {data && !unauthorized ? (
+            <a
+              className="ex-button"
+              href={csvHref}
+              download
+              title={csvTitle}
+              data-export-csv=""
+            >
+              <ExchangeIcon name="download" size={14} />
+              {c("Export CSV", "导出 CSV")}
+            </a>
+          ) : null}
+          <button
+            className="ex-button"
+            disabled={busy}
+            onClick={() => {
+              void load();
+            }}
+          >
+            <ExchangeIcon name="activity" size={14} />
+            {busy
+              ? c("Refreshing…", "更新中…")
+              : c("Refresh activity", "更新流水")}
+          </button>
+        </div>
       </div>
       {unauthorized || !data ? (
         <AccountGate
@@ -143,12 +170,14 @@ export function ActivityWorkspace() {
               role="group"
               aria-label={c("Activity categories", "流水分类")}
             >
-              {[
-                ["all", "All movements", "全部流水"],
-                ["credits", "Credit balance", "信用余额"],
-                ["cash", "Cash movements", "现金流水"],
-                ["retirement", "Retirements", "注销"],
-              ].map(([v, en, zh]) => (
+              {(
+                [
+                  ["all", "All movements", "全部流水"],
+                  ["credits", "Credit balance", "信用余额"],
+                  ["cash", "Cash movements", "现金流水"],
+                  ["retirement", "Retirements", "注销"],
+                ] as const
+              ).map(([v, en, zh]) => (
                 <button
                   key={v}
                   aria-pressed={filter === v}
@@ -208,29 +237,25 @@ export function ActivityWorkspace() {
                         <td>
                           <strong className="font-medium">{e.label}</strong>
                           <span className="ex-subline">
-                            {fmtTime(e.createdAt)}
+                            {fmtTime(new Date(e.ts))}
                           </span>
                         </td>
                         <td>
-                          {e.asset ? (
-                            <Link href={`/market/${e.asset.symbol}`}>
-                              {e.asset.symbol}
-                            </Link>
+                          {e.symbol ? (
+                            <Link href={`/market/${e.symbol}`}>{e.symbol}</Link>
                           ) : (
                             "—"
                           )}
                         </td>
-                        <td>{e.accountLabel}</td>
+                        <td>{ACCOUNT_LABELS[e.account] ?? e.account}</td>
                         <td
-                          className={
-                            Number(e.delta) > 0 ? "ex-positive" : "ex-negative"
-                          }
+                          className={e.delta > 0 ? "ex-positive" : "ex-negative"}
                         >
                           {amount(e)}
                           <span className="ex-subline">
-                            {e.unit === "USD_CENTS"
+                            {isCash(e)
                               ? c("demo USD", "模拟美元")
-                              : e.asset?.isScenario
+                              : e.isScenario // 行上自带(计划 §6.2.2 C4),首次渲染就是对的,不另外取标的列表
                                 ? c("scenario units", "情景单位")
                                 : c("credits", "份信用")}
                           </span>
@@ -270,16 +295,16 @@ export function ActivityWorkspace() {
                 {busy
                   ? c("Loading account activity…", "正在加载资产流水…")
                   : c(
-                      `${rows.length} matching · ${data.entries.length} of ${data.pagination.total} movements loaded · filters apply to loaded records`,
-                      `${rows.length} 笔符合 · ${data.pagination.total} 笔中已加载 ${data.entries.length} 笔 · 筛选适用于已加载记录`,
+                      `${rows.length} matching · ${data.items.length} movements loaded · filters apply to loaded records`,
+                      `${rows.length} 笔符合 · 已加载 ${data.items.length} 笔 · 筛选适用于已加载记录`,
                     )}
               </span>
-              {data.pagination.hasMore && (
+              {data.nextCursor && (
                 <button
                   className="ex-button"
                   disabled={busy}
                   onClick={() => {
-                    void load(data.pagination.nextCursor!);
+                    void load(data.nextCursor!);
                   }}
                 >
                   {busy

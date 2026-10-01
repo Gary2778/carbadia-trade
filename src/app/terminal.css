@@ -1,4 +1,5 @@
-/* 终端专用规则:只匹配 [data-terminal],由 src/app/trade/[symbol]/layout.tsx 导入(P1-16),其它页面不受影响。
+/* 终端专用规则:只匹配 [data-terminal],由 src/app/trade/layout.tsx 导入(P2-01 起;/trade 下所有页面共用),其它页面不受影响。
+   资产页 /trade/account 也挂 data-terminal,另加 data-account 换成文档式单列(文件末尾一节,P2-10)。
    只消费 globals.css 里的 token,不写原始值:没有 hex、rgb 函数色、Tailwind 调色板与 px 字面量(1px 边框除外);
    断点一律 rem:@media (width >= 48rem | 64rem | 80rem) 对应 768 / 1024 / 1280(tokens-only.test.ts 把关)。
    终端 token(--terminal-bg / -panel / -panel-2 / -border / -row-hover / -selected / -mine)按两种外观定义在 globals.css。
@@ -167,6 +168,17 @@
   [data-terminal] [data-area="tape"] {
     height: 20rem;
   }
+  /* 下单面板画过表单之后换成 LoginGate(OrderPanel 的 keepsFormHeight:`?side=` 深链的首帧在登录态未知时画表单,
+     匿名的登录态查询回来才换)时保持表单的高度,下面的碳元数据、底部 Tab 与页脚不上跳。
+     42.625rem = 表单面板在 ≤ 30rem 宽时的高度(合规说明折两行;更宽时一行,矮约 1.1rem,这点差值不计)。
+     这个常数跟着表单走:src/components/terminal/OrderPanel.tsx 的 OrderForm 增减一行(或改行高 / 间距)之后要重新量、改这里
+     (那边的 JSX 上有同样的提醒;order.ssr.test.ts 钉住这条规则在、且在本断点块里)。
+     只写在手机断点里:≥ 48rem 下单面板的高度由网格行决定,不受影响 */
+  [data-terminal] [data-area="order"][data-keep-height] {
+    min-height: 42.625rem;
+  }
+  /* 这一态里 LoginGate 留在面板顶上、空白都在它下面,不要把它垂直居中:居中会把它往下推约 12.8rem,
+     矮屏手机(375×667、360×640)的首屏里登录入口就落到底部买卖条之下(试过,见 docs/perf-report.md「Phase 2 · P2-08」§7) */
 }
 
 /* ?perf=1 的 PerfHud(终端根的直接子节点,fixed + z-popover,压在抽屉与底部条之上):
@@ -251,5 +263,76 @@
   [data-terminal] :is([data-drawer-toggle], [data-drawer-close]),
   [data-terminal] > [data-drawer-scrim] {
     display: none;
+  }
+}
+
+/* ── 贴边列(持仓页签,P2-12)────────────────────────────────────────────
+   TabTable 的 pinEdges:表头与各行在 VirtualList 的同一个滚动容器里横向滚,首列(.t-pin-start)贴左、操作列(.t-pin-end)贴右。
+   底色不透明(默认面板色;分组标题一类整行文字用 .t-pin-alt 换二级面板色),盖住滚到下面的格子;负外边距 + 等量内边距把格子
+   向相邻一侧伸出一个列间隙,滚动时间隙里不露出底下的内容,格子里的内容位置不变。行(.t-pin-row)悬停时贴边格在面板色上叠同一层
+   悬停色,与整行一致。表格放得下时 sticky 不起作用,样子与普通格子相同。
+   贴边格一律撑满整行高(align-self: stretch),内容用 flex 竖直居中:行是 items-center 的网格 / flex,格子默认只有内容那么高,
+   表头操作列那一格没有文字、高度是 0,不透明底色一点也画不出来,滚到它下面的表头文字(「未实现盈亏」)就压在「卖出 / 注销」上面。
+   贴边只在 ≥ 48rem 生效(底色、sticky、伸出的间隙都在下面的断点块里;撑满行高与竖直居中不分宽度,只管版面):
+   手机上底部页签的滚动区约 317 px(375 宽),首列最窄 10.5rem、操作列 5.5rem,两头一贴只剩约 53 px 给中间七列,
+   任何一列都读不全,「已注销」行跨两列的贴右格还会盖住首列。手机上照旧整张表一起横向滚,哪一列都能滚到眼前读全。
+   48rem 起底部页签占满整行(约 734 px),两头贴住后中间还有约 470 px。 */
+[data-terminal] .t-pin {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+}
+[data-terminal] .t-pin-end {
+  justify-content: flex-end;
+}
+@media (width >= 48rem) {
+  [data-terminal] .t-pin {
+    position: sticky;
+    z-index: var(--z-sticky);
+    background: var(--t-pin-bg, var(--terminal-panel));
+  }
+  [data-terminal] .t-pin-alt {
+    --t-pin-bg: var(--terminal-panel-2);
+  }
+  [data-terminal] .t-pin-start {
+    inset-inline-start: 0;
+    margin-inline-end: calc(var(--spacing-gap) * -1);
+    padding-inline-end: var(--spacing-gap);
+  }
+  [data-terminal] .t-pin-end {
+    inset-inline-end: 0;
+    margin-inline-start: calc(var(--spacing-gap) * -1);
+    padding-inline-start: var(--spacing-gap);
+  }
+  [data-terminal] .t-pin-row:hover > .t-pin {
+    background: linear-gradient(var(--terminal-row-hover), var(--terminal-row-hover)), var(--t-pin-bg, var(--terminal-panel));
+  }
+}
+
+/* ── 资产页 /trade/account(P2-10)──────────────────────────────────────────
+   资产页的根也挂 data-terminal(--terminal-* token 在子树里才有值;exchange.css 的旧页面聚焦 / 禁用默认值对整棵子树不生效,
+   终端那组 @layer base 的默认值照样兜底)与 data-glass="off"(dark 下面板不透明、液态玻璃折射跳过),另加 data-account:
+   它不是终端的固定网格,而是文档式单列 —— 下面 (0,2,0) 的规则压过本文件的 [data-terminal] 网格与各断点的网格模板
+   (display 回到 block,模板随之不起作用),内边距按文档页给。根仍全宽铺满 --terminal-bg(globals.css 的
+   body:has([data-terminal]) main 让 main 不限宽、无内边距),内容列的最大宽度由组件的 max-w-7xl 给,不出现横向滚动。
+   min-height 让首屏的页脚落在视口之外:骨架换成数据 / 登录入口时页脚不在可视区内位移。
+   globals.css 的三个 token 块([data-terminal]、dark、红涨)与终端页面的规则都不变。 */
+[data-terminal][data-account] {
+  display: block;
+  min-height: calc(100svh - var(--spacing-nav));
+  padding: var(--spacing-panel) var(--spacing-gutter) calc(var(--spacing-panel) * 3);
+}
+/* 持仓行与挂牌行:手机两列卡片(占整行的格子用 col-span-2),≥ 64rem 与视觉表头对齐成同一组列 */
+[data-terminal][data-account] :is(.t-holding-grid, .t-otc-grid) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--spacing-panel);
+  row-gap: var(--spacing-gap);
+}
+@media (width >= 64rem) {
+  [data-terminal][data-account] .t-holding-grid {
+    grid-template-columns: minmax(9rem, 1.4fr) minmax(8rem, 1.3fr) minmax(8.5rem, 1.3fr) repeat(4, minmax(5rem, 1fr)) 7.5rem;
+  }
+  [data-terminal][data-account] .t-otc-grid {
+    grid-template-columns: minmax(10rem, 2fr) repeat(3, minmax(6rem, 1fr)) 12rem;
   }
 }

@@ -138,7 +138,7 @@ function composite(chain: readonly string[], base: string, layers: readonly stri
 }
 
 
-/** 终端的源码:src/components/terminal 与 src/app/trade 下的 .tsx(不含测试);name 是相对各自目录的路径 */
+/** 终端的源码:src/components/terminal、src/app/trade 与资产页组件 src/components/account(P2-10)下的 .tsx(不含测试);name 是相对各自目录的路径 */
 function tsxUnder(dir: string, prefix: string): { name: string; src: string }[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     if (entry.isDirectory()) return tsxUnder(join(dir, entry.name), `${prefix}${entry.name}/`);
@@ -149,6 +149,7 @@ function tsxUnder(dir: string, prefix: string): { name: string; src: string }[] 
 const TERMINAL_SOURCES = [
   ...tsxUnder(fileURLToPath(new URL("./", import.meta.url)), ""),
   ...tsxUnder(fileURLToPath(new URL("../../app/trade/", import.meta.url)), "app/trade/"),
+  ...tsxUnder(fileURLToPath(new URL("../account/", import.meta.url)), "components/account/"),
 ];
 
 /** 终端文字坐在这三种面上:面板、二级面板(输入框、下拉、买卖切换)、对话框(ui/Dialog 的 --surface-overlay) */
@@ -160,7 +161,7 @@ const SELECTED = "--terminal-selected";
 /** 终端里承载文字的三级灰阶 */
 const TEXT = ["--foreground", "--muted", "--muted-2"];
 /** 终端别处的涨跌文字(P1-26):成交带价格、头部最新价 / 24h 涨跌 / 买一卖一、标的列表的涨跌幅、底部 Tab 的方向与盈亏、
- *  持仓行的卖出按钮、成交详情的分录增减、确认框的方向标签(下方源码断言) */
+ *  持仓行的卖出按钮、成交详情的方向、确认框的方向标签(下方源码断言)。账本变动(流水页签、成交详情的账本行)不在此列:中性色 */
 const DIRECTION_TEXT = ["--terminal-up", "--terminal-down"];
 /** 正文(含 10–13 px 的终端小字)的 AA 门槛 */
 const AA_TEXT = 4.5;

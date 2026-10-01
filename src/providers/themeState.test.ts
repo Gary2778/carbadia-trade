@@ -66,12 +66,14 @@ describe("defaultThemeFor", () => {
   it("first visit to the terminal (nothing stored + /trade prefix) is dark", () => {
     expect(defaultThemeFor("/trade", null)).toBe("dark");
     expect(defaultThemeFor("/trade/VCS-FOR-2021", null)).toBe("dark");
+    // 资产页在 /trade 之下(P2-10):与终端同一套设计语言,首访同样深色
+    expect(defaultThemeFor("/trade/account", null)).toBe("dark");
   });
 
   it("first visit anywhere else stays light", () => {
     expect(defaultThemeFor("/", null)).toBe("light");
     expect(defaultThemeFor("/market/VCS-FOR-2021", null)).toBe("light");
-    expect(defaultThemeFor("/portfolio", null)).toBe("light");
+    expect(defaultThemeFor("/orders", null)).toBe("light");
     expect(defaultThemeFor("/otc", null)).toBe("light");
   });
 

@@ -13,18 +13,19 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import type { Messages } from "@/i18n";
 import { useLang, useT } from "@/i18n/LangProvider";
 import { fmtPrice } from "@/lib/format";
-import { accountActions, useAccountStatus, useAccountStore, useBalance, usePosition } from "@/lib/market/account-store";
+import { accountActions, useAccountStatus, useAccountStore, useBalance, usePosition, type AccountStatus } from "@/lib/market/account-store";
 import {
   PCT_MARKS,
-  bookLevels,
-  draftError,
+  bookTopWatcher,
+  draftCtxOf,
+  errorSelector,
   initialDraft,
   reduceDraft,
+  refreshChanges,
   requestError,
   shouldConsumeSeed,
   type Draft,
   type DraftAction,
-  type DraftBookTop,
   type DraftCtx,
   type DraftInstrumentInfo,
   type OrderReview,
@@ -42,7 +43,7 @@ import {
   type PlacedState,
   type SubmitOutcome,
 } from "@/lib/market/order-submit";
-import { useBookTop, useDraft, useInstrument } from "@/lib/market/selectors";
+import { useDraft, useInstrument } from "@/lib/market/selectors";
 import { useMarketStore } from "@/lib/market/store";
 import { formatPrice, formatQty } from "@/shared/precision";
 import { FeeLine } from "./FeeLine";
@@ -65,7 +66,6 @@ let consumedSeedNonce = 0;
 
 const SIDES: readonly Side[] = ["BUY", "SELL"];
 const TYPES: readonly OrderType[] = ["LIMIT", "MARKET"];
-const NO_TOP: DraftBookTop = { bestBid: null, bestAsk: null };
 
 type TerminalText = Messages["terminal"];
 type DraftMsg = { action: DraftAction; ctx: DraftCtx };
@@ -152,12 +152,26 @@ export type OrderPanelProps = {
 };
 
 /**
+ * 面板要不要保持表单的高度(纯函数;section 上的 data-keep-height,terminal.css 只在手机断点按它给 min-height):
+ * 这次挂载里画过表单(formSeen:登录态未知或已登录)、现在换成了 LoginGate。`?side=` 深链的手机首帧就是这样 ——
+ * 服务端不知道登录态,首帧画表单,匿名的登录态查询回来后换成矮得多的 LoginGate;面板不跟着变矮,
+ * 下面的碳元数据、底部 Tab 与页脚就不上跳(P2-08)。挂载时已经是未登录(站内跳转、手机切到下单页签)的面板没画过表单,保持紧凑。
+ */
+export function keepsFormHeight(status: AccountStatus, formSeen: boolean): boolean {
+  return status === "anon" && formSeen;
+}
+
+/**
  * 下单面板(计划 §3.1、§3.6):限价 / 市价、买卖切换、数量 ↔ 金额互算、仓位滑杆、手续费行(0.00 · 演示)、二次确认、幂等提交。
  * - 未登录(status anon)渲染 LoginGate 替换表单;idle / loading 时表单照画(SSR 与水合首帧就是这一态),核对按钮禁用;
+ *   画过表单之后才变成未登录的,手机上面板保持表单的高度(keepsFormHeight),不让下面的面板上跳;
  * - 草稿是本地 reducer state(order-draft.ts 的 reduceDraft,纯函数);按 symbol 作 key 重挂载 = 换标的时草稿按
  *   initialSide 或待消费种子的 side 重置价格与数量;
- * - 订阅:useInstrument / useBalance / usePosition / useBookTop / useDraft / useAccountStatus —— 不订阅整本盘口,
- *   市价走档需要的逐档在事件里从 store 现取,盘口跳动只有顶档变化才让本面板重渲染;
+ * - 渲染期的订阅:useInstrument / useBalance / usePosition / useDraft / useAccountStatus,外加一个只返回校验结果(DraftError | null)
+ *   的 selector —— 都不随盘口跳动变化,所以盘口更新(含最优买卖价变化)时本面板零提交(计划 §7.1、§9.1 第 45 条,P2-08);
+ *   盘口只在两处用到,都不经渲染:事件里从 store 现取顶档与逐档(buildCtx);顶档移动时由 store.subscribe 的回调对一遍草稿
+ *   (bookTopWatcher → syncDraft),派生项会变(市价草稿填了数量 / 金额 / 滑杆、走档结果变了)才派发 refresh ——
+ *   那时输入框里的数字本来就要换,这次渲染是草稿自己的 state 变化;
  * - 盘口点价经 store.draft 注入:按 nonce 消费一次、核对 seed.symbol === 当前 symbol;
  * - clientOrderId 在打开确认框时生成(openReview → toReview);提交(submitReview)前把确认单登记进 order-submit 的模块级「未确认」登记簿,
  *   服务端确认了结果才移除 —— 对话框里重试、关掉再以同样参数核对、换标的 / 手机切页签 / 离开 /trade 再回来(表单重挂载)之后再核对,
@@ -169,16 +183,20 @@ export type OrderPanelProps = {
  *   新单 toast ok 并清空草稿;服务端重放(replayed:之前那张单已在,这次没有下新单)用 toast.orderReplayed 明说 ——
  *   对话框里对「结果未确认」的重试被重放是预期的完成(ok、清空草稿),关掉对话框后重新核对却被重放则 warning、不清空草稿(placedNotice);
  *   自成交防护撤掉了本人挂单时另弹一条 info(toast.selfTradeCancelled);余额 / 持仓由 account 推送或轮询补上;
- * - 可用现金 / 持仓 / 顶档 / 标的精度变了:派发 refresh,金额 / 滑杆 / 预估合计按 lastEdited 重算(不必等用户再动一下输入框);
+ * - 可用现金 / 持仓 / 顶档 / 标的精度变了:金额 / 滑杆 / 预估合计按 lastEdited 重算(syncDraft;不必等用户再动一下输入框);
  * - ComplianceNote 固定在提交按钮正上方。
  */
 export function OrderPanel({ symbol, initialSide }: OrderPanelProps) {
   const t = useT("terminal");
   const status = useAccountStatus();
   const titleId = useId();
+  // 这次挂载里画没画过表单:渲染期按 status 记下(不走 effect),换成 LoginGate 的那次渲染就带上 data-keep-height
+  const [formSeen, setFormSeen] = useState(false);
+  if (status !== "anon" && !formSeen) setFormSeen(true);
   return (
     <section
       data-area="order"
+      data-keep-height={keepsFormHeight(status, formSeen) ? "" : undefined}
       aria-labelledby={titleId}
       className="flex min-h-0 min-w-0 flex-col gap-panel overflow-y-auto rounded-panel border border-(--terminal-border) bg-(--terminal-panel) p-panel"
     >
@@ -202,7 +220,6 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
   const instrument = useInstrument(symbol);
   const balance = useBalance();
   const position = usePosition(instrument?.id ?? "");
-  const top = useBookTop(symbol) ?? NO_TOP;
   const seed = useDraft();
   const info = useMemo(() => instrument ?? fallbackInstrument(symbol), [instrument, symbol]);
   const cash = balance?.cashBalance ?? 0;
@@ -230,22 +247,22 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
     };
   }, []);
 
-  // 事件时的上下文:最新的标的 / 可用资源 / 顶档经 ref 交给稳定的处理函数(滑杆等 memo 子组件不因每次渲染换回调而重渲染);
-  // 市价走档要的逐档在事件里从 store 现取 —— 渲染期不读 store 的逐档,盘口跳动不重渲染本面板
-  const live = useRef({ info, cash, held, top });
+  // 事件时的上下文:最新的标的 / 可用资源 / 草稿经 ref 交给稳定的处理函数(滑杆等 memo 子组件不因每次渲染换回调而重渲染);
+  // 盘口(顶档与逐档,同一份)在事件里从 store 现取 —— 渲染期不读盘口,盘口跳动不重渲染本面板
+  const live = useRef({ info, cash, held, draft });
   useLayoutEffect(() => {
-    live.current = { info, cash, held, top };
+    live.current = { info, cash, held, draft };
   });
   const buildCtx = useCallback((): DraftCtx => {
     const now = live.current;
-    return {
-      instrument: now.info,
-      avail: { cashCents: now.cash, qty: now.held },
-      bookTop: now.top,
-      ...bookLevels(useMarketStore.getState().books[now.info.symbol]),
-    };
+    return draftCtxOf(now.info, { cashCents: now.cash, qty: now.held }, useMarketStore.getState().books[now.info.symbol]);
   }, []);
   const send = useCallback((action: DraftAction) => dispatch({ action, ctx: buildCtx() }), [buildCtx]);
+  /** 按这一刻的上下文对一遍草稿:派生的金额 / 数量 / 滑杆 / 预估合计会变才派发 refresh;不会变就什么都不做(没有 state 更新,没有渲染) */
+  const syncDraft = useCallback(() => {
+    const ctx = buildCtx();
+    if (refreshChanges(live.current.draft, ctx)) dispatch({ action: { kind: "refresh" }, ctx });
+  }, [buildCtx]);
 
   // 草稿种子(盘口点价 / 手机买卖条 / 持仓 Sell):每个 nonce 只消费一次,且只认当前标的的种子
   useEffect(() => {
@@ -254,12 +271,20 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
     send({ kind: "applySeed", seed });
   }, [seed, symbol, send]);
 
-  // 上下文变了(账户就绪 / 余额与持仓变动、顶档移动、标的精度到了):派生的金额 / 滑杆 / 预估合计按 lastEdited 重算。
-  // 这些值本面板本来就订阅着,不多订阅盘口深度;reducer 无变化时返回同一引用,不引起多余渲染。
-  // 市价单只在顶档变化时重新走档(深度变化不触发);确认框另按打开时的盘口重算,不会因此下错单
+  // 上下文变了,派生的金额 / 数量 / 滑杆 / 预估合计按 lastEdited 重算(syncDraft:会变才派发)。两个来源:
+  //   1. 本面板渲染过(账户就绪 / 余额与持仓变动、标的精度到了、草稿刚被某个动作改过):提交之后对一遍 —— 动作用的是事件那一刻的盘口,
+  //      若它与这次提交之间顶档又动过(非用户事件的派发不是同步提交),这里补上;
+  //   2. 盘口顶档移动:store.subscribe 的回调(不是渲染期的订阅),bookTopWatcher 只在最优买 / 卖价变了时放行 ——
+  //      市价单只在顶档变化时重新走档(深度变化不触发);确认框另按打开时的盘口重算,不会因此下错单。
   useEffect(() => {
-    send({ kind: "refresh" });
-  }, [send, cash, held, top.bestBid, top.bestAsk, info]);
+    syncDraft();
+  }, [syncDraft, draft, cash, held, info]);
+  useEffect(() => {
+    const moved = bookTopWatcher(useMarketStore.getState().books[symbol]);
+    return useMarketStore.subscribe((state) => {
+      if (moved(state.books[symbol])) syncDraft();
+    });
+  }, [symbol, syncDraft]);
 
   const handleSide = (side: Side) => send({ kind: "setSide", side });
   const handleType = (orderType: OrderType) => send({ kind: "setType", orderType });
@@ -366,7 +391,9 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
     }
   };
 
-  const error = attempted ? draftError(draft, { instrument: info, avail: { cashCents: cash, qty: held }, bookTop: top }) : null;
+  // 校验要用顶档(市价单:对手盘空了 → noLiquidity,现金买不起卖一 → insufficientCash):selector 只返回校验结果,
+  // 顶档怎么动,结果(一个字符串或 null)不变就不重渲染;还没点过「核对订单」时恒为 null(errorSelector,order-draft.test.ts 直接测)
+  const error = useMarketStore(errorSelector(draft, info, { cashCents: cash, qty: held }, symbol, attempted));
   const errorField = error ? ERROR_FIELD[error] : null;
   const errorId = `${ids}-error`;
   const isBuy = draft.side === "BUY";
@@ -378,6 +405,12 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
 
   return (
     <>
+      {/*
+        表单的高度与 src/app/terminal.css 里的一个常数绑在一起:手机断点(width < 48rem)的
+        `[data-area="order"][data-keep-height] { min-height: 42.625rem }` = 这张表单在 ≤ 30rem 宽时的面板高度(682 px)。
+        在这里增减一行(输入框、说明、按钮)或改行高 / 间距之后,必须重新量面板高度并改那个常数,
+        否则未登录的 `?side=` 深链在手机上会按差值出现布局偏移(量法见 docs/perf-report.md「Phase 2 · P2-08」§2)。
+      */}
       <form onSubmit={handleReview} noValidate className="flex flex-col gap-panel">
         <div role="group" aria-label={t.tabs.colSide} className="grid grid-cols-2 gap-1 rounded-control bg-(--terminal-panel-2) p-1">
           {SIDES.map((side) => (

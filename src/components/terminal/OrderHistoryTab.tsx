@@ -8,6 +8,7 @@ import { api } from "@/lib/http/client";
 import { useAccountStore } from "@/lib/market/account-store";
 import { onOpenOrdersClosed, onSignOut, useRefreshOnAccountChange } from "@/lib/market/account-refresh";
 import { createUserQueryCache, usePagedSnapshot, type Page } from "@/lib/market/paged-query";
+import { ExportCsvBar, HISTORY_CSV_HREF } from "./ExportCsvLink";
 import { CELL_END, CELL_START, fmtQuantity, fmtRowPrice, fmtTs, numberLocale, ROW_CLASS, sideTone, statusTone, TabTable, usePricePrecisions, type Columns } from "./TabTable";
 
 export const HISTORY_PAGE_LIMIT = 50;
@@ -26,6 +27,9 @@ export function historyPageUrl(cursor: string | null): string {
   if (cursor) params.set("cursor", cursor);
   return `/api/account/orders?${params.toString()}`;
 }
+
+/** CSV 导出(计划 §6.2.2 C5):与本页签同一组筛选(status=history),不带 limit / cursor;定义在 ExportCsvLink(BottomTabs 也要用) */
+export { HISTORY_CSV_HREF };
 
 async function fetchHistoryPage(cursor: string | null): Promise<Page<Order>> {
   const data = await api<AccountOrdersResponse>(historyPageUrl(cursor));
@@ -116,39 +120,42 @@ export function OrderHistoryTab() {
   useRefreshOnAccountChange(query ? query.refresh : null);
 
   return (
-    <TabTable<Order>
-      columns={COLUMNS}
-      headers={[
-        { label: t.tabs.colTime },
-        { label: t.tabs.colSymbol },
-        { label: t.tabs.colSide },
-        { label: t.tabs.colType },
-        { label: t.tabs.colPrice, align: "end" },
-        { label: t.tabs.colQty, align: "end" },
-        { label: t.tabs.colFilled, align: "end" },
-        { label: t.tabs.colAvg, align: "end" },
-        { label: t.tabs.colStatus },
-      ]}
-      items={snapshot.items}
-      getKey={(o) => o.id}
-      label={t.a11y.ordersRegion}
-      empty={<EmptyState title={t.tabs.emptyHistory} />}
-      pager={query ? { status: snapshot.status, onLoadMore: query.loadMore } : undefined}
-      renderRow={(o) => (
-        <HistoryRow
-          createdAt={o.createdAt}
-          symbol={o.symbol}
-          side={o.side}
-          type={o.type}
-          price={o.price}
-          quantity={o.quantity}
-          filledQuantity={o.filledQuantity}
-          avgFillPrice={o.avgFillPrice}
-          status={o.status}
-          cancelReason={o.cancelReason}
-          precision={precisions[o.symbol] ?? 2}
-        />
-      )}
-    />
+    <>
+      <ExportCsvBar href={HISTORY_CSV_HREF} />
+      <TabTable<Order>
+        columns={COLUMNS}
+        headers={[
+          { label: t.tabs.colTime },
+          { label: t.tabs.colSymbol },
+          { label: t.tabs.colSide },
+          { label: t.tabs.colType },
+          { label: t.tabs.colPrice, align: "end" },
+          { label: t.tabs.colQty, align: "end" },
+          { label: t.tabs.colFilled, align: "end" },
+          { label: t.tabs.colAvg, align: "end" },
+          { label: t.tabs.colStatus },
+        ]}
+        items={snapshot.items}
+        getKey={(o) => o.id}
+        label={t.a11y.ordersRegion}
+        empty={<EmptyState title={t.tabs.emptyHistory} />}
+        pager={query ? { status: snapshot.status, onLoadMore: query.loadMore } : undefined}
+        renderRow={(o) => (
+          <HistoryRow
+            createdAt={o.createdAt}
+            symbol={o.symbol}
+            side={o.side}
+            type={o.type}
+            price={o.price}
+            quantity={o.quantity}
+            filledQuantity={o.filledQuantity}
+            avgFillPrice={o.avgFillPrice}
+            status={o.status}
+            cancelReason={o.cancelReason}
+            precision={precisions[o.symbol] ?? 2}
+          />
+        )}
+      />
+    </>
   );
 }

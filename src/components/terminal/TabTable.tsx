@@ -15,6 +15,8 @@ import { useMarketStore } from "@/lib/market/store";
 // 底部四个 Tab(P1-21)共用的表格骨架与格式化:
 //   - 表头与行共用同一个 grid-template-columns(行在 VirtualList 里绝对定位,不能用 <table>);
 //   - 窄视口整张表横向滚动(外层 overflow-x-auto + 内层 minWidth),表头与行一起滚,VirtualList 只管纵向;
+//     pinEdges(持仓页签,P2-12)换一种滚法:横向也交给 VirtualList 的滚动容器,表头在它里面贴顶 —— 行里标了 PIN_START / PIN_END 的格子
+//     (首列、操作列)用 position: sticky 贴住左右两边(sticky 只认最近的滚动容器,外层滚、VirtualList 里的格子贴不住);
 //   - 分页表在末尾挂一个哨兵行:虚拟列表只挂载视口 + overscan 附近的行,哨兵一挂上就说明滚到了底,自动拉下一页。
 // 「账户变了 → 重读第一页」的信号不在这里,在 src/lib/market/account-refresh.ts。
 // 只用 token(tokens-only.test.ts),数字列 tabular-nums + .tnum。
@@ -26,7 +28,8 @@ export type Columns = {
   minWidth: string;
 };
 
-export type HeaderCell = { label: string; align?: "start" | "end"; title?: string };
+/** className:只给这一列的表头格追加的 token 类(例如与前一列拉开的起始内边距);不传时表头标记与原来逐字节相同 */
+export type HeaderCell = { label: string; align?: "start" | "end"; title?: string; className?: string };
 
 /** 标的代码 → 价格精度(纯函数;tabs.ssr.test.ts 用它从测试标的造 props) */
 export function pricePrecisionsOf(instruments: Readonly<Record<string, Instrument>>): Record<string, number> {
@@ -64,8 +67,18 @@ export const fmtRowPrice = (cents: number | null | undefined, precision: number,
 /** 金额(整数分)→ 两位小数的元,带千分位;null → 「—」 */
 export const fmtCents = (cents: number | null | undefined, locale: string): string => (cents == null ? "—" : formatPrice(cents, 2, locale));
 
-/** 带正负号的金额(盈亏、账本变动);0 不带号 */
+/** 带正负号的金额(盈亏、现金账户的账本变动);0 不带号 */
 export const fmtSignedCents = (cents: number, locale: string): string => `${cents > 0 ? "+" : ""}${formatPrice(cents, 2, locale)}`;
+
+/** 是不是现金账户(CASH / CASH_LOCKED,变动是整数分);其余是持仓账户(HOLDING / HOLDING_LOCKED,变动是整数数量) */
+export const isCashAccount = (account: string): boolean => account === "CASH" || account === "CASH_LOCKED";
+
+/**
+ * 带正负号的账本变动 —— 流水页签与成交详情的账本行共用这一个:现金账户按金额(分 → 两位小数),持仓账户按整数数量;0 不带号。
+ * account 收字符串:成交详情接口给的是账本里的原始代码(LedgerLineView.account)。
+ */
+export const fmtLedgerDelta = (account: string, delta: number, locale: string): string =>
+  isCashAccount(account) ? fmtSignedCents(delta, locale) : `${delta > 0 ? "+" : ""}${formatQty(delta, 1, locale)}`;
 
 /** 数量(整数吨,Phase 1 qtyStep = 1) */
 export const fmtQuantity = (qty: number | null | undefined, locale: string): string => (qty == null ? "—" : formatQty(qty, 1, locale));
@@ -91,10 +104,27 @@ export const statusTone = (status: OrderStatus): string =>
 /** 盈亏着色;0 与空值 muted */
 export const pnlTone = (value: number | null | undefined): string => (value == null || value === 0 ? "text-muted" : value > 0 ? "text-(--terminal-up)" : "text-(--terminal-down)");
 
+/**
+ * 账本变动着色:中性前景色,0 为 muted。账本变动是账户的增减,不是价格方向 —— 不用涨跌色(红涨模式下涨跌色对调,
+ * 「现金增加」会跟着变色、含义反转);增减靠正负号加一个读屏词(terminal.ledger.increase / decrease)表示。
+ */
+export const ledgerTone = (delta: number): string => (delta === 0 ? "text-muted" : "text-foreground");
+
 /** 行的公共样式(固定 h-row,与 VirtualList 行高一致) */
 export const ROW_CLASS = "grid h-row items-center gap-gap px-gap text-t-sm whitespace-nowrap";
 export const CELL_END = "tnum truncate text-end";
 export const CELL_START = "truncate";
+
+/**
+ * pinEdges 表的贴边格(terminal.css 的 .t-pin):横向滚动时首列贴左、操作列贴右,底色不透明(面板色,盖住滚到下面的格子);
+ * 只在 ≥ 48rem 贴边 —— 手机的滚动区太窄,两头一贴中间几列读不全,手机上整张表一起横向滚;
+ * 贴边格撑满整行高、内容竖直居中(表头操作列那格没有文字,不撑满就是 0 高、什么也盖不住);
+ * 行加 PIN_ROW,悬停时贴边格叠同一层悬停色;分组标题这类整行的文字包一层 PIN_START + PIN_ALT(二级面板色)贴左。
+ */
+export const PIN_START = "t-pin t-pin-start";
+export const PIN_END = "t-pin t-pin-end";
+export const PIN_ALT = "t-pin-alt";
+export const PIN_ROW = "t-pin-row";
 
 /** 列表末尾的哨兵:不是数据行,只用来触发「滚到底加载下一页」 */
 const MORE = Symbol("more");
@@ -114,6 +144,11 @@ export type TabTableProps<T> = {
   pager?: { status: PagedSnapshot<T>["status"]; onLoadMore: () => void };
   /** 表下一行可见的说明(有数据时才显示),例如成交表的 terminal.tape.auditNote —— 触屏 / 不悬停的用户看不到 title */
   footnote?: ReactNode;
+  /**
+   * 横向滚动时首列与操作列贴边(持仓页签):表头进 VirtualList 的滚动容器贴顶,横向滚动也由它来做;
+   * 行与表头里要贴边的格子自己带 PIN_START / PIN_END(表头经 HeaderCell.className)。不传 = 原来的滚法,其它页签不变。
+   */
+  pinEdges?: boolean;
 };
 
 /**
@@ -121,7 +156,7 @@ export type TabTableProps<T> = {
  * 分页状态:第一页未到 → Skeleton;第一页失败 → ErrorState(重试);翻页中 → 末行 Skeleton;翻页失败 → 表下 ErrorState(重试),
  * 失败后不自动重试(哨兵只在 idle 时触发),避免对着一个坏端点连发。
  */
-export function TabTable<T>({ columns, headers, items, getKey, renderRow, label, empty, pager, footnote }: TabTableProps<T>) {
+export function TabTable<T>({ columns, headers, items, getKey, renderRow, label, empty, pager, footnote, pinEdges = false }: TabTableProps<T>) {
   const t = useT("terminal");
   const ui = useT("ui");
   const hintId = useId();
@@ -134,32 +169,46 @@ export function TabTable<T>({ columns, headers, items, getKey, renderRow, label,
   if (items.length === 0 && (status === "idle" || status === "loading")) return <Skeleton rows={5} />;
   if (items.length === 0 && status === "error") return <ErrorState message={ui.error} onRetry={pager?.onLoadMore} />;
 
+  // pinEdges 的表头在滚动容器里贴顶,rows 从它下面滚过去:要不透明
+  const header = (
+    <div className={`${ROW_CLASS} shrink-0 border-b border-(--terminal-border) text-t-xs text-muted${pinEdges ? " bg-(--terminal-panel)" : ""}`} style={{ gridTemplateColumns: columns.template }}>
+      {headers.map((h, i) => (
+        <span key={i} title={h.title} className={`${h.align === "end" ? "truncate text-end" : "truncate"}${h.className ? ` ${h.className}` : ""}`}>
+          {h.label}
+        </span>
+      ))}
+    </div>
+  );
+  const list = (
+    <VirtualList<ListItem<T>>
+      items={rows}
+      label={label}
+      className="min-h-0 flex-1"
+      empty={empty}
+      getKey={(item) => (item === MORE ? "__more__" : getKey(item))}
+      renderRow={(item, index) => (item === MORE ? <PagerRow status={status ?? "idle"} onLoadMore={pager?.onLoadMore} /> : renderRow(item, index))}
+      header={pinEdges ? header : undefined}
+      minWidth={pinEdges ? columns.minWidth : undefined}
+    />
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <span id={hintId} className="sr-only">
         {t.a11y.scrollHint}
       </span>
-      <div ref={describeRegion} className="flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
-        <div className="flex min-h-0 flex-1 flex-col" style={{ minWidth: columns.minWidth }}>
-          <div className={`${ROW_CLASS} shrink-0 border-b border-(--terminal-border) text-t-xs text-muted`} style={{ gridTemplateColumns: columns.template }}>
-            {headers.map((h, i) => (
-              <span key={i} title={h.title} className={h.align === "end" ? "truncate text-end" : "truncate"}>
-                {h.label}
-              </span>
-            ))}
-          </div>
-          <VirtualList<ListItem<T>>
-            items={rows}
-            label={label}
-            className="min-h-0 flex-1"
-            empty={empty}
-            getKey={(item) => (item === MORE ? "__more__" : getKey(item))}
-            renderRow={(item, index) =>
-              item === MORE ? <PagerRow status={status ?? "idle"} onLoadMore={pager?.onLoadMore} /> : renderRow(item, index)
-            }
-          />
+      {pinEdges ? (
+        <div ref={describeRegion} className="flex min-h-0 flex-1 flex-col">
+          {list}
         </div>
-      </div>
+      ) : (
+        <div ref={describeRegion} className="flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
+          <div className="flex min-h-0 flex-1 flex-col" style={{ minWidth: columns.minWidth }}>
+            {header}
+            {list}
+          </div>
+        </div>
+      )}
       {footnote && items.length > 0 ? <p className="shrink-0 px-gap text-t-2xs text-muted">{footnote}</p> : null}
       {status === "error" ? <ErrorState message={ui.error} onRetry={pager?.onLoadMore} /> : null}
     </div>

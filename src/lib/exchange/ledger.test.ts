@@ -20,12 +20,14 @@ type DbModule = typeof import("../server/db");
 type MatchingModule = typeof import("./matching");
 type OtcModule = typeof import("./otc");
 type LedgerModule = typeof import("./ledger");
+type RetirementModule = typeof import("./retirement");
 type MappersModule = typeof import("../server/account-mappers");
 
 let prisma: DbModule["prisma"];
 let matching: MatchingModule;
 let otc: OtcModule;
 let ledgerLib: LedgerModule;
+let retirement: RetirementModule;
 let mappers: MappersModule;
 
 let buyer: { id: string };
@@ -35,6 +37,9 @@ let assetId: string;
 let stpBidId: string;
 let stpAskId: string;
 let userCancelledBuyId: string;
+/** buyer 的那次注销(15 吨)与它经 writeLedger 写入时的参数 */
+let retirementId: string;
+let retirementLedgerCalls: Parameters<LedgerModule["writeLedger"]>[1][];
 
 const GRANT_CENTS = 10_000_000; // $100,000 赠金(整数分)
 
@@ -54,6 +59,7 @@ beforeAll(async () => {
   matching = await import("./matching");
   otc = await import("./otc");
   ledgerLib = await import("./ledger");
+  retirement = await import("./retirement");
   mappers = await import("../server/account-mappers");
   ({ prisma } = await import("../server/db"));
 
@@ -63,7 +69,7 @@ beforeAll(async () => {
     throw new Error(`测试连到了意外的数据库: ${rows[0]?.file}`);
   }
 
-  // ---- 场景: 赠金 → 限价卖挂单 → 限价买(部分成交,含价格改善) → 撤单 → OTC 挂牌 → 购买 → 撤牌 → 自成交防护撤单 ----
+  // ---- 场景: 赠金 → 限价卖挂单 → 限价买(部分成交,含价格改善) → 撤单 → OTC 挂牌 → 购买 → 撤牌 → 自成交防护撤单 → 注销 ----
   const asset = await prisma.asset.create({
     data: {
       symbol: "VCS-LEDGER-2021",
@@ -110,6 +116,23 @@ beforeAll(async () => {
   await matching.cancelOrder(seller.id, ask.order.id);
   stpBidId = bid.order.id;
   stpAskId = ask.order.id;
+  // 注销(计划 §6.2.2 C3): buyer 持有 50(成交)+ 40(OTC)= 90 吨, 注销 15 吨 → Holding.quantity 75, 账本 HOLDING −15。
+  // 账本行经 writeLedger 写入(与其它写入同一个入口): 记下这次调用的参数, 下面断言
+  const writes = vi.spyOn(ledgerLib, "writeLedger");
+  const retired = await retirement.retireCredits(buyer.id, {
+    assetId,
+    quantity: 15,
+    reason: "Ledger test",
+    beneficiary: "Example org",
+    purpose: "Test",
+    publicMessage: "",
+    acknowledged: true,
+    idempotencyKey: "ledger-retire-0001",
+  });
+  retirementLedgerCalls = writes.mock.calls.map(([, lines]) => lines);
+  writes.mockRestore();
+  if (retired.replayed) throw new Error("注销场景不该是重放");
+  retirementId = retired.retirement.id;
 }, 120_000);
 
 afterAll(async () => {
@@ -172,6 +195,7 @@ describe("审计流水 — 对账不变量", () => {
       "OTC_SETTLE",
       "OTC_UNLOCK",
       "SELF_TRADE_UNLOCK",
+      "SIMULATED_RETIREMENT",
     ]) {
       expect(byReason.get(expected) ?? 0, `缺少流水种类: ${expected}`).toBeGreaterThan(0);
     }
@@ -183,6 +207,33 @@ describe("审计流水 — 对账不变量", () => {
       [seller.id, "CASH", 90_000, "ORDER", stpBidId],
       [seller.id, "CASH_LOCKED", -90_000, "ORDER", stpBidId],
     ]);
+  });
+
+  it("注销: 账本行经 writeLedger 写入(HOLDING 负行, refType RETIREMENT), 持仓列值与 Σdelta 同步减少, 现金不动", async () => {
+    expect(retirementLedgerCalls).toEqual([
+      [{ userId: buyer.id, account: "HOLDING", assetId, delta: -15, reason: "SIMULATED_RETIREMENT", refType: "RETIREMENT", refId: retirementId }],
+    ]);
+    const lines = await prisma.ledgerEntry.findMany({ where: { reason: "SIMULATED_RETIREMENT" } });
+    expect(lines.map((l) => [l.userId, l.account, l.assetId, Number(l.delta), l.refType, l.refId])).toEqual([
+      [buyer.id, "HOLDING", assetId, -15, "RETIREMENT", retirementId],
+    ]);
+    const holding = await prisma.holding.findUniqueOrThrow({ where: { userId_assetId: { userId: buyer.id, assetId } } });
+    expect(holding).toMatchObject({ quantity: 75, locked: 0 });
+    await expect(ledgerSum(buyer.id, "HOLDING", assetId)).resolves.toBe(75);
+    await expect(ledgerSum(buyer.id, "HOLDING_LOCKED", assetId)).resolves.toBe(0);
+    // 重放同一请求不再写账本
+    const replay = await retirement.retireCredits(buyer.id, {
+      assetId,
+      quantity: 15,
+      reason: "Ledger test",
+      beneficiary: "Example org",
+      purpose: "Test",
+      publicMessage: "",
+      acknowledged: true,
+      idempotencyKey: "ledger-retire-0001",
+    });
+    expect(replay.replayed).toBe(true);
+    await expect(prisma.ledgerEntry.count({ where: { reason: "SIMULATED_RETIREMENT" } })).resolves.toBe(1);
   });
 
   it("撤单原因由流水派生: 自成交防护撤掉的单 → SELF_TRADE, 用户自己撤的 → USER(订单表没有原因列)", async () => {

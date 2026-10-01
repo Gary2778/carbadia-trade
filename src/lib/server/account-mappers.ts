@@ -1,5 +1,6 @@
 // Prisma 行 → 共享类型(计划 §3.5 Order / Fill / Position / LedgerLineView)。REST 与发布器共用同一份映射,时间转 unix ms,不外露 userId。
-// P1-07 提供 toOrder / toFill / ledgerIdsByTrade;P1-09 补 toPosition / toLedgerLineView / avgFillPricesByOrder;P1-22d 补 selfTradeCancelledIds。
+// P1-07 提供 toOrder / toFill / ledgerIdsByTrade;P1-09 补 toPosition / toLedgerLineView / avgFillPricesByOrder;P1-22d 补 selfTradeCancelledIds;
+// P2-03 给 toPosition 加 lockedBy(持仓的查询在 positions.ts)。
 import type { Holding, LedgerEntry, Prisma } from "@/generated/prisma";
 import type { OrderRow, TradeRow } from "../exchange/matching";
 import { reconstructPositionBasis, type CostBasisLedgerLine } from "../exchange/portfolio-analysis";
@@ -119,21 +120,24 @@ export async function ledgerIdsByTrade(
   return byTrade;
 }
 
-/** 持仓行 + 标的的最小字段:/api/account/positions 按 include: { asset: { select: { symbol, lastPrice, isScenario } } } 查出 */
+/** 持仓行 + 标的的最小字段:positions.ts 按 include: { asset: { select: { symbol, lastPrice, isScenario } } } 查出 */
 export type HoldingRow = Pick<Holding, "assetId" | "quantity" | "locked"> & { asset: { symbol: string; lastPrice: number | null; isScenario: boolean } };
 
 /**
- * 持仓三态(计划 §3.5 Position):available = quantity − locked(可交易),retired = Retirement 按 assetId 汇总(调用方查),
+ * 持仓三态(计划 §3.5 Position、§6.2.2 C1):available = quantity − locked(可交易),retired = Retirement 按 assetId 汇总,
+ * lockedBy = locked 的来源拆分(未完结 SELL 挂单的剩余量 / ACTIVE 场外挂牌),两者都由调用方查(src/lib/server/positions.ts,唯一的调用方);
+ * lockedBy 与 locked 对不上时这里不改任何一个数:locked 与 available 以 Holding 行为准,lockedBy 照实给出。
  * 成本用 reconstructPositionBasis 从本人账本重建——costBasisStatus 非 complete 时 averagePurchasePrice / unrealisedPnl 为 null,
  * 永不把缺失的成本当零。marketValue = (lastPrice ?? 0) × quantity(分 × 吨 → 分,与 /api/portfolio 一致)。纯映射,不查库。
  */
-export function toPosition(holding: HoldingRow, retiredQty: number, ledgerRows: readonly CostBasisLedgerLine[]): Position {
+export function toPosition(holding: HoldingRow, retiredQty: number, ledgerRows: readonly CostBasisLedgerLine[], lockedBy: Position["lockedBy"]): Position {
   const basis = reconstructPositionBasis(holding.assetId, holding.quantity, holding.asset.lastPrice, ledgerRows);
   return {
     assetId: holding.assetId,
     symbol: holding.asset.symbol,
     quantity: holding.quantity,
     locked: holding.locked,
+    lockedBy: { orders: lockedBy.orders, otc: lockedBy.otc },
     available: Math.max(0, holding.quantity - holding.locked),
     retired: retiredQty,
     lastPrice: holding.asset.lastPrice,
@@ -151,10 +155,19 @@ export function toLedgerLineView(row: Pick<LedgerEntry, "id" | "account" | "delt
 }
 
 /**
+ * avgFillPricesByOrder 每次查询带的订单 id 数(P2-13):查询是 buyOrderId IN (…) OR sellOrderId IN (…),两个列表各带这么多个参数。
+ * 列表超过 Prisma 在 SQLite 上的绑定参数上限(999)时,Prisma 会把 IN 自动拆批,而这个 OR 形状拆批之后同一笔成交会被返回不止一次
+ *(实测:1,000 张订单取回 1,511 行、2,000 张取回 3,967 行,应为约 1,000 / 2,000),均价因此对不上、变成 null。
+ * 订单 CSV 一页 2,000 张(csv-export.ts 的 CSV_ORDER_PAGE_ROWS),所以在这里自己分批、按成交 id 去重。
+ */
+const AVG_FILL_CHUNK = 400;
+
+/**
  * 按实际成交重算一批订单的均价(与 GET /api/orders 的 withExecutionPrices 同一规则):
  * 挂单方成交时 matching.ts 不更新其 avgFillPrice(行上是 null 或 taker 时的旧值),所以历史 Tab 不能直接信行;
  * 成交量与 filledQuantity 对得上才给均价,旧成交被清理或金额溢出 → null(未知,不伪造)。
- * 只查 filledQuantity > 0 的订单,一批一次查询;没有则不查库。返回 Map<orderId, avg | null>,未成交的订单不在 Map 里。
+ * 只查 filledQuantity > 0 的订单,每 AVG_FILL_CHUNK 张一次查询(通常一批就一次);没有则不查库。
+ * 返回 Map<orderId, avg | null>,未成交的订单不在 Map 里。
  */
 export async function avgFillPricesByOrder(
   db: Pick<Prisma.TransactionClient, "trade">,
@@ -163,12 +176,20 @@ export async function avgFillPricesByOrder(
   const result = new Map<string, number | null>();
   const ids = orders.filter((order) => order.filledQuantity > 0).map((order) => order.id);
   if (ids.length === 0) return result;
-  const executions = await db.trade.findMany({
-    where: { OR: [{ buyOrderId: { in: ids } }, { sellOrderId: { in: ids } }] },
-    select: { buyOrderId: true, sellOrderId: true, quantity: true, price: true },
-  });
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += AVG_FILL_CHUNK) chunks.push(ids.slice(i, i + AVG_FILL_CHUNK));
+  const found = await Promise.all(
+    chunks.map((chunk) =>
+      db.trade.findMany({
+        where: { OR: [{ buyOrderId: { in: chunk } }, { sellOrderId: { in: chunk } }] },
+        select: { id: true, buyOrderId: true, sellOrderId: true, quantity: true, price: true },
+      }),
+    ),
+  );
+  // 同一笔成交的买卖两张单可能落在不同的批里(两批都会取到它):按成交 id 去重,每笔只算一次
+  const executions = new Map(found.flat().map((execution) => [execution.id, execution]));
   const totals = new Map<string, { quantity: number; cost: number }>();
-  for (const execution of executions) {
+  for (const execution of executions.values()) {
     for (const id of [execution.buyOrderId, execution.sellOrderId]) {
       const total = totals.get(id) ?? { quantity: 0, cost: 0 };
       total.quantity += execution.quantity;

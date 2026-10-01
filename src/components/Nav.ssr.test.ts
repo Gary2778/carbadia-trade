@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import en from "@/i18n/messages/en";
 import { createInitialAccountState, useAccountStore } from "@/lib/market/account-store";
-import { Nav } from "./Nav";
+import { isActive, Nav } from "./Nav";
 import { DemoBadge } from "./terminal/DemoBadge";
 
 // §9.1 第 7 条:不引 jsdom,只做 renderToStaticMarkup 的服务端标记测试;没有 LangProvider 时 useT 落到默认英文。
@@ -26,12 +26,12 @@ beforeEach(() => {
 });
 
 describe("DemoBadge", () => {
-  it("renders nav.demoBadge with the terminal.demo tooltip, in compact and regular variants", () => {
+  it("renders nav.demoBadge with the nav.demoTooltip tooltip, in compact and regular variants", () => {
     const compact = renderToStaticMarkup(createElement(DemoBadge, { compact: true }));
     const regular = renderToStaticMarkup(createElement(DemoBadge));
     for (const html of [compact, regular]) {
       expect(html).toContain(`>${en.nav.demoBadge}<`);
-      expect(html).toContain(`title="${en.terminal.demo.tooltip}"`);
+      expect(html).toContain(`title="${en.nav.demoTooltip}"`);
       expect(html).toContain("text-warning");
       expect(html).toContain("rounded-pill");
     }
@@ -61,6 +61,22 @@ describe("Nav", () => {
     // 当前路径 /otc:OTC 高亮,/trade 不高亮
     expect(html).toMatch(/aria-current="page"[^>]*href="\/otc"/);
     expect(html).not.toMatch(/aria-current="page"[^>]*href="\/trade"/);
+    // 「持仓」指向资产页 /trade/account(P2-10),旧 /portfolio 不再出现
+    expect(html).toContain(`href="/trade/account"`);
+    expect(html).not.toContain('href="/portfolio"');
+  });
+
+  // P2-10(计划 §6.2.2 C8):/trade/account 亮「持仓」,其余 /trade* 亮「Terminal」;/orders、/retirement、/transactions、/account 仍亮「持仓」
+  it("highlights Portfolio on /trade/account and the old account pages, and Terminal on every other /trade path", () => {
+    const active = (pathname: string) => ["/", "/trade", "/otc", "/trade/account"].filter((href) => isActive(href, pathname));
+    expect(active("/trade/account")).toEqual(["/trade/account"]);
+    expect(active("/trade/account/")).toEqual(["/trade/account"]);
+    for (const pathname of ["/trade", "/trade/VCS-FOR-2021", "/trade/CEA-SCEN-2026"]) expect(active(pathname), pathname).toEqual(["/trade"]);
+    // 形如 /trade/accountX 的不是资产页
+    expect(active("/trade/accounts")).toEqual(["/trade"]);
+    for (const pathname of ["/orders", "/retirement", "/transactions", "/account"]) expect(active(pathname), pathname).toEqual(["/trade/account"]);
+    for (const pathname of ["/", "/market/VCS-FOR-2021", "/projects", "/watchlist"]) expect(active(pathname), pathname).toEqual(["/"]);
+    expect(active("/otc")).toEqual(["/otc"]);
   });
 
   it("keeps the brand on one line at phone width: leaf alone below 23rem, short wordmark up to sm, full name from sm; badge never hidden or shrunk, token gaps", () => {
@@ -134,7 +150,7 @@ describe("Nav", () => {
   // 登录态只有一个来源:旧页面不再各拉一份 /api/auth/me,改读共享的账户 store(useMe / useAccountStatus;SSR 与水合首帧是 idle,
   // 与这些页面原来「未知 → 加载中」的首帧一致);改了余额的写操作成功后调 accountActions.refresh(),Nav 不等下一次导航就更新
   it("otc, account and market pages read login state from the shared account store instead of fetching /api/auth/me themselves", () => {
-    for (const file of ["../app/otc/page.tsx", "../app/account/page.tsx", "../app/market/[symbol]/page.tsx"]) {
+    for (const file of ["../app/otc/page.tsx", "../app/account/page.tsx", "../app/market/[symbol]/MarketContent.tsx"]) {
       const code = source(file).replace(/\/\/.*$/gm, "");
       expect(code, file).not.toMatch(/\/api\/auth\/me/);
       expect(code, file).toMatch(/from "@\/lib\/market\/account-store"/);
@@ -144,11 +160,13 @@ describe("Nav", () => {
     expect(source("../app/account/page.tsx")).toMatch(/await accountActions\.logout\(\);/);
   });
 
-  it("legacy mutations that move cash refresh the shared store right away (OTC buy, simple trade, portfolio cancel); a 401 there re-checks the login", () => {
+  it("legacy mutations that move cash refresh the shared store right away (OTC buy, simple trade); a 401 on the portfolio page re-checks the login", () => {
     const code = (file: string) => source(file).replace(/\/\/.*$/gm, "");
     expect(code("../app/otc/page.tsx")).toMatch(/api\(`\/api\/otc\/\$\{listing\.id\}\/buy`[\s\S]*?accountActions\.refresh\(\)/);
     expect(code("./exchange/SimpleTrade.tsx")).toMatch(/setReceipt\([\s\S]*?accountActions\.refresh\(\)/);
-    expect(code("./exchange/PortfolioViews.tsx")).toMatch(/await api\(url, \{ method: "DELETE" \}\);[\s\S]*?accountActions\.refresh\(\)/);
-    expect(code("./exchange/AccountData.tsx")).toMatch(/status === 401\)[\s\S]*?accountActions\.refresh\(\)/);
+    // 资产页 /trade/account(P2-10)取代了旧 /portfolio:它挂着 AccountFeed,余额由账户推送 / 轮询维护,撤牌后不必手动刷新余额;
+    // 会话在它上面失效(总览或撤牌回 401)时同样让共享 store 重新确认身份,Nav 同一拍变成未登录
+    expect(code("./account/useAccountOverview.ts")).toMatch(/status === 401\)[\s\S]*?accountActions\.refresh\(\)/);
+    expect(code("./account/OtcListings.tsx")).toMatch(/method: "DELETE"[\s\S]*?status === 401\)[\s\S]*?accountActions\.refresh\(\)/);
   });
 });

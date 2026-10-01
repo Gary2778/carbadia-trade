@@ -9,6 +9,7 @@ import { tName } from "@/i18n/data";
 import { api, ApiError } from "@/lib/http/client";
 import { fmtQty } from "@/lib/format";
 import { retirementOutcomeUncertain } from "@/lib/exchange/retirement-outcome";
+import { RETIREMENT_REASONS } from "@/lib/exchange/retirement-form";
 import { usePolling } from "@/hooks/usePolling";
 import { useToast } from "@/components/anim/Toast";
 import type {
@@ -17,15 +18,6 @@ import type {
   RetirementPosition,
   RetirementRecord,
 } from "@/lib/exchange/retirement";
-
-const RETIREMENT_REASONS = [
-  { value: "Personal Carbon Offset", zh: "个人碳抵销" },
-  { value: "Corporate Emissions Offset", zh: "企业排放抵销" },
-  { value: "Event Offset", zh: "活动碳抵销" },
-  { value: "Product Carbon Neutrality", zh: "产品碳中和" },
-  { value: "ESG Commitment", zh: "ESG 承诺" },
-  { value: "Other", zh: "其他" },
-];
 
 const copy = {
   en: {
@@ -126,7 +118,7 @@ const copy = {
     certificate: "模拟凭证",
     choose: "选择碳信用",
     chooseHelp:
-      "仅能注销可用的项目碳信用。情景指数，以及卖单或场插件牌已锁定的数量不包含在内。",
+      "仅能注销可用的项目碳信用。情景指数，以及卖单或场外挂牌已锁定的数量不包含在内。",
     credit: "持有的碳信用",
     select: "从持仓选择碳信用",
     available: "可用数量",
@@ -176,7 +168,7 @@ const copy = {
       "选择可用数量、核对数据，再保留模拟凭证。此操作不影响您的现金余额。",
     noHoldings: "没有可注销的碳信用",
     noHoldingsHelp:
-      "您可在市场取得示范碳信用，或取消未成交卖单及场插件牌以释放锁定持仓。",
+      "您可在市场取得示范碳信用，或取消未成交卖单及场外挂牌以释放锁定持仓。",
     market: "浏览市场",
     login: "登录以模拟注销碳信用",
     loginHelp: "您的持仓、模拟记录及受益人数据仅供本人访问。",
@@ -556,7 +548,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                       {t.another}
                     </button>
                     <Link
-                      href="/portfolio"
+                      href="/trade/account"
                       className="text-muted hover:text-foreground"
                     >
                       {t.portfolio} →
@@ -690,7 +682,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                     <Link href="/" className={primaryClass}>
                       {t.market} →
                     </Link>
-                    <Link href="/portfolio" className={secondaryClass}>
+                    <Link href="/trade/account" className={secondaryClass}>
                       {t.portfolio}
                     </Link>
                   </div>
@@ -950,7 +942,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                   {t.processBody}
                 </p>
                 <Link
-                  href="/portfolio"
+                  href="/trade/account"
                   className="mt-4 inline-block text-xs font-medium text-accent hover:underline"
                 >
                   {t.portfolio} →

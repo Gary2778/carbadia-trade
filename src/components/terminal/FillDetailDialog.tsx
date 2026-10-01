@@ -1,15 +1,14 @@
 "use client";
 
 import { useEffect, useId, useState } from "react";
-import { FILL_DISCLOSURE, type FillDetailResponse, type LedgerLineView } from "@/shared";
-import { formatPrice, formatQty } from "@/shared/precision";
+import { FILL_DISCLOSURE, type FillDetailResponse } from "@/shared";
 import { Dialog } from "@/components/ui/Dialog";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useLang, useT } from "@/i18n/LangProvider";
 import { api } from "@/lib/http/client";
 import { useMarketStore, type MarketState } from "@/lib/market/store";
-import { fmtCents, fmtQuantity, fmtRowPrice, fmtTs, numberLocale, sideTone } from "./TabTable";
+import { fmtCents, fmtLedgerDelta, fmtQuantity, fmtRowPrice, fmtTs, ledgerTone, numberLocale, sideTone } from "./TabTable";
 
 export const fillDetailUrl = (fillId: string): string => `/api/account/fills/${encodeURIComponent(fillId)}`;
 
@@ -22,18 +21,12 @@ export const fillPrecisionSelector =
   (s: MarketState): number | undefined =>
     symbol ? s.instruments[symbol]?.pricePrecision : undefined;
 
-/** 账本行的变动:现金账户(CASH / CASH_LOCKED)是整数分,持仓账户(HOLDING / HOLDING_LOCKED)是整数吨;带正负号 */
-export function fmtLedgerDelta(line: Pick<LedgerLineView, "account" | "delta">, locale: string): string {
-  const sign = line.delta > 0 ? "+" : "";
-  return line.account.startsWith("CASH") ? `${sign}${formatPrice(line.delta, 2, locale)}` : `${sign}${formatQty(line.delta, 1, locale)}`;
-}
-
 /** 账本表的单元格:单行、放不下截断 */
 const LEDGER_CELL = "truncate px-0.5 py-gap whitespace-nowrap";
 
 /**
  * 成交详情的内容(纯展示,tabs.ssr.test.ts 直接渲染):审计引用 SIM-TRD-… + auditNote、成交字段、对手方类型(只说是不是做市机器人,
- * 不带身份)、本人在这笔成交下的账本行(表头 account / delta / reason / 时间)、disclosure 对应的披露文案。
+ * 不带身份)、本人在这笔成交下的账本行(表头 account / delta / reason / 时间;变动带正负号、中性色)、disclosure 对应的披露文案。
  * 没有登记机构序列号,也不编造(计划 D5):审计链路就是这三样。
  */
 export function FillDetailView({ detail, precision }: { detail: FillDetailResponse; precision: number }) {
@@ -102,8 +95,10 @@ export function FillDetailView({ detail, precision }: { detail: FillDetailRespon
               {ledger.map((line) => (
                 <tr key={line.id} data-ledger-line="" className="border-b border-(--terminal-border)">
                   <td className={`${LEDGER_CELL} font-mono`}>{line.account}</td>
-                  <td className={`${LEDGER_CELL} tnum text-end ${line.delta > 0 ? "text-(--terminal-up)" : line.delta < 0 ? "text-(--terminal-down)" : "text-muted"}`}>
-                    {fmtLedgerDelta(line, locale)}
+                  {/* 变动与流水页签同一种呈现:正负号 + 中性色 + 读屏的增 / 减,不用涨跌色(见 TabTable 的 ledgerTone) */}
+                  <td data-direction={line.delta > 0 ? "in" : line.delta < 0 ? "out" : "none"} className={`${LEDGER_CELL} tnum text-end ${ledgerTone(line.delta)}`}>
+                    {line.delta === 0 ? null : <span className="sr-only">{`${line.delta > 0 ? t.ledger.increase : t.ledger.decrease} `}</span>}
+                    {fmtLedgerDelta(line.account, line.delta, locale)}
                   </td>
                   <td className={`${LEDGER_CELL} font-mono text-muted`}>{line.reason}</td>
                   <td className={`${LEDGER_CELL} tnum text-end text-muted`}>{fmtTs(line.createdAt, locale)}</td>

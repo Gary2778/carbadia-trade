@@ -18,17 +18,23 @@ const LINKS: { href: string; key: LinkKey }[] = [
   { href: "/", key: "markets" },
   { href: "/trade", key: "terminal" },
   { href: "/otc", key: "otc" },
-  { href: "/portfolio", key: "portfolio" },
+  { href: "/trade/account", key: "portfolio" },
 ];
+/** 资产页(计划 §6.2.2 C8,P2-10):在 /trade 之下,但属于「持仓」而不是「终端」 */
+const ACCOUNT_PAGE = "/trade/account";
+const isAccountPage = (pathname: string) => pathname === ACCOUNT_PAGE || pathname.startsWith(`${ACCOUNT_PAGE}/`);
 // 行情入口要求精确匹配,否则 / 会在所有子页常亮;
 // 但标的页、项目、关注列表、市场数据、学习语义上仍属"行情",所以 / 额外接受这些前缀;
-// 资产组合同理收下 dashboard/orders/retirement/transactions/account;/trade 前缀就是终端
-const isActive = (href: string, pathname: string) =>
+// 「持仓」指向资产页 /trade/account,并收下 orders / retirement / transactions / account(旧页面保留、从资产页进入);
+// 其余 /trade 前缀是终端 —— 资产页虽在 /trade 下,亮的是「持仓」不是「Terminal」
+export const isActive = (href: string, pathname: string) =>
   href === "/"
     ? pathname === "/" || ["market", "projects", "watchlist", "research", "learn"].some((page) => pathname.startsWith(`/${page}`))
-    : href === "/portfolio"
-      ? ["portfolio", "dashboard", "orders", "retirement", "transactions", "account"].some((page) => pathname.startsWith(`/${page}`))
-      : pathname.startsWith(href);
+    : href === ACCOUNT_PAGE
+      ? isAccountPage(pathname) || ["orders", "retirement", "transactions", "account"].some((page) => pathname.startsWith(`/${page}`))
+      : href === "/trade"
+        ? pathname.startsWith("/trade") && !isAccountPage(pathname)
+        : pathname.startsWith(href);
 
 const CARBADIA_HOME = "https://carbadia.io";
 

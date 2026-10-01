@@ -7,6 +7,7 @@ import type { CandleBar, CandleInterval, ConnectionState, Instrument, Instrument
 import { getBookView, minePricesOf, type BookView } from "./book-view";
 import { filterInstruments, type InstrumentFilters, type InstrumentListRow } from "./instrument-filter";
 import { readOpenOrders, readServerOpenOrders, subscribeOpenOrders } from "./open-orders-source";
+import { bookTopOf, type DraftBookTop } from "./order-draft";
 import { candleKey, useMarketStore, type BookState, type DraftSeed, type MarketState } from "./store";
 import type { TransportMode } from "./transport";
 
@@ -71,15 +72,15 @@ export function useDraft(): DraftSeed {
   return useMarketStore(useShallow((s) => s.draft));
 }
 
-export type BookTop = { bestBid: number | null; bestAsk: number | null };
+export type BookTop = DraftBookTop;
 
+/**
+ * 「顶档」只有一个定义:order-draft.ts 的 bookTopOf(纯函数,下单面板在事件与 store.subscribe 回调里用的也是它)。
+ * 这里只多一层「store 里还没有这个标的的盘口 → undefined」(组件据此用 props 兜底)。
+ * 引入方向是 selectors → order-draft:order-draft 对 store 只有类型引用,不会反过来把 store 带进它的调用方。
+ */
 function topOf(book: BookState | undefined): BookTop | undefined {
-  if (!book) return undefined;
-  let bestBid: number | null = null;
-  let bestAsk: number | null = null;
-  for (const price of book.bids.keys()) if (bestBid === null || price > bestBid) bestBid = price;
-  for (const price of book.asks.keys()) if (bestAsk === null || price < bestAsk) bestAsk = price;
-  return { bestBid, bestAsk };
+  return book ? bookTopOf(book) : undefined;
 }
 
 /** 原始最优买卖价(聚合前);值不变时引用不变(useShallow) */

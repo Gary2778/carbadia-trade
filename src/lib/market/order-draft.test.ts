@@ -7,13 +7,18 @@ import {
   DRAFT_ERRORS,
   PCT_MARKS,
   bookLevels,
+  bookTopOf,
+  bookTopWatcher,
+  draftCtxOf,
   draftError,
+  errorSelector,
   estimateOrderFee,
   initialDraft,
   newClientOrderId,
   parseCents,
   parseQty,
   reduceDraft,
+  refreshChanges,
   requestError,
   sellQtyForProceeds,
   shouldConsumeSeed,
@@ -374,5 +379,210 @@ describe("盘口逐档", () => {
     expect(bookLevels(book)).toEqual({ asks: [lvl(10_005, 3), lvl(10_010, 5)], bids: [lvl(9_995, 2), lvl(9_990, 1)] });
     expect(bookLevels(undefined)).toEqual({ asks: [], bids: [] });
     expect(PCT_MARKS).toEqual([0, 25, 50, 75, 100]);
+  });
+
+  it("bookTopOf:买盘最高价、卖盘最低价(不看 Map 的插入顺序);一侧没有挂单、没有盘口为 null", () => {
+    const book = { asks: new Map([[10_010, lvl(10_010, 5)], [10_005, lvl(10_005, 3)]]), bids: new Map([[9_990, lvl(9_990, 1)], [9_995, lvl(9_995, 2)]]) };
+    expect(bookTopOf(book)).toEqual({ bestBid: 9_995, bestAsk: 10_005 });
+    expect(bookTopOf({ asks: new Map(), bids: book.bids })).toEqual({ bestBid: 9_995, bestAsk: null });
+    expect(bookTopOf(undefined)).toEqual({ bestBid: null, bestAsk: null });
+  });
+
+  it("draftCtxOf:顶档与逐档取自同一份盘口", () => {
+    const book = { asks: new Map([[10_010, lvl(10_010, 5)], [10_005, lvl(10_005, 3)]]), bids: new Map([[9_995, lvl(9_995, 2)]]) };
+    const avail = { cashCents: 1_000, qty: 7 };
+    expect(draftCtxOf(instrument, avail, book)).toEqual({ instrument, avail, bookTop: { bestBid: 9_995, bestAsk: 10_005 }, asks: [lvl(10_005, 3), lvl(10_010, 5)], bids: [lvl(9_995, 2)] });
+    expect(draftCtxOf(instrument, avail, undefined)).toEqual({ instrument, avail, bookTop: { bestBid: null, bestAsk: null }, asks: [], bids: [] });
+  });
+});
+
+// 计划 §7.1「盘口更新时 OrderPanel 零提交」、§9.1 第 45 条(P2-08):下单面板不在渲染期订阅顶档。顶档变化经 store.subscribe →
+// bookTopWatcher(顶档真的变了才往下走)→ refreshChanges(派生项会变才派发 refresh)。这两道门都不放行时面板没有任何 state 更新,也就没有提交。
+describe("盘口顶档变化 → 要不要重算草稿", () => {
+  const bookOf = (askLevels: OrderBookLevel[], bidLevels: OrderBookLevel[]) => ({
+    asks: new Map(askLevels.map((l) => [l.price, l])),
+    bids: new Map(bidLevels.map((l) => [l.price, l])),
+  });
+  const avail = { cashCents: 1_000_000, qty: 500 };
+  const ctxOf = (askLevels: OrderBookLevel[], bidLevels: OrderBookLevel[]): DraftCtx => draftCtxOf(instrument, avail, bookOf(askLevels, bidLevels));
+  const movedAsks = [lvl(10_010, 50, 2)]; // 卖一 100.05 被吃掉,顶档移到 100.10
+  const movedBids = [lvl(9_990, 100, 3)];
+
+  it("bookTopWatcher:同一个对象、只改深度 / 数量 / 单数的更新不算;最优买价或卖价变了才算,且每次变化只报一次", () => {
+    const first = bookOf(asks, bids);
+    const moved = bookTopWatcher(first);
+    expect(moved(first)).toBe(false);
+    // 顶档价位不变:卖一数量变了、深处多了一档、买二被撤
+    expect(moved(bookOf([lvl(10_005, 10), lvl(10_010, 50, 2), lvl(10_020, 80)], [lvl(9_995, 40)]))).toBe(false);
+    // 卖一移动
+    const askMoved = bookOf(movedAsks, bids);
+    expect(moved(askMoved)).toBe(true);
+    expect(moved(askMoved)).toBe(false);
+    expect(moved(bookOf(movedAsks, bids))).toBe(false);
+    // 买一移动
+    expect(moved(bookOf(movedAsks, movedBids))).toBe(true);
+    // 一侧空了、盘口被逐出(换标的后的淘汰)
+    expect(moved(bookOf([], movedBids))).toBe(true);
+    expect(moved(undefined)).toBe(true);
+    expect(moved(undefined)).toBe(false);
+  });
+
+  it("bookTopWatcher:一开始没有盘口,快照到了算一次变化;空盘口到空盘口不算", () => {
+    const moved = bookTopWatcher(undefined);
+    expect(moved(bookOf([], []))).toBe(false);
+    expect(moved(bookOf(asks, bids))).toBe(true);
+  });
+
+  it("refreshChanges:限价草稿(空的、填了价与量的、按金额的、按滑杆的)不随顶档变 —— 面板不派发", () => {
+    const before = ctxOf(asks, bids);
+    const after = ctxOf(movedAsks, movedBids);
+    const drafts = [
+      initialDraft(),
+      initialDraft("SELL"),
+      run([{ kind: "setPrice", text: "100.00" }, { kind: "setQty", text: "20" }], before),
+      run([{ kind: "setPrice", text: "100.00" }, { kind: "setAmount", text: "5000" }], before),
+      run([{ kind: "setPrice", text: "100.00" }, { kind: "setPct", pct: 50 }], before),
+      // 价格框空着动了数量:参考价已在那次事件里填进价格框,之后顶档再动也不改它
+      run([{ kind: "setQty", text: "20" }], before),
+    ];
+    for (const d of drafts) {
+      expect(refreshChanges(d, before)).toBe(false);
+      expect(refreshChanges(d, after)).toBe(false);
+    }
+  });
+
+  it("refreshChanges:市价草稿没填数量时不随顶档变;填了数量 / 金额 / 滑杆,走档结果变了才要重算", () => {
+    const before = ctxOf(asks, bids);
+    const after = ctxOf(movedAsks, movedBids);
+    const empty = run([{ kind: "setType", orderType: "MARKET" }], before);
+    expect(refreshChanges(empty, after)).toBe(false);
+
+    const byQty = run([{ kind: "setType", orderType: "MARKET" }, { kind: "setQty", text: "20" }], before);
+    expect(byQty.estNotional).toBe(20 * 10_005);
+    expect(refreshChanges(byQty, before)).toBe(false);
+    expect(refreshChanges(byQty, after)).toBe(true);
+    // 重算一次之后就稳定了:同一个上下文不会反复派发
+    const refreshed = reduceDraft(byQty, { kind: "refresh" }, after);
+    expect(refreshed.estNotional).toBe(20 * 10_010);
+    expect(refreshed.amountText).toBe("2002.00");
+    expect(refreshChanges(refreshed, after)).toBe(false);
+
+    const byAmount = run([{ kind: "setType", orderType: "MARKET" }, { kind: "setSide", side: "SELL" }, { kind: "setAmount", text: "3000" }], before);
+    expect(refreshChanges(byAmount, after)).toBe(true);
+    const byPct = run([{ kind: "setType", orderType: "MARKET" }, { kind: "setPct", pct: 100 }], before);
+    expect(refreshChanges(byPct, after)).toBe(true);
+  });
+
+  it("每个动作的结果对同一个上下文都已稳定(提交后的对账不会多派发一次)", () => {
+    const actions: DraftAction[] = [
+      { kind: "setType", orderType: "MARKET" },
+      { kind: "setQty", text: "30" },
+      { kind: "setSide", side: "SELL" },
+      { kind: "setAmount", text: "2500" },
+      { kind: "setType", orderType: "LIMIT" },
+      { kind: "setPrice", text: "99.95" },
+      { kind: "setPct", pct: 75 },
+      { kind: "applySeed", seed: { symbol: SYMBOL, side: "BUY", price: 10_005, nonce: 1 } },
+      { kind: "reset" },
+    ];
+    let d = initialDraft();
+    for (const action of actions) {
+      d = reduceDraft(d, action, ctx);
+      expect(refreshChanges(d, ctx), action.kind).toBe(false);
+    }
+  });
+
+  it("校验结果:限价草稿与顶档无关;市价草稿在对手盘空了 / 买不起一吨时才变", () => {
+    const before = ctxOf(asks, bids);
+    const limit = run([{ kind: "setPrice", text: "100.00" }, { kind: "setQty", text: "20" }], before);
+    expect(draftError(limit, before)).toBeNull();
+    expect(draftError(limit, ctxOf(movedAsks, movedBids))).toBeNull();
+    expect(draftError(limit, ctxOf([], []))).toBeNull();
+
+    const market = run([{ kind: "setType", orderType: "MARKET" }, { kind: "setQty", text: "20" }], before);
+    expect(draftError(market, before)).toBeNull();
+    expect(draftError(market, ctxOf(movedAsks, movedBids))).toBeNull();
+    expect(draftError(market, ctxOf([], bids))).toBe("noLiquidity");
+    expect(draftError(market, draftCtxOf(instrument, { cashCents: 10_004, qty: 0 }, bookOf(asks, bids)))).toBe("insufficientCash");
+  });
+
+  // 下单表单渲染期唯一读盘口的 selector(OrderPanel:useMarketStore(errorSelector(…)))。useSyncExternalStore 按 Object.is 比较
+  // 它先后两次的返回值:相同 ⇒ 顶档变化不让表单重渲染。这里拿「只有盘口不同」的两份 store 状态直接喂它。
+  describe("errorSelector:校验结果的 selector", () => {
+    const stateOf = (askLevels: OrderBookLevel[], bidLevels: OrderBookLevel[]) => ({ books: { [SYMBOL]: bookOf(askLevels, bidLevels) } });
+    const before = stateOf(asks, bids);
+    const bothMoved = stateOf(movedAsks, movedBids);
+    const same = (select: ReturnType<typeof errorSelector>, a: Parameters<ReturnType<typeof errorSelector>>[0], b: typeof a): boolean => Object.is(select(a), select(b));
+
+    it("还没点过「核对订单」(attempted = false):恒为 null,哪怕草稿不合法、盘口空了", () => {
+      const market = run([{ kind: "setType", orderType: "MARKET" }, { kind: "setQty", text: "20" }]);
+      for (const d of [initialDraft(), market]) {
+        const select = errorSelector(d, instrument, avail, SYMBOL, false);
+        for (const state of [before, bothMoved, stateOf([], []), { books: {} }]) expect(select(state)).toBeNull();
+      }
+    });
+
+    it("限价草稿:顶档怎么动(两侧都移、一侧空、整个盘口没了),结果都是同一个值 —— 合法的恒为 null,不合法的恒为同一条错误", () => {
+      const valid = run([{ kind: "setPrice", text: "100.00" }, { kind: "setQty", text: "20" }]);
+      const offTick = run([{ kind: "setPrice", text: "100.01" }, { kind: "setQty", text: "20" }]);
+      const tooMuch = run([{ kind: "setSide", side: "SELL" }, { kind: "setPrice", text: "100.00" }, { kind: "setQty", text: "510" }]);
+      const cases: [Draft, DraftError | null][] = [
+        [valid, null],
+        [initialDraft(), "invalidPrice"],
+        [offTick, "offTick"],
+        [tooMuch, "insufficientQty"],
+      ];
+      for (const [d, expected] of cases) {
+        const select = errorSelector(d, instrument, avail, SYMBOL, true);
+        expect(select(before), String(expected)).toBe(expected);
+        for (const after of [bothMoved, stateOf([], bids), stateOf(asks, []), stateOf([], []), { books: {} }]) expect(same(select, before, after), String(expected)).toBe(true);
+      }
+    });
+
+    it("市价草稿:走档结果没变的顶档移动(买单只走卖盘,动的是买一)结果相同;走档结果变了但仍然买得起,结果也相同", () => {
+      const market = run([{ kind: "setType", orderType: "MARKET" }, { kind: "setQty", text: "20" }]);
+      const select = errorSelector(market, instrument, avail, SYMBOL, true);
+      expect(select(before)).toBeNull();
+      // 只有买一动了:市价买单沿卖盘走档,走档金额不变(refreshChanges 为假 = 面板不派发),校验结果也不变 → 表单零渲染
+      expect(refreshChanges(market, ctxOf(asks, movedBids))).toBe(false);
+      expect(same(select, before, stateOf(asks, movedBids))).toBe(true);
+      // 卖一动了:走档金额变了(那一次渲染是草稿自己的 refresh),校验结果这个 selector 仍是同一个 null
+      expect(refreshChanges(market, ctxOf(movedAsks, bids))).toBe(true);
+      expect(same(select, before, stateOf(movedAsks, bids))).toBe(true);
+      // 不合法的市价草稿(数量没填):错误先于盘口判定,顶档怎么动都是同一条
+      const empty = errorSelector(run([{ kind: "setType", orderType: "MARKET" }]), instrument, avail, SYMBOL, true);
+      expect(empty(before)).toBe("invalidQty");
+      expect(same(empty, before, bothMoved)).toBe(true);
+      expect(same(empty, before, stateOf([], []))).toBe(true);
+    });
+
+    it("市价草稿:该变的时候变 —— 对手盘空了 / 盘口没了是 noLiquidity,卖一涨到现金买不起一吨是 insufficientCash;对手盘回来就恢复", () => {
+      const buy = run([{ kind: "setType", orderType: "MARKET" }, { kind: "setQty", text: "20" }]);
+      const select = errorSelector(buy, instrument, avail, SYMBOL, true);
+      expect(select(before)).toBeNull();
+      expect(select(stateOf([], bids))).toBe("noLiquidity");
+      expect(select({ books: {} })).toBe("noLiquidity");
+      expect(select(stateOf(asks, []))).toBeNull(); // 买单不看买盘
+      expect(select(bothMoved)).toBeNull();
+
+      // 可用现金 100.07:买得起卖一 100.05,卖一移到 100.10 之后买不起
+      const tight = errorSelector(buy, instrument, { cashCents: 10_007, qty: 0 }, SYMBOL, true);
+      expect(tight(before)).toBeNull();
+      expect(tight(stateOf(movedAsks, bids))).toBe("insufficientCash");
+      expect(same(tight, before, stateOf(movedAsks, bids))).toBe(false);
+
+      const sell = errorSelector(run([{ kind: "setType", orderType: "MARKET" }, { kind: "setSide", side: "SELL" }, { kind: "setQty", text: "20" }]), instrument, avail, SYMBOL, true);
+      expect(sell(before)).toBeNull();
+      expect(sell(stateOf(asks, movedBids))).toBeNull();
+      expect(sell(stateOf(asks, []))).toBe("noLiquidity");
+      expect(sell(stateOf([], bids))).toBeNull(); // 卖单不看卖盘
+    });
+
+    it("只认自己的标的:别的标的的盘口怎么变都不影响结果", () => {
+      const market = run([{ kind: "setType", orderType: "MARKET" }, { kind: "setQty", text: "20" }]);
+      const select = errorSelector(market, instrument, avail, SYMBOL, true);
+      const mine = bookOf(asks, bids);
+      expect(same(select, { books: { [SYMBOL]: mine, OTHER: bookOf(asks, bids) } }, { books: { [SYMBOL]: mine, OTHER: bookOf([], []) } })).toBe(true);
+    });
   });
 });

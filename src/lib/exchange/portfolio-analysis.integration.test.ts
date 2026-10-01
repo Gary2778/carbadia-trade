@@ -28,11 +28,14 @@ vi.mock("../server/auth", async (importOriginal) => {
       if (!session.userId) throw new actual.AuthError("Not logged in");
       return prisma.user.findUniqueOrThrow({ where: { id: session.userId } });
     },
+    // The per-user limits on overview / positions read the session's userId before requireUser (P2-13)
+    sessionUserId: async () => session.userId || null,
   };
 });
 
 let prisma: (typeof import("../server/db"))["prisma"];
-let portfolio: (typeof import("../../app/api/portfolio/route"))["GET"];
+// 旧 GET /api/portfolio 随旧资产页一起删了(P2-10);持仓成本与合计的断言改对着取代它的 GET /api/account/overview
+let overview: (typeof import("../../app/api/account/overview/route"))["GET"];
 let transactions: (typeof import("../../app/api/transactions/route"))["GET"];
 let buyerId: string;
 let sellerId: string;
@@ -57,7 +60,7 @@ beforeAll(async () => {
   >`SELECT file FROM pragma_database_list WHERE name = 'main'`;
   if (!files[0]?.file.endsWith("test-portfolio-analysis.db"))
     throw new Error("Refusing to test against a non-test database");
-  ({ GET: portfolio } = await import("../../app/api/portfolio/route"));
+  ({ GET: overview } = await import("../../app/api/account/overview/route"));
   ({ GET: transactions } = await import("../../app/api/transactions/route"));
   const { placeOrder } = await import("./matching");
   const { retireCredits } = await import("./retirement");
@@ -169,14 +172,14 @@ afterAll(async () => {
 
 describe("portfolio and activity API boundaries", () => {
   it("reports remaining purchase basis, nominal credit quantities and retirement totals", async () => {
-    const response = await portfolio();
+    const response = await overview(new Request("http://localhost/api/account/overview"));
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     const { data } = await response.json();
-    expect(data.heldCredits).toBe(8);
-    expect(data.retiredCredits).toBe(2);
-    expect(data.totalAssets).toBe(105_600);
-    expect(data.unrealisedPnl).toBeNull();
-    expect(data.change24h).toBeNull();
+    expect(data.totals.heldCredits).toBe(8);
+    expect(data.totals.retiredCredits).toBe(2);
+    expect(data.totals.totalAssets).toBe(105_600);
+    expect(data.totals.unrealisedPnl).toBeNull();
+    expect(data.totals.costBasisComplete).toBe(false);
     expect(
       data.positions.find(
         (p: { symbol: string }) => p.symbol === "TEST-CREDIT",
@@ -184,25 +187,27 @@ describe("portfolio and activity API boundaries", () => {
     ).toMatchObject({
       quantity: 8,
       available: 8,
-      registry: "Verra",
-      standard: "VCS",
-      vintage: 2022,
+      retired: 2,
+      lastPrice: 1_200,
+      marketValue: 9_600,
       averagePurchasePrice: 1_000,
-      costBasis: 8_000,
       unrealisedPnl: 1_600,
-      costBasisComplete: true,
+      costBasisStatus: "complete",
     });
     expect(
       data.positions.find(
         (p: { symbol: string }) => p.symbol === "TEST-SCENARIO",
-      ).costBasisComplete,
-    ).toBe(false);
+      ).costBasisStatus,
+    ).not.toBe("complete");
   });
 
   it("paginates every own account movement once and attaches assets to cash settlements", async () => {
     const ids: string[] = [];
     let cursor: string | null = null;
-    let expectedTotal = 0;
+    // The response no longer carries a total (plan §6.2.2 C4): count the user's rows directly.
+    const expectedTotal = await prisma.ledgerEntry.count({
+      where: { userId: buyerId },
+    });
     let sawCashCredit = false;
     let sawRetirement = false;
     do {
@@ -213,20 +218,20 @@ describe("portfolio and activity API boundaries", () => {
       );
       expect(response.headers.get("Cache-Control")).toBe("private, no-store");
       const { data } = await response.json();
-      expectedTotal = data.pagination.total;
-      for (const entry of data.entries) {
+      expect(Object.keys(data).sort()).toEqual(["items", "nextCursor"]);
+      for (const entry of data.items) {
         ids.push(entry.id);
         expect(typeof entry.delta).toBe("number");
         if (
           entry.account === "CASH_LOCKED" &&
           entry.reason === "TRADE_SETTLE"
         ) {
-          expect(entry.asset.symbol).toBe("TEST-CREDIT");
+          expect(entry.symbol).toBe("TEST-CREDIT");
           sawCashCredit = true;
         }
         if (entry.type === "RETIREMENT") sawRetirement = true;
       }
-      cursor = data.pagination.nextCursor;
+      cursor = data.nextCursor;
     } while (cursor);
     expect(new Set(ids).size).toBe(expectedTotal);
     expect(ids).toHaveLength(expectedTotal);
@@ -235,7 +240,7 @@ describe("portfolio and activity API boundaries", () => {
     expect(sawRetirement).toBe(true);
   });
 
-  it("rejects another user's cursor and invalid page limits", async () => {
+  it("rejects bare ledger-id cursors (the pre-C4 format) and invalid page limits", async () => {
     expect(
       (
         await transactions(
@@ -254,7 +259,7 @@ describe("portfolio and activity API boundaries", () => {
     ).toBe(400);
   });
 
-  it("preserves unusually large ledger values as exact decimal strings", async () => {
+  it("returns every delta as a number, including values beyond the safe-integer range (C4: delta is a number)", async () => {
     const record = await prisma.ledgerEntry.create({
       data: {
         userId: buyerId,
@@ -268,17 +273,20 @@ describe("portfolio and activity API boundaries", () => {
       new Request("http://localhost/api/transactions?limit=1"),
     );
     const { data } = await response.json();
-    expect(data.entries[0]).toMatchObject({
+    // Not reachable through trading (notional caps keep cents far below 2^53); the nearest double is returned.
+    expect(data.items[0]).toMatchObject({
       id: record.id,
-      delta: "9007199254740993",
-      deltaIsExactNumber: false,
+      delta: Number(BigInt("9007199254740993")),
     });
+    expect("deltaIsExactNumber" in data.items[0]).toBe(false);
   });
 
   it("requires authentication for both endpoints", async () => {
     session.userId = "";
     try {
-      expect((await portfolio()).status).toBe(401);
+      const denied = await overview(new Request("http://localhost/api/account/overview"));
+      expect(denied.status).toBe(401);
+      expect(denied.headers.get("Cache-Control")).toBe("private, no-store");
       const response = await transactions(
         new Request("http://localhost/api/transactions"),
       );

@@ -1,5 +1,5 @@
 import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderToStaticMarkup } from "@/i18n/test-support"; // = react-dom/server 的同名函数 + /trade 布局登记终端文案的那层 Provider(P2-01)
 import { describe, expect, it, vi } from "vitest";
 import en from "@/i18n/messages/en";
 import { candlesUrl } from "@/lib/market/MarketProvider";

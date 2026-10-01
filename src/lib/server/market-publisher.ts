@@ -1,5 +1,7 @@
-// 市场发布器(计划 §3.2 服务端数据流、§3.4「globalThis 总线契约与两级门控」「撮合与 OTC」):
+// 市场发布器(计划 §3.2 服务端数据流、§3.4「globalThis 总线契约与两级门控」「撮合与 OTC」、§6.2.2 C2):
 // 撮合 / 撤单事务提交后由 placeOrder / cancelOrder 调 publishOrderResult(result),OTC 成交后由 buyListing 调 publishLastPrice(...),
+// 注销(retireCredits)与 OTC 挂牌 / 撤牌(createListing / cancelListing)提交后调 publishPositionChange(userId, assetId) ——
+// 这三种只动持仓(数量或锁定),现金不变,所以只发该标的的 position。
 // 这里把结果派生成 book / trades / ticker / candle / account 五种纯数据消息发到 globalThis.__carbadiaBus,hub 再按 topic 扇出。
 //
 // 两级门控(不派生就不查库):
@@ -9,7 +11,7 @@
 //
 // 状态放哪:本模块会被打进 instrumentation(bot)与 route handler(REST 下单、OTC)两个 bundle,各有一份模块级变量。
 // 决定发出去的数值的状态必须跨 bundle 一致,挂 globalThis(纯数据):差分基线 __carbadiaBookCache、K 线当前桶 __carbadiaCandleState
-//(计划 §3.4 的两个名字),以及发布器私有的 __carbadiaPublisherState(24 h 统计、盘口与余额的读取票号、K 线折算水位)。
+//(计划 §3.4 的两个名字),以及发布器私有的 __carbadiaPublisherState(24 h 统计、盘口 / 余额 / 持仓的读取票号、订单行票号、K 线折算水位)。
 // 统计缓存若每个 bundle 一份,bot 发的 ticker 要到下次刷新才含用户那笔成交,相邻两条 ticker 的量 / 高低会先倒退再跳回。
 //
 // 顺序:trades 同步发出;其余派生按标的排进串行队列,盘口另走 50 ms 去抖(同一窗口内多次下单只读一次库)。
@@ -22,18 +24,32 @@
 //   - 订单行:按订单的票号(orderReads),在 publishOrderResult 里(事务提交后、同步)领,所以票号顺序 = 提交顺序:
 //     较晚提交的结果里的这张单已经发布过,较早提交、派生较晚的那条不发(终审 P1-25a:bot 的部分成交在 instrumentation 的队列里
 //     排着,用户经 REST 撤单先发出 CANCELLED,晚到的 PARTIAL 会把撤掉的单放回挂单列表,终结的单再没有事件来纠正)。
-//     提交时用户不在线就不领票、不发这张单的行:他订阅时拿到的快照读在提交之后,不比这一行旧。
+//     提交时用户不在线就不领票、不发这张单的行:他订阅时拿到的快照读在提交之后,不比这一行旧;这张单的票号条目当场删掉
+//     (见下「提交时用户不在线」),他掉线前在途的那次派生带着的旧行(OPEN / PARTIAL)因此不会在新快照之后发出去。
 //     订单行不能指望「下一条事件纠正」:终结(FILLED / CANCELLED)之后这张单再也没有事件。所以除了这里的票号,客户端还有一道
 //     兜底(src/lib/market/account-store.ts 的 closedOrders):同一 id 终结之后到达的 OPEN / PARTIAL 行一律丢弃,终结不可逆;
+//   - 持仓:按 (用户, 标的) 的读取票号(positionTickets),与余额同一写法 —— 读库前领票,发布那一刻裁决:同一用户同一标的上
+//     较晚发出的持仓读取已经发布过,较早发出、较晚返回的那一行不发(计划 §6.2.2 C2;否则客户端按 assetId 整行覆盖成旧值:
+//     注销或撤牌之后如果没有下一条事件,旧的数量 / 锁定会一直留到重订阅)。较晚发出的读取看到的提交点不早于较早发出的那次
+//     要反映的提交,所以丢掉旧行不丢信息;每次改动持仓的提交都有自己的读取(成交 / 撤单 / OTC / 注销),最后发出的那次读取总会发布;
+//   - 提交时(或派生开始时)用户不在线:不读库、不发,并当场删掉他在这次提交动到的票号条目(dropOfflineTickets:该标的的持仓票号,
+//     成交 / 撤单 / OTC 成交另加余额票号;成交 / 撤单还有这次结果里他的每张单的订单票号)。他掉线之前发出、还在途的读取因此找不到
+//     条目,按已被取代丢掉 —— 否则他赶在清扫之前重连时,那次读取(读在这次提交之前)会在新快照(读在提交之后)之后到达,把行盖回旧值,
+//     而掉线期间的这次提交没有事件来纠正。已知的两处局限,都只是一瞬间的旧值、随即被纠正,不会停留:
+//       · 成交 / OTC 成交的「不在线」是在派生里判的,而同一 bundle 同一标的的派生排在在途那次之后:在途的读取先返回时条目还在,
+//         用户若已重连,旧的余额 / 持仓行会先发出,紧接着这次派生自己的读取把它纠正(订单行在提交时同步删,没有这一条);
+//       · takeTicket 重建条目时 applied 取当时的序列值,裁决是 mine < applied:条目删掉后被新的提交重建、而在途那张票恰好是全局
+//         最新的一张(期间没有任何领票)时,旧读取先返回会被采用,随后新读取必然再发一条纠正;
 //   - K 线:冷启动补桶记下补到的时刻(seedTo),之后跳过 ts ≤ seedTo 的成交(它们已在库里补的桶里,再折一次量就翻倍);
 //     比已折进来的最新成交更早的成交(另一个 bundle 的派生晚到)只补量与高低,不改收盘价;
 //   - 24 h 统计:只折 ts > 刷新时刻的成交,每笔恰好折一次(量 / 高低与顺序无关)。
-// 仍会乱序、由下一条事件纠正的:ticker 的 lastPrice(较早一批的派生晚到时,最后价暂时退回那一批,下一笔成交即更新)
-// 与 account 的 position(整行覆盖,旧值暂时盖住新值,直到该用户在该标的上的下一条事件或重订阅的快照)。
-// 票号表按用户回收(见 sweepTickets):用户离线即删,回收之后才返回的旧读取按「已被取代」丢掉;终结的挂单一发布就删。
+// 仍会乱序、由下一条事件纠正的:ticker 的 lastPrice(较早一批的派生晚到时,最后价暂时退回那一批,下一笔成交即更新)。
+// 票号只在发布器这一侧裁决,事件里不带票号(协议不变):hub 按发布顺序给 account 事件编 seq,客户端按到达顺序应用;
+// account 订阅快照与事件之间的先后由 hub 的 seq 检查负责(查询期间有事件流出就重查)。
+// 票号表按用户回收(见 sweepTickets):用户离线后每分钟清扫一次,回收之后才返回的旧读取按「已被取代」丢掉;终结的挂单一发布就删;
+// 掉线期间有提交动到的条目不等清扫、当场删(见上「提交时用户不在线」)。
 // 做市机器人账户不发 account 事件(机器人名单首次需要时查一次库,挂在 __carbadiaPublisherState 上)。
 // 所有计时器 unref():测试与 SIGTERM 不被挂住。
-import type { Prisma } from "@/generated/prisma";
 import type { AccountEvent, CarbadiaBus } from "../../shared/bus";
 import { bucketUpdate, INTERVAL_MS } from "../../shared/candle-live";
 import { auditRefOf, CANDLE_INTERVALS } from "../../shared/constants";
@@ -42,11 +58,12 @@ import type { Balance, CandleBar, Order, OrderBookSnapshot, Position, Side, Tape
 import type { CancelOrderResult, OrderRow, PlaceOrderResult, TradeRow } from "../exchange/matching";
 import { getOrderBook } from "../exchange/matching";
 import { stats24h, type Stats24h } from "../exchange/stats24h";
-import { avgFillPricesByOrder, ledgerIdsByTrade, selfTradeCancelledIds, toFill, toOrder, toPosition } from "./account-mappers";
+import { avgFillPricesByOrder, ledgerIdsByTrade, selfTradeCancelledIds, toFill, toOrder } from "./account-mappers";
 import { getBus } from "./bus";
 import { prisma } from "./db";
 import { WS_TAPE_RING } from "../../shared/ws-protocol";
 import { getBars, getRecentTrades, invalidateInstrumentsCache } from "./market-snapshots";
+import { loadPositions, positionReads, positionsFromRows } from "./positions";
 import { hasInterest, hasUser } from "./presence";
 
 /** 盘口去抖窗口:窗口内的多次下单 / 撤单只读一次库 */
@@ -104,9 +121,11 @@ type StatsEntry = { at: number; stats: Stats24h };
 /**
  * 读取票号:issued = 已发出的最大票号,applied = 已采用(盘口:成为差分基线;余额 / 订单行:已发布)的最大票号。
  * 票号取自全局序列(PublisherState.ticketSeq),不是每个 key 各数各的:条目回收后再建,新票号仍大于回收前发出的任何一张。
- * userId:按订单的票号记下订单的主人,清扫时按用户回收
+ * userId:按订单 / 按持仓的票号记下主人,清扫时按用户回收
  */
 type ReadTickets = { issued: number; applied: number; userId?: string };
+/** 持仓读取票号的键:同一用户同一标的一条 */
+const positionKey = (userId: string, assetId: string): string => `${userId}:${assetId}`;
 /** K 线折算水位:seedTo = 冷启动补桶查到的时刻(ts ≤ 它的成交已在补的桶里);lastTs = 已折进当前桶的最新成交时刻 */
 type CandleMark = { seedTo: number; lastTs: number };
 type PublisherState = {
@@ -118,6 +137,8 @@ type PublisherState = {
   balanceReads: Map<string, ReadTickets>;
   /** key = orderId(终审 P1-25a);终结的单发布即删,主人离线后由 sweepTickets 回收 */
   orderReads: Map<string, ReadTickets>;
+  /** key = positionKey(userId, assetId)(计划 §6.2.2 C2);用户离线后由 sweepTickets 回收 */
+  positionTickets: Map<string, ReadTickets>;
   /** 全部票号共用的单调序列(跨 key、跨 bundle) */
   ticketSeq: number;
   /** 上次清扫票号表的时刻(ms) */
@@ -149,6 +170,7 @@ function publisherState(): PublisherState {
     bookReads: new Map(),
     balanceReads: new Map(),
     orderReads: new Map(),
+    positionTickets: new Map(),
     ticketSeq: 0,
     sweptAt: 0,
     botUserIds: null,
@@ -157,9 +179,13 @@ function publisherState(): PublisherState {
   // dev HMR:globalThis 上的状态可能由加这几项之前的模块版本建的
   state.balanceReads ??= new Map();
   state.orderReads ??= new Map();
+  state.positionTickets ??= new Map();
   // 旧版本的票号是每个 key 各数各的,计数随运行时长涨到 N(issued = applied = N):全局序列若从 0 起,新票号全都小于 applied,
   // 盘口与余额读取会被一律判为过期,直到序列追上最大的旧计数。所以从旧表里最大的票号接着数(P1-25a 复审)
-  state.ticketSeq ??= Math.max(0, ...[...state.bookReads.values(), ...state.balanceReads.values(), ...state.orderReads.values()].map((t) => Math.max(t.issued, t.applied)));
+  state.ticketSeq ??= Math.max(
+    0,
+    ...[...state.bookReads.values(), ...state.balanceReads.values(), ...state.orderReads.values(), ...state.positionTickets.values()].map((t) => Math.max(t.issued, t.applied)),
+  );
   state.sweptAt ??= 0;
   state.botUserIds ??= null;
   return state;
@@ -194,7 +220,7 @@ function adoptTicket(reads: Map<string, ReadTickets>, key: string, mine: number)
 const TICKET_SWEEP_MS = 60_000;
 
 /**
- * 回收离线用户(presence 里没有他的 account 订阅)的余额票号与订单票号,否则两张表随历史用户数一直涨(终审 P1-25a)。
+ * 回收离线用户(presence 里没有他的 account 订阅)的余额票号、订单票号与持仓票号,否则这几张表随历史用户数一直涨(终审 P1-25a)。
  * 不必等 applied === issued:回收之后还在途的读取在 adoptTicket 里找不到条目,按已被取代丢掉——用户离线时本来就没人收,
  * 他再上线时 hub 会给他一份读在之后的快照。
  */
@@ -205,6 +231,30 @@ function sweepTickets(): void {
   state.sweptAt = t;
   for (const userId of [...state.balanceReads.keys()]) if (!hasUser(userId)) state.balanceReads.delete(userId);
   for (const [orderId, ticket] of [...state.orderReads]) if (!ticket.userId || !hasUser(ticket.userId)) state.orderReads.delete(orderId);
+  for (const [key, ticket] of [...state.positionTickets]) if (!ticket.userId || !hasUser(ticket.userId)) state.positionTickets.delete(key);
+}
+
+/**
+ * 一次提交之后发现该用户不在线(不读库、不发):删掉他在这个标的上的持仓票号条目;withBalance(这次提交也动了现金:成交 / 撤单 /
+ * OTC 成交)时连他的余额票号条目一起删。等于只对这一条提前做了 sweepTickets 的事,理由也相同:用户不在线时在途的读取没人收,
+ * 他再上线时 hub 给的快照读在这之后。不等清扫的原因:清扫每分钟至多一次,而重连只要几百毫秒 —— 条目还在的话,他掉线前发出、
+ * 重连后才返回的那次读取会被采用,在新快照之后把行盖回这次提交之前的值,掉线期间的这次提交又没有事件来纠正。
+ * 只在 hasUser(userId) 为 false 时调用;只改内存,不查库。
+ */
+function dropOfflineTickets(userId: string, assetId: string, withBalance: boolean): void {
+  const state = publisherState();
+  state.positionTickets.delete(positionKey(userId, assetId));
+  if (withBalance) state.balanceReads.delete(userId);
+}
+
+/** 门控 ②(成交 / 撤单 / OTC 成交):在线的用户留下;不在线的不查库,并删掉他被这次提交动到的票号条目(dropOfflineTickets) */
+function onlineOf(userIds: Iterable<string>, assetId: string): string[] {
+  const online: string[] = [];
+  for (const userId of userIds) {
+    if (hasUser(userId)) online.push(userId);
+    else dropOfflineTickets(userId, assetId, true);
+  }
+  return online;
 }
 
 /** 这个 userId 已知是做市机器人吗(名单查过才知道;同步判断,用在提交后领票的地方) */
@@ -297,13 +347,17 @@ export function publishOrderResult(result: PlaceOrderResult | CancelOrderResult)
   });
 }
 
-/** 这次结果触碰的每张在线真人用户的单各领一张订单票号(orderId → 票号);不在线的不领,派生时也就不发它的行 */
+/**
+ * 这次结果触碰的每张在线真人用户的单各领一张订单票号(orderId → 票号);不在线的不领,派生时也就不发它的行,
+ * 并删掉这张单的票号条目:他掉线前在途的派生(带着更早的票)返回时找不到条目,不会把旧行发在重连快照之后(见文件头「提交时用户不在线」)
+ */
 function takeOrderTickets(result: PlaceOrderResult | CancelOrderResult): Map<string, number> {
   const tickets = new Map<string, number>();
+  const reads = publisherState().orderReads;
   const rows = "makerOrders" in result ? [result.order, ...result.makerOrders] : [result.order];
   for (const row of rows) {
-    if (!hasUser(row.userId) || knownBot(row.userId)) continue;
-    tickets.set(row.id, takeTicket(publisherState().orderReads, row.id, row.userId));
+    if (!hasUser(row.userId)) reads.delete(row.id);
+    else if (!knownBot(row.userId)) tickets.set(row.id, takeTicket(reads, row.id, row.userId));
   }
   return tickets;
 }
@@ -336,16 +390,42 @@ export function publishLastPrice(input: { assetId: string; symbol: string; lastP
   sweepTickets();
   enqueue(assetId, async () => {
     await publishTicker(bus, assetId, symbol, lastPrice, []);
-    const online = [...new Set([buyerId, sellerId])].filter(hasUser);
+    const online = onlineOf(new Set([buyerId, sellerId]), assetId);
     const bots = online.length > 0 ? await botUserIds() : new Set<string>();
     for (const userId of online) {
       if (bots.has(userId)) continue;
       const balanceRead = takeTicket(publisherState().balanceReads, userId, userId);
-      const [balance, positions] = await Promise.all([loadBalance(userId), loadPositions(userId, assetId)]);
+      const positionRead = takePositionTicket(userId, assetId);
+      const [balance, positions] = await Promise.all([loadBalance(userId), loadPositionRows(userId, assetId)]);
       if (adoptTicket(publisherState().balanceReads, userId, balanceRead)) bus.publish({ kind: "account", userId, event: { t: "balance", balance } });
-      for (const position of positions) bus.publish({ kind: "account", userId, event: { t: "position", position } });
+      publishPositionRows(bus, userId, positions, positionRead);
     }
   });
+}
+
+/**
+ * 只动持仓的提交之后(计划 §6.2.2 C2):注销(数量减少、retired 增加,整仓注销后是 quantity 0、retired > 0 的行)、
+ * OTC 挂牌 / 撤牌(locked 与 lockedBy.otc 变化)。现金不变,只发该用户在该标的上的 position 事件(在线才查库,机器人不发)。
+ * 事务已提交才调用,调用方不 await;重放的请求(库没变)不调用。与 publishOrderResult 一样,发布失败只记日志:
+ * 同步部分也包在 try 里 —— 业务事务已经提交,不能因为发布器的问题让那次请求变成 500。
+ */
+export function publishPositionChange(userId: string, assetId: string): void {
+  try {
+    const bus = getBus();
+    if (!bus.hasSubscribers()) return; // 门控 ①
+    // 门控 ②:提交时不在线就不查(他订阅时拿到的快照读在提交之后),并删掉这一条票号 —— 掉线前在途的读取不得盖住那份快照
+    if (!hasUser(userId)) return dropOfflineTickets(userId, assetId, false);
+    if (knownBot(userId)) return;
+    sweepTickets();
+    enqueue(assetId, async () => {
+      if (!hasUser(userId)) return dropOfflineTickets(userId, assetId, false); // 提交之后、派生开始之前掉线:同上
+      if ((await botUserIds()).has(userId)) return;
+      const positionRead = takePositionTicket(userId, assetId);
+      publishPositionRows(bus, userId, await loadPositionRows(userId, assetId), positionRead);
+    });
+  } catch (err) {
+    logError("position change publish failed", err);
+  }
 }
 
 // ---- book:50 ms 去抖 → getOrderBook(assetId, 50) → diffBook ----
@@ -609,7 +689,9 @@ async function publishAccountEvents(bus: CarbadiaBus, result: PlaceOrderResult |
       touched.set(maker.userId, list);
     }
   }
-  const online = [...touched.keys()].filter(hasUser); // 门控 ②
+  const online = onlineOf(touched.keys(), order.assetId); // 门控 ②
+  // 提交时在线(领了票)、派生开始前掉线:这几张单的行不发了,条目一并删掉(与 takeOrderTickets 的不在线分支同理)
+  for (const [userId, rows] of touched) if (!online.includes(userId)) for (const row of rows) publisherState().orderReads.delete(row.id);
   if (online.length === 0) return;
   const bots = await botUserIds(); // 机器人不发 account 事件(见 botUserIds)
   for (const userId of online) {
@@ -619,12 +701,13 @@ async function publishAccountEvents(bus: CarbadiaBus, result: PlaceOrderResult |
       for (const row of orders) publisherState().orderReads.delete(row.id);
       continue;
     }
-    const { events, balanceRead } = await accountEventsFor(userId, order.assetId, orders, trades, orderTickets);
+    const { events, balanceRead, positionRead } = await accountEventsFor(userId, order.assetId, orders, trades, orderTickets);
     for (const event of events) {
       // 票号裁决紧挨着发布(同一段同步代码):余额——更晚发出的余额读取已经发布过,这条更旧,不发;
-      // 订单行——较晚提交的结果已经发布过这张单,这条更旧,不发
+      // 订单行——较晚提交的结果已经发布过这张单,这条更旧,不发;持仓——同一标的上更晚发出的持仓读取已经发布过,这一行更旧,不发
       if (event.t === "balance" && !adoptTicket(publisherState().balanceReads, userId, balanceRead)) continue;
       if (event.t === "order" && !adoptOrderTicket(event.order, orderTickets.get(event.order.id))) continue;
+      if (event.t === "position" && !adoptTicket(publisherState().positionTickets, positionKey(userId, event.position.assetId), positionRead)) continue;
       bus.publish({ kind: "account", userId, event });
     }
   }
@@ -633,7 +716,7 @@ async function publishAccountEvents(bus: CarbadiaBus, result: PlaceOrderResult |
 /**
  * 一个用户在这次结果里的账户事件:该用户被触碰的订单(均价按实际成交重算,与 /api/account/orders 同一规则)、
  * 该用户参与的成交(ledgerRefs 经 ledgerIdsByTrade 一次查出)、余额、该标的的持仓(含卖光后的 0 持仓,让客户端能清掉)。
- * balanceRead = 余额读取发出前领的票号(见文件头「余额」),由调用方在发布那一刻裁决。
+ * balanceRead / positionRead = 余额、持仓读取发出前领的票号(见文件头「余额」「持仓」),由调用方在发布那一刻裁决。
  */
 async function accountEventsFor(
   userId: string,
@@ -641,9 +724,10 @@ async function accountEventsFor(
   orders: readonly OrderRow[],
   trades: readonly TradeRow[],
   orderTickets: ReadonlyMap<string, number>,
-): Promise<{ events: AccountEvent[]; balanceRead: number }> {
+): Promise<{ events: AccountEvent[]; balanceRead: number; positionRead: number }> {
   const mine = trades.filter((t) => t.buyerId === userId || t.sellerId === userId);
   const balanceRead = takeTicket(publisherState().balanceReads, userId, userId);
+  const positionRead = takePositionTicket(userId, assetId);
   // 提交时不在线、没领票的单不发它的行(见文件头「订单行」),均价与自成交派生也就不必为它查
   orders = orders.filter((row) => orderTickets.has(row.id));
   const [avg, selfTraded, ledgerIds, balance, positions] = await Promise.all([
@@ -651,14 +735,14 @@ async function accountEventsFor(
     selfTradeCancelledIds(prisma, orders), // 被自成交防护撤掉的挂单:与 REST /api/account/orders 同一派生,WS 与 REST 的 cancelReason 一致
     ledgerIdsByTrade(prisma, userId, mine.map((t) => t.id)),
     loadBalance(userId),
-    loadPositions(userId, assetId),
+    loadPositionRows(userId, assetId),
   ]);
   const events: AccountEvent[] = [];
   for (const row of orders) events.push({ t: "order", order: toOrder(row, avg.has(row.id) ? avg.get(row.id) : undefined, selfTraded) });
   for (const t of mine) events.push({ t: "fill", fill: toFill(t, userId, ledgerIds.get(t.id) ?? []) });
   events.push({ t: "balance", balance });
   for (const position of positions) events.push({ t: "position", position });
-  return { events, balanceRead };
+  return { events, balanceRead, positionRead };
 }
 
 async function loadBalance(userId: string): Promise<Balance> {
@@ -666,117 +750,54 @@ async function loadBalance(userId: string): Promise<Balance> {
   return { cashBalance: Number(row.cashBalance), lockedCash: Number(row.lockedCash) }; // BigInt → number
 }
 
-/** 成本重建用到的现金结算行的 reason(与 /api/account/positions、/api/portfolio 同一筛选) */
-const COST_BASIS_CASH_REASONS = ["TRADE_SETTLE", "OTC_SETTLE", "PRICE_IMPROVE_REFUND"];
-const LEDGER_LINE_SELECT = { id: true, account: true, assetId: true, delta: true, reason: true, refType: true, refId: true, createdAt: true } as const;
-/** 按引用取现金行时每批的 id 数:SQLite 的绑定参数有上限,IN 列表分批 */
-const CASH_REF_CHUNK = 500;
-
-/**
- * 成本重建需要的账本行(与 /api/account/positions、/api/portfolio 同一筛选)。不传 assetId(快照:全部持仓)= 全部持仓行 + 全部现金结算行;
- * 传 assetId = 只取该标的的持仓行,现金行另由 settlementCashRows 按这些行的引用去取(终审 P1-25a:以前每次成交 / 撤单都整本读用户的现金账)
- */
-function costBasisLedgerWhere(userId: string, assetId?: string): Prisma.LedgerEntryWhereInput {
-  if (assetId) return { userId, account: "HOLDING", assetId };
-  return {
-    userId,
-    OR: [{ account: "HOLDING" }, { account: { in: ["CASH", "CASH_LOCKED"] }, reason: { in: COST_BASIS_CASH_REASONS } }],
-  };
+/** 领一张持仓读取票号(在发出读取之前领;见文件头「持仓」) */
+function takePositionTicket(userId: string, assetId: string): number {
+  return takeTicket(publisherState().positionTickets, positionKey(userId, assetId), userId);
 }
 
 /**
- * 持仓三态的三个读取(与 GET /api/account/positions 同一映射 toPosition)。不传 assetId = 快照:只含 quantity > 0 的持仓(与 REST 一致);
- * 传 assetId = 成交 / 撤单 / OTC 之后该标的的一行,包括已经卖光的 0 持仓(客户端按 assetId 覆盖,才能把行清掉)。
- * 返回未执行的 PrismaPromise,由调用方放进同一个批量事务。
+ * 成交 / 撤单 / OTC / 注销之后该用户在该标的上的一行(src/lib/server/positions.ts,与 REST、快照同一份查询与映射):
+ * 包括已经卖光的空行(includeEmpty:客户端按 assetId 覆盖,才能把行清掉)与整仓注销的行(quantity 0、retired > 0,客户端保留)。
+ * 没有 Holding 行(从没持有过)时是空数组。
  */
-function positionReads(userId: string, assetId?: string) {
-  return [
-    prisma.holding.findMany({
-      where: { userId, ...(assetId ? { assetId } : { quantity: { gt: 0 } }) },
-      include: { asset: { select: { symbol: true, lastPrice: true, isScenario: true } } },
-      orderBy: { asset: { symbol: "asc" } },
-    }),
-    prisma.ledgerEntry.findMany({
-      where: costBasisLedgerWhere(userId, assetId),
-      select: LEDGER_LINE_SELECT,
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    }),
-    prisma.retirement.groupBy({
-      by: ["assetId"],
-      where: { userId, ...(assetId ? { assetId } : {}) },
-      _sum: { quantity: true },
-      orderBy: { assetId: "asc" },
-    }),
-  ] as const;
+function loadPositionRows(userId: string, assetId: string): Promise<Position[]> {
+  return loadPositions(prisma, userId, { assetIds: [assetId], includeEmpty: true });
 }
 
-type PositionReads = ReturnType<typeof positionReads>;
-type PositionRows = [Awaited<PositionReads[0]>, Awaited<PositionReads[1]>, Awaited<PositionReads[2]>];
-type LedgerLine = Awaited<PositionReads[1]>[number];
-
-function toPositions([holdings, ledger, retired]: PositionRows): Position[] {
-  const retiredByAsset = new Map(retired.map((row) => [row.assetId, row._sum?.quantity ?? 0]));
-  return holdings.map((holding) => toPosition(holding, retiredByAsset.get(holding.assetId) ?? 0, ledger));
-}
-
-/**
- * 该标的的买入(正向持仓行,引用 TRADE / DEAL)对应的现金结算行:reconstructPositionBasis 只用引用出现在该标的买入里的现金行,
- * 所以按这些引用去取,结果与整本现金账逐字段一致。不必和持仓行放进同一个批量事务:同一引用的现金行与持仓行在同一个事务里写入,
- * 账本只追加不改,看得到持仓行就看得到它的现金行;之后才提交的引用本来就不在要取的列表里。
- * 查询计划(P1-25a 复审):where 里只有 (refType, refId) 这一组能用上索引,userId 在 JS 里筛 —— where 带着 userId 时,SQLite 在
- * 没有 sqlite_stat1(生产丢过一次)的库上会选 (userId, account, createdAt) 索引,把用户的整本现金账走一遍;加上 refType 也不改变这个选择
- *(P1-25e 用 EXPLAIN QUERY PLAN 实测,见 market-publisher.integration.test.ts)。refId 引用的是同一笔成交 / OTC 成交,多取回来的
- * 只是对手方在这几笔上的现金行(每笔一两行),筛掉即可;refType 条件不改变结果(这些 refId 只出现在 TRADE / DEAL 流水上)。
- */
-async function settlementCashRows(userId: string, holdingLines: readonly LedgerLine[]): Promise<LedgerLine[]> {
-  const refIds = [
-    ...new Set(
-      holdingLines.flatMap((line) => (Number(line.delta) > 0 && (line.refType === "TRADE" || line.refType === "DEAL") && line.refId ? [line.refId] : [])),
-    ),
-  ];
-  const chunks: string[][] = [];
-  for (let i = 0; i < refIds.length; i += CASH_REF_CHUNK) chunks.push(refIds.slice(i, i + CASH_REF_CHUNK));
-  const rows = await Promise.all(
-    chunks.map((ids) =>
-      prisma.ledgerEntry.findMany({
-        where: { refType: { in: ["TRADE", "DEAL"] }, refId: { in: ids }, account: { in: ["CASH", "CASH_LOCKED"] }, reason: { in: COST_BASIS_CASH_REASONS } },
-        select: { ...LEDGER_LINE_SELECT, userId: true },
-      }),
-    ),
-  );
-  return rows.flat().flatMap(({ userId: owner, ...line }) => (owner === userId ? [line] : []));
-}
-
-/** 持仓、该标的的持仓账本行与注销聚合在一个批量事务里读(三者之间不夹进别的成交);指定标的时现金结算行随后按引用取(见 settlementCashRows) */
-async function loadPositions(userId: string, assetId?: string): Promise<Position[]> {
-  const [holdings, ledger, retired] = await prisma.$transaction([...positionReads(userId, assetId)]);
-  const lines = assetId ? [...ledger, ...(await settlementCashRows(userId, ledger))] : ledger;
-  return toPositions([holdings, lines, retired]);
+/** 持仓行发布前的裁决(与发布在同一段同步代码里):同一标的上更晚发出的读取已经发布过 → 这一行更旧,不发 */
+function publishPositionRows(bus: CarbadiaBus, userId: string, positions: readonly Position[], mine: number): void {
+  for (const position of positions) {
+    if (!adoptTicket(publisherState().positionTickets, positionKey(userId, position.assetId), mine)) continue;
+    bus.publish({ kind: "account", userId, event: { t: "position", position } });
+  }
 }
 
 /**
  * account 订阅时的快照:balance + 当前挂单(OPEN / PARTIAL,与 GET /api/account/orders?status=open 同序)+ 持仓
- *(hub 经 globalThis.__carbadiaAccountSnapshot 调用)。余额、挂单、持仓、账本、注销五个读取放进同一个批量事务(与 /api/account/positions
- * 同一做法):看到的是同一个提交点,不会出现「余额已含某笔成交、挂单还是成交前」的拼接快照。
+ *(hub 经 globalThis.__carbadiaAccountSnapshot 调用)。持仓与 GET /api/account/positions 同一口径(positions.ts):数量 > 0 的行,
+ * 加上整仓注销的行(数量 0、retired > 0),带锁定来源 lockedBy。余额、挂单与持仓的五个读取(持仓行、账本、注销、SELL 挂单汇总、
+ * 场外挂牌汇总)放进同一个批量事务:看到的是同一个提交点,不会出现「余额已含某笔成交、挂单还是成交前」的拼接快照。
  * 挂单均价在事务之后按成交重算(需要挂单 id):只有成交合计恰好等于行上的 filledQuantity 才给值,读到中间态时是 null,不会给错数。
+ * 快照不领持仓票号:票号只裁决事件之间的先后;快照若采用票号,在途的事件读取会被丢掉,而快照只发给正在订阅的那条连接,
+ * 同一用户的其它连接就收不到那次变化。快照与事件的先后由 hub 的 seq 检查负责。
  */
 export async function loadAccountSnapshot(userId: string): Promise<AccountSnapshot> {
   // 机器人账户没有 account 流(见 botUserIds):拒绝,hub 记一行、不发;它的账本很大,也不该为一个旧会话整本读一遍
   if ((await botUserIds()).has(userId)) throw new Error("bot accounts have no account stream");
-  const [balanceRow, orderRows, holdings, ledger, retired] = await prisma.$transaction([
+  const [balanceRow, orderRows, ...positionRows] = await prisma.$transaction([
     prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { cashBalance: true, lockedCash: true } }),
     prisma.order.findMany({
       where: { userId, status: { in: ["OPEN", "PARTIAL"] } },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       include: { asset: { select: { symbol: true } } },
     }),
-    ...positionReads(userId),
+    ...positionReads(prisma, userId),
   ]);
   const avg = await avgFillPricesByOrder(prisma, orderRows);
   return {
     balance: { cashBalance: Number(balanceRow.cashBalance), lockedCash: Number(balanceRow.lockedCash) }, // BigInt → number
     orders: orderRows.map((row) => toOrder(row, avg.has(row.id) ? avg.get(row.id) : undefined)),
-    positions: toPositions([holdings, ledger, retired]),
+    positions: await positionsFromRows(prisma, userId, positionRows),
   };
 }
 

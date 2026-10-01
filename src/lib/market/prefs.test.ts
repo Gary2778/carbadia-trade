@@ -64,6 +64,17 @@ describe("readPrefs", () => {
     expect(readPrefs(JSON.stringify({ indicators: "x", lastSymbol: 7 }))).toEqual(DEFAULT_PREFS);
   });
 
+  it("bottomTab:第五个页签 ledger(P2-07)可读;加它之前存下的四个旧值照旧读出;未知值回默认 open,不连累其它键", () => {
+    for (const tab of ["open", "history", "fills", "positions", "ledger"]) expect(readPrefs(JSON.stringify({ bottomTab: tab })).bottomTab, tab).toBe(tab);
+    // 旧版本(四个页签)写下的整份偏好原样读回
+    const legacy: TerminalPrefs = { interval: "15m", agg: 5, depth: 25, bottomTab: "positions", indicators: { ma: true, ema: true, vol: false }, lastSymbol: "VCS-FOR-2021" };
+    expect(readPrefs(JSON.stringify(legacy))).toEqual(legacy);
+    // 未知值(大小写不符、以后才有的页签、非字符串)→ 默认 open
+    for (const tab of ["Ledger", "transactions", "", 4, null, ["ledger"]]) {
+      expect(readPrefs(JSON.stringify({ bottomTab: tab, interval: "1h" })), JSON.stringify(tab)).toEqual({ ...DEFAULT_PREFS, interval: "1h" });
+    }
+  });
+
   it("depth 只认 DEPTH_OPTIONS(15 / 25 / 50)里的数;其余(不在档位里、字符串、小数、负数)回默认 15", () => {
     for (const depth of DEPTH_OPTIONS) expect(readPrefs(JSON.stringify({ depth })).depth).toBe(depth);
     for (const depth of [20, 0, -15, 25.5, "25", null, 100]) expect(readPrefs(JSON.stringify({ depth })).depth, String(depth)).toBe(15);
@@ -98,6 +109,13 @@ describe("writePrefs", () => {
     localStorage.setItem(PREFS_KEY, "{broken");
     writePrefs({ bottomTab: "history" });
     expect(readPrefs(localStorage.getItem(PREFS_KEY))).toEqual({ ...DEFAULT_PREFS, bottomTab: "history" });
+  });
+
+  it("切到流水页签(ledger)会持久化,旧存储里的其它键不动", () => {
+    g.localStorage = fakeStorage();
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ interval: "1h", bottomTab: "positions", lastSymbol: "VCS-FOR-2021" }));
+    writePrefs({ bottomTab: "ledger" });
+    expect(readPrefs(localStorage.getItem(PREFS_KEY))).toEqual({ ...DEFAULT_PREFS, interval: "1h", bottomTab: "ledger", lastSymbol: "VCS-FOR-2021" });
   });
 
   it("setItem 抛错(配额 / 隐私模式)不冒泡;没有 localStorage 也不抛", () => {

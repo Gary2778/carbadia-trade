@@ -39,7 +39,7 @@ export type AccountState = {
   balance: Balance | null;
   /** 当前挂单(OPEN / PARTIAL)按 id;只整体替换、从不就地修改 */
   openOrders: Map<string, Order>;
-  /** 持仓按 assetId;quantity 归零即移除 */
+  /** 持仓按 assetId;有数量或有注销记录(quantity > 0 || retired > 0)才留 —— 整仓注销的行留着,卖光且没注销过的移除(见 holdsPosition) */
   positions: Map<string, Position>;
   /** 新 → 旧,≤ MAX_RECENT_FILLS;hydrate 不拉历史(FillsTab 自己分页 /api/account/fills),只收 fill 事件 */
   recentFills: Fill[];
@@ -92,6 +92,13 @@ export const useAccountStore = create<AccountState>()(() => createInitialAccount
 const isOpenStatus = (status: Order["status"]): boolean => status === "OPEN" || status === "PARTIAL";
 
 /**
+ * 这一行算不算持仓(计划 §6.2.2 C1,与服务端 positions.ts 的列表口径同一条规则):还有数量,或者有注销记录。
+ * 整仓注销的行(quantity 0、retired > 0)留在 store 里(「已注销」要显示它);卖光且从没注销过的行(quantity 0、retired 0)不算 ——
+ * 服务端只在 position 事件里发这种空行,用来让这里把它清掉。
+ */
+export const holdsPosition = (position: Pick<Position, "quantity" | "retired">): boolean => position.quantity > 0 || position.retired > 0;
+
+/**
  * 已终结(FILLED / CANCELLED)挂单 id 的有界记录(插入序,满 CLOSED_ORDERS_MAX 丢最早记下的)。终结不可逆,之后同一 id 的
  * OPEN / PARTIAL 一律丢弃:跨 bundle 的发布器可能把路由那份「挂上」排在机器人那份「成交」之后送到(market-publisher 的文件头),
  * OpenOrdersTab 先落了 REST 撤单响应、之后才到一条撤单前的 PARTIAL,轮询 / hydrate 的快照读在撤单之前 —— 不挡的话这张单会以
@@ -121,7 +128,7 @@ const olderThan = (incoming: Order, existing: Order): boolean => existing.filled
 
 /**
  * 归约本体:patch 只含被触碰的切片(无变化为 null);applied = 真正改了状态的账户事件条数
- * (终态单本来不在挂单里、重复的 fill、本来没有的零持仓、被判为旧的 / 已终结的 OPEN·PARTIAL 都不算;未登录时恒为 0);
+ * (终态单本来不在挂单里、重复的 fill、本来没有的空持仓(数量 0 且没注销过)、被判为旧的 / 已终结的 OPEN·PARTIAL 都不算;未登录时恒为 0);
  * closed = 本批里终结的挂单 id(调用方记进 closedOrders;纯归约本身不写模块状态)。
  */
 function foldAccountEvents(
@@ -176,7 +183,7 @@ function foldAccountEvents(
       }
       case "position": {
         const { position } = ev;
-        if (position.quantity > 0) {
+        if (holdsPosition(position)) {
           positions ??= new Map(state.positions);
           positions.set(position.assetId, position);
           applied++;
@@ -218,7 +225,8 @@ function foldAccountEvents(
 /**
  * 纯归约:把一批服务端事件折成账户 store 的 patch(只含被触碰的切片;无变化返回 null)。
  * order:OPEN / PARTIAL 写入 openOrders(比已存的旧 —— 成交更少或更新得更早 —— 或已终结的单跳过),FILLED / CANCELLED 移出;
- * fill:前插 recentFills、按 id 去重、上限 MAX_RECENT_FILLS;balance:整体替换并镜像进 me;position:按 assetId upsert,quantity 归零即移除。
+ * fill:前插 recentFills、按 id 去重、上限 MAX_RECENT_FILLS;balance:整体替换并镜像进 me;
+ * position:按 assetId 整行覆盖 —— 有数量或有注销记录(holdsPosition)就 upsert,整仓注销的行因此保留;数量 0 且没注销过的空行移除。
  * 未登录(me 为空)时一律忽略:没有身份就没有 account 订阅,迟到的事件不该复活状态。市场事件与协议事件不改本 store。
  * 读 closedOrders(已终结挂单的记录)但不写它:记录由 applyAccountEvents 落。
  */
@@ -263,8 +271,9 @@ export function retainOpenOrders(ids: ReadonlySet<string>): void {
 }
 
 /**
- * 同形:/api/account/positions 与 WS 订阅快照只含数量 > 0 的持仓,卖光的持仓不会以 0 出现在快照里,
- * 只靠 position 事件删不掉(轮询期间与断线期间卖光的就一直留着)。只保留这些 assetId;无变化时引用不变。
+ * 同形:/api/account/positions 与 WS 订阅快照只含算持仓的行(数量 > 0,或整仓注销:数量 0、retired > 0;与 holdsPosition 同一规则),
+ * 卖光且没注销过的持仓不会以空行出现在快照里,只靠 position 事件删不掉(轮询期间与断线期间卖光的就一直留着)。
+ * 只保留这些 assetId —— 调用方传的是快照里的全部行,整仓注销的行在其中,所以不会被收走;无变化时引用不变。
  */
 export function retainPositions(assetIds: ReadonlySet<string>): void {
   const next = retainKeys(useAccountStore.getState().positions, assetIds);
@@ -324,6 +333,11 @@ function openOrdersFrom(pages: OpenOrdersPages, base: Map<string, Order>): Map<s
   return next;
 }
 
+/** REST 持仓快照 → positions:与事件同一规则(holdsPosition)。服务端的列表本来就只含这样的行,这里再筛一遍是为了两条写入路径的口径不可能分叉 */
+function positionsFrom(snapshot: PositionsResponse): Map<string, Position> {
+  return new Map(snapshot.positions.filter(holdsPosition).map((p) => [p.assetId, p]));
+}
+
 /**
  * 登录态就绪:me 与 balance 同步(balance 以 positions 快照为准,与持仓同一事务读出;没有快照时取 me 自带的余额);
  * positions / orders 传 null 表示「保留现状」(账户端点暂时失败、翻页中途失败、setMe 未拉列表);换用户时上一位的挂单 / 持仓 / 成交一律清空。
@@ -338,7 +352,7 @@ function becomeReady(me: NonNullable<Me>, positions: PositionsResponse | null, o
     me: { ...me, cashBalance: balance.cashBalance, lockedCash: balance.lockedCash },
     balance,
     openOrders: orders ? openOrdersFrom(orders, prevOrders) : prevOrders,
-    positions: positions ? new Map(positions.positions.map((p) => [p.assetId, p])) : sameUser ? prev.positions : EMPTY_POSITIONS,
+    positions: positions ? positionsFrom(positions) : sameUser ? prev.positions : EMPTY_POSITIONS,
     recentFills: sameUser ? prev.recentFills : NO_FILLS,
     status: "ready",
     unverified: null,
@@ -515,7 +529,7 @@ export function retryHydrateIfUnverified(fetchJson: FetchJson = api): Promise<vo
  *   - 未确认的 anon:照旧走自愈重试(retryHydrateIfUnverified,任何路径);
  *   - 已确认的状态(ready,以及确认的 anon —— 别的标签页登录 / 登出、会话过期也要在下一次导航时反映出来),路径不以 /trade 开头:
  *     只拉 /api/auth/me(mode "me"),距上一次任何 hydrate 开始不足 NAV_REFRESH_MIN_MS、或有 hydrate 在途时不拉;
- *   - /trade 下不拉:那里 MarketProvider 的推送 / 轮询在维护余额,REST 结果可能比刚到的推送旧;
+ *   - /trade 下不拉:那里 MarketProvider(终端)或 AccountFeed(资产页 /trade/account,P2-10)的推送 / 轮询在维护余额,REST 结果可能比刚到的推送旧;
  *   - idle / loading:挂载那次还没回,不插队。
  * 票号照旧丢弃过期结果;ready 重刷不闪(status 只在 idle 时进 loading)。返回发起的 hydrate(没发起为 null)。
  */
@@ -531,7 +545,7 @@ export function refreshOnNavigation(pathname: string, fetchJson: FetchJson = api
 
 /**
  * 立即重拉 /api/auth/me(mode "me"),不节流,取代在途的 hydrate(它可能读在变化之前):
- * 旧页面改了余额之后(OTC 买入、简易交易下单、资产页撤单)、会话在旧页面上被判失效(401)时、
+ * 旧页面改了余额之后(OTC 买入、简易交易下单)、会话在旧页面或资产页上被判失效(401)时、
  * 以及 ws-client 发现 hello 的身份与本 store 不一致或 account 被拒时(经 account-bridge 的 requestAccountRefresh)。
  */
 export function refresh(fetchJson: FetchJson = api): Promise<void> {
@@ -560,7 +574,7 @@ export function loadAccountLists(fetchJson: FetchJson = api): Promise<void> | nu
       if (identity !== hydrateTicket || version !== listsVersion || now.status !== "ready" || now.me?.id !== userId) return;
       const patch: Partial<AccountState> = {
         openOrders: openOrdersFrom(orders, now.openOrders),
-        positions: new Map(positions.positions.map((p) => [p.assetId, p])),
+        positions: positionsFrom(positions),
       };
       if (now.balance === start.balance && now.me) {
         patch.balance = positions.balance;

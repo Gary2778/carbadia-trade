@@ -78,11 +78,20 @@ export async function destroySession() {
   store.delete(COOKIE_NAME);
 }
 
-export async function getCurrentUser() {
+/**
+ * 会话 cookie 里签过名的 userId,不查库(P2-13):按用户限流的接口(/api/account/overview、positions)先拿它判限流,超了直接 429,
+ * 不为一个注定被拒的请求去唯一的 SQLite 连接上查用户 —— 不退避的客户端每秒可以打几千次,查库会把机器人与下单挤在后面。
+ * 没有 cookie、签名验不过 → null。验得过不等于用户存在、也不等于不是机器人:鉴权仍以 getCurrentUser / requireUser 为准。
+ */
+export async function sessionUserId(): Promise<string | null> {
   const store = await cookies();
   const raw = store.get(COOKIE_NAME)?.value;
   if (!raw) return null;
-  const userId = unsign(raw);
+  return unsign(raw);
+}
+
+export async function getCurrentUser() {
+  const userId = await sessionUserId();
   if (!userId) return null;
   const user = await prisma.user.findUnique({ where: { id: userId } });
   // 做市机器人不是会话主体:签名验得过也不认,已经发出去的机器人 cookie 随之失效;requireUser 于是对它抛 AuthError(REST 一律 401)。

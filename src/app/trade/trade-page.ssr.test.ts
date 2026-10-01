@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderToStaticMarkup as renderMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Instrument, InstrumentListItem, Ticker } from "@/shared";
 import { generateMetadata } from "@/app/trade/[symbol]/layout";
+import TradeLayout from "@/app/trade/layout";
 import TradePage from "@/app/trade/[symbol]/page";
 import { connectionBadgeKind, lastMessageTime } from "@/components/terminal/ConnectionBadge";
 import { INSTRUMENT_SEARCH_ID } from "@/components/terminal/InstrumentFilters";
@@ -84,6 +85,10 @@ const SCENARIOS = [
 const INITIAL: InstrumentListItem[] = [...INSTRUMENT_SEEDS.map((s, i) => item(s, i)), ...SCENARIOS.map((s, i) => item(s, 20 + i, true))];
 const byName = (symbol: string) => INITIAL.find((x) => x.instrument.symbol === symbol)!;
 
+// /trade 下的页面都渲染在共用布局 src/app/trade/layout.tsx 之内,终端文案由它登记(P2-01:terminal 命名空间不在根 LangProvider 里)。
+// 这里走真实的布局组件,而不是测试替身:布局一旦不再登记文案,下面所有用例都会抛错。
+const renderToStaticMarkup = (page: React.ReactNode) => renderMarkup(createElement(TradeLayout, null, page));
+
 const render = (props: Partial<Parameters<typeof TerminalShell>[0]> = {}) =>
   renderToStaticMarkup(createElement(TerminalShell, { symbol: "VCS-FOR-2021", initialInstruments: INITIAL, ...props }));
 const symbolsIn = (html: string) => new Set(html.match(SYMBOL_RE));
@@ -148,9 +153,10 @@ describe("TerminalShell server render", () => {
     // 碳元数据:来自 initial 的 instrument(方法学 / 核证状态为 null → 未提供)
     expect(html).toContain('data-meta="methodology"');
     expect(html).toContain(`>${en.terminal.meta.notProvided}<`);
-    // 底部四个 Tab(另有手机页签条的三个,见下一条用例)
+    // 底部五个 Tab(P2-07 加「流水」;另有手机页签条的三个,见下一条用例)
     const bottomTabs = html.slice(html.indexOf('data-area="tabs"'));
-    expect(count(bottomTabs, 'role="tab"')).toBe(4);
+    expect(count(bottomTabs, 'role="tab"')).toBe(5);
+    expect(bottomTabs).toContain(`>${en.terminal.ledger.tab}</button>`);
     // 头部的同项目 vintage chip(测试数据的 projectId 按 standard 分组:VCS 的其它标的都是兄弟)
     expect(html).toContain("data-vintage-selector");
     expect(html).toContain('data-symbol="VCS-FOR-2022" aria-label="VCS-FOR-2022"');

@@ -94,13 +94,13 @@ export default function AccountPage() {
               </p>
               <div className="ex-actions mb-5">
                 <Link
-                  href="/register?returnTo=%2Fportfolio"
+                  href="/register?returnTo=%2Ftrade%2Faccount"
                   className="ex-button primary"
                 >
                   {c("Create account", "建立账户")}
                 </Link>
                 <Link
-                  href="/login?returnTo=%2Fportfolio"
+                  href="/login?returnTo=%2Ftrade%2Faccount"
                   className="ex-button"
                 >
                   {c("Sign in", "登录")}

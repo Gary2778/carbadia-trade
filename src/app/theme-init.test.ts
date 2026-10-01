@@ -97,7 +97,7 @@ describe("THEME_INIT (inline script in layout.tsx) with two looks", () => {
   });
 
   it("paints exactly what ThemeProvider derives after mounting (readAppearance), so there is no flash and no hydration mismatch, and never a third-look attribute", () => {
-    for (const pathname of ["/", "/trade", "/trade/VCS-FOR-2021", "/market/VCS-FOR-2021", "/portfolio"]) {
+    for (const pathname of ["/", "/trade", "/trade/VCS-FOR-2021", "/trade/account", "/market/VCS-FOR-2021", "/orders"]) {
       for (const theme of [null, "light", "dark", "sepia"]) {
         for (const legacy of [null, "1"]) {
           for (const upDown of [null, "green-up", "red-up", "RED-UP"]) {

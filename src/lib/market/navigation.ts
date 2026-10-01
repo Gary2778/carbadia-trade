@@ -144,3 +144,16 @@ export function readSideFromUrl(params: QueryInput): Side | undefined {
   const side = paramOf(params, "side")?.trim().toUpperCase();
   return side === "BUY" || side === "SELL" ? side : undefined;
 }
+
+/**
+ * 旧标的页 /market/<symbol> 的请求要不要交给终端(计划 §3.1 末段、§9.1 第 23 条;page.tsx 在服务端渲染之前跳转,P2-08):
+ *   - tab=trade 且 mode=advanced → /trade/<symbol>?side=<side>,不查标的;
+ *   - tab=trade 的情景标的(配额 / 指数情景,只在终端交易)→ 同上;isScenario 由调用方给(查库),只在前一条不成立时才调;
+ *   - 其余(总览、普通标的的简易交易)→ null,留在旧页面。
+ * side 与旧页面同一读法:只有恰好是 SELL 才算卖出,缺省与别的值都是买入 —— 跳过去的 URL 总带 side,终端在手机上直接落在下单页签。
+ */
+export async function marketTerminalRedirect(symbol: string, params: QueryInput, isScenario: (symbol: string) => Promise<boolean>): Promise<string | null> {
+  if (paramOf(params, "tab") !== "trade") return null;
+  if (paramOf(params, "mode") !== "advanced" && !(await isScenario(symbol))) return null;
+  return terminalHref(symbol, `side=${paramOf(params, "side") === "SELL" ? "SELL" : "BUY"}`);
+}

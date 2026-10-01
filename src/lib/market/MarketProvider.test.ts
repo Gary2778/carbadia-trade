@@ -88,7 +88,7 @@ const instrumentsResp: InstrumentsResponse = {
 };
 const balance: Balance = { cashBalance: 1000, lockedCash: 0 };
 const order = (id: string): Order => ({ id, clientOrderId: null, assetId: "a1", symbol: SYM, side: "BUY", type: "LIMIT", price: 1200, quantity: 5, filledQuantity: 0, status: "OPEN", avgFillPrice: null, cancelReason: null, createdAt: 1, updatedAt: 1 });
-const position = (assetId: string): Position => ({ assetId, symbol: SYM, quantity: 3, locked: 0, available: 3, retired: 0, lastPrice: 1234, marketValue: 3702, averagePurchasePrice: null, unrealisedPnl: null, costBasisStatus: "incomplete_ledger", isScenario: false });
+const position = (assetId: string): Position => ({ assetId, symbol: SYM, quantity: 3, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 3, retired: 0, lastPrice: 1234, marketValue: 3702, averagePurchasePrice: null, unrealisedPnl: null, costBasisStatus: "incomplete_ledger", isScenario: false });
 const positionsResp: PositionsResponse = { positions: [position("a1")], balance };
 const ordersResp: AccountOrdersResponse = { orders: [order("o1")], nextCursor: null };
 const me: Me = { id: "u1", email: "u@x", name: "u", cashBalance: 1000, lockedCash: 0 };

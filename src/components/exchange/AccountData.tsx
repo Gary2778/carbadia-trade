@@ -1,110 +1,13 @@
 "use client";
+// 旧页面(/orders、/transactions、/account)共用的登录入口与演示账户按钮。原来的 usePortfolio(轮询 /api/portfolio)随旧 /portfolio、
+// /dashboard 一起删了(P2-10:资产页 /trade/account 取代它们,数据走 /api/account/overview 与账户 store);默认回跳也改成新页。
 import Link from "next/link";
-import { useCallback, useRef, useState } from "react";
-import { api, ApiError } from "@/lib/http/client";
-import { usePolling } from "@/hooks/usePolling";
-import { accountActions, useAccountStore } from "@/lib/market/account-store";
+import { useState } from "react";
+import { api } from "@/lib/http/client";
 import { ExchangeIcon } from "./ExchangeIcon";
 import { useExchangeText } from "./useExchange";
-export type Position = {
-  assetId: string;
-  symbol: string;
-  name: string;
-  registry: string;
-  standard: string;
-  vintage: number;
-  country: string;
-  projectType: string;
-  isScenario: boolean;
-  quantity: number;
-  locked: number;
-  available: number;
-  lastPrice: number | null;
-  marketValue: number;
-  costBasis: number | null;
-  averagePurchasePrice: number | null;
-  unrealisedPnl: number | null;
-  costBasisComplete: boolean;
-  valuationComplete: boolean;
-};
-export type AccountPortfolio = {
-  cashBalance: number;
-  lockedCash: number;
-  holdingsValue: number;
-  totalAssets: number;
-  heldCredits: number;
-  retiredCredits: number;
-  unrealisedPnl: number | null;
-  valuationComplete: boolean;
-  change24h: null;
-  positions: Position[];
-  openOrders: {
-    id: string;
-    side: string;
-    type: string;
-    price: number | null;
-    quantity: number;
-    filledQuantity: number;
-    status: string;
-    asset: { symbol: string; name: string };
-  }[];
-  trades: {
-    id: string;
-    direction: string;
-    quantity: number;
-    price: number;
-    createdAt: string;
-    asset: { symbol: string; name: string };
-  }[];
-  otcListings: {
-    id: string;
-    quantity: number;
-    pricePerUnit: number;
-    asset: { symbol: string; name: string };
-  }[];
-};
-export function usePortfolio() {
-  const [data, setData] = useState<AccountPortfolio | null>(null);
-  const [error, setError] = useState("");
-  const [unauthorized, setUnauthorized] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-  const ticket = useRef(0);
-  // 会话在这页上失效(撤单等写操作回 401):除了本页改画登录入口,也让共享的账户 store 重新确认身份,Nav 同时变成未登录
-  const expireSession = useCallback(() => {
-    ticket.current += 1;
-    setData(null);
-    setUnauthorized(true);
-    setLoaded(true);
-    void accountActions.refresh();
-  }, []);
-  const reload = useCallback(async () => {
-    const request = ++ticket.current;
-    try {
-      const result = await api<AccountPortfolio>("/api/portfolio");
-      if (request !== ticket.current) return;
-      setData(result);
-      setError("");
-      setUnauthorized(false);
-    } catch (e) {
-      if (request === ticket.current) {
-        setError((e as Error).message);
-        if (e instanceof ApiError && e.status === 401) {
-          setData(null);
-          setUnauthorized(true);
-          // 轮询发现会话已失效:Nav 还显示着名字与现金的话,让共享的账户 store 重新确认(已是未登录时不必再拉)
-          if (useAccountStore.getState().status === "ready") void accountActions.refresh();
-        }
-      }
-      throw e;
-    } finally {
-      if (request === ticket.current) setLoaded(true);
-    }
-  }, []);
-  usePolling(reload, 7000);
-  return { data, error, unauthorized, loaded, reload, expireSession };
-}
 export function DemoButton({
-  returnTo = "/portfolio",
+  returnTo = "/trade/account",
 }: {
   returnTo?: string;
 }) {
@@ -144,7 +47,7 @@ export function AccountGate({
   loading,
   unauthorized,
   retry,
-  returnTo = "/portfolio",
+  returnTo = "/trade/account",
 }: {
   error: string;
   loading: boolean;

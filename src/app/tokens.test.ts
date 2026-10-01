@@ -349,7 +349,7 @@ describe("error states no longer borrow the direction colours (§4.1.2)", () => 
   it("leaves no error line on a down colour in the files this pass migrated", () => {
     for (const name of [
       "app/login/page.tsx", "app/register/page.tsx", "app/feedback/page.tsx", "app/otc/page.tsx", "app/retirement/page.tsx",
-      "app/market/[symbol]/page.tsx", "components/exchange/PortfolioViews.tsx",
+      "app/market/[symbol]/MarketContent.tsx",
     ]) {
       expect(downErrorLines(readFileSync(join(SRC, name), "utf8")), name).toEqual([]);
     }
@@ -365,7 +365,8 @@ describe("error states no longer borrow the direction colours (§4.1.2)", () => 
 
   it("hovers cancel controls to --danger instead of the direction colour", () => {
     // 撤单 / 撤挂单是破坏性动作,不是卖出
-    for (const name of ["app/otc/page.tsx", "app/market/[symbol]/page.tsx", "components/exchange/PortfolioViews.tsx"]) {
+    // 旧 /portfolio 的撤单 / 撤牌按钮随页面删掉了(P2-10);资产页的撤牌按钮同样悬停到 --danger
+    for (const name of ["app/otc/page.tsx", "app/market/[symbol]/MarketContent.tsx", "components/account/OtcListings.tsx"]) {
       expect(readFileSync(join(SRC, name), "utf8"), name).not.toMatch(/hover:text-down/);
     }
   });

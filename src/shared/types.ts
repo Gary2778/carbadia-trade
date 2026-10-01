@@ -109,12 +109,23 @@ export type Fill = {
 };
 export type LedgerLineView = { id: string; account: string; delta: number; reason: string; createdAt: number };
 export type CostBasisStatus = "complete" | "unknown_acquisition_cost" | "incomplete_ledger";
-/** available = 可交易(tradable),locked = 挂单锁定,retired = 已注销(Retirement 按 assetId 聚合) */
+/**
+ * 持仓一行(计划 §6.2.2 C1;REST、WS 快照、WS 事件、客户端 store 四处同一口径)。
+ * available = 可交易(tradable)= quantity − locked;locked = Holding.locked(挂单与场外挂牌合计冻结);
+ * retired = 已注销(Retirement 按 assetId 聚合)。整仓注销的行(quantity 0、retired > 0)也是持仓载荷的一部分;
+ * 卖光且从没注销过的行(quantity 0、retired 0)只在事件里出现,用来让客户端清掉这一行。
+ */
 export type Position = {
   assetId: string;
   symbol: string;
   quantity: number;
   locked: number;
+  /**
+   * locked 的来源拆分,直接读表(不回放账本):orders = 本人在该标的上未完结(OPEN / PARTIAL)SELL 挂单的剩余数量之和,
+   * otc = 本人在该标的上 ACTIVE 的场外挂牌数量之和。orders + otc 应等于 locked;不等时以 locked 为准
+   *(可交易数量按 locked 算,这里照实给出读到的值,服务端记一行日志)。
+   */
+  lockedBy: { orders: number; otc: number };
   available: number;
   retired: number;
   lastPrice: number | null;

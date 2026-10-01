@@ -8,7 +8,8 @@ import { Skeleton } from "./Skeleton";
 import { DEFAULT_OVERSCAN, DEFAULT_ROW_HEIGHT, VirtualList } from "./VirtualList";
 
 // §9.1 第 7 条:不引 jsdom,组件只做 renderToStaticMarkup 的服务端标记测试;交互靠内置浏览器手工验收。
-// 没有 LangProvider 时 useT 落到默认英文,断言按 en.ts 的 ui / terminal.a11y 文案写。
+// 没有 LangProvider 时 useT 落到默认英文,断言按核心文案的 ui 命名空间写。这里故意不包 TerminalMessagesProvider:
+// ui/ 基础件在 /trade 之外也用(P2-01),一旦哪个又去读 useT("terminal"),这些用例会直接抛错。
 
 const count = (html: string, needle: string) => html.split(needle).length - 1;
 // children 按 createElement 的位置参数传(react/no-children-prop),类型上从 props 里去掉
@@ -128,6 +129,37 @@ describe("VirtualList", () => {
     expect(html).toContain('data-row="0"');
     expect(count(html, "data-index=")).toBeGreaterThanOrEqual(1);
     expect(count(html, "data-index=")).toBeLessThan(items.length);
+  });
+
+  it("header (P2-12): a sticky row inside the scroll container above the rows, header and track at the minimum width; without it the markup is unchanged", () => {
+    const header = createElement("div", { "data-head": "" }, "Head");
+    const html = renderToStaticMarkup(createElement(VirtualList<{ symbol: string }>, { items, label: "x", renderRow, getKey, header, minWidth: "40rem" }));
+    const region = html.slice(html.indexOf('role="region"'));
+    expect(region).toContain('<div class="sticky top-0 z-(--z-sticky)" style="min-width:40rem"><div data-head="">Head</div></div><div class="relative w-full" style="height:calc(var(--spacing-row) * 100);min-width:40rem">');
+    expect(html).toContain('data-row="0"');
+    // 空列表:表头照样在,空状态在它下面
+    const empty = renderToStaticMarkup(createElement(VirtualList<{ symbol: string }>, { items: [], label: "x", renderRow, getKey, header }));
+    expect(empty.indexOf("data-head")).toBeGreaterThan(-1);
+    expect(empty.indexOf("data-head")).toBeLessThan(empty.indexOf("Nothing here yet"));
+    const plain = renderToStaticMarkup(createElement(VirtualList<{ symbol: string }>, { items, label: "x", renderRow, getKey }));
+    expect(plain).not.toContain("sticky");
+    expect(plain).not.toContain("min-width");
+    expect(plain).toContain('<div class="relative w-full" style="height:calc(var(--spacing-row) * 100)">');
+  });
+
+  // P2-12 收尾:贴顶表头的 z-index 不能漏到页面的层叠上下文里 —— 否则页面滚动时,它和同为 --z-sticky、DOM 在前的终端头部比,
+  // 画在头部上面、还截走头部的点击。有表头时 region 自己是层叠上下文(isolate);没有表头时 class 与原来逐字节一致
+  it("header: the scroll region isolates its own stacking context, so the sticky header never paints over sticky page chrome; without a header the class is unchanged", () => {
+    const regionClass = (html: string) => (/role="region"[^>]*class="([^"]*)"/.exec(html)?.[1] ?? "").split(" ");
+    const header = createElement("div", { "data-head": "" }, "Head");
+    for (const list of [items, []]) {
+      const html = renderToStaticMarkup(createElement(VirtualList<{ symbol: string }>, { items: list, label: "x", renderRow, getKey, header, className: "min-h-0 flex-1" }));
+      expect(regionClass(html)).toEqual(expect.arrayContaining(["relative", "overflow-auto", "isolate", "min-h-0", "flex-1"]));
+      // 表头仍在 region 里面(隔离的正是它)
+      expect(html.indexOf("data-head")).toBeGreaterThan(html.indexOf('role="region"'));
+    }
+    const plain = renderToStaticMarkup(createElement(VirtualList<{ symbol: string }>, { items, label: "x", renderRow, getKey, className: "min-h-0 flex-1" }));
+    expect(regionClass(plain).join(" ")).toBe("relative overflow-auto tabular-nums focus-visible:outline-none focus-visible:shadow-focus min-h-0 flex-1");
   });
 });
 

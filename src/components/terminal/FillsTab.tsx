@@ -10,6 +10,7 @@ import { api } from "@/lib/http/client";
 import { useAccountStore } from "@/lib/market/account-store";
 import { onSignOut, useRefreshOnAccountChange } from "@/lib/market/account-refresh";
 import { createUserQueryCache, mergeNewest, usePagedSnapshot, type Page } from "@/lib/market/paged-query";
+import { ExportCsvBar, FILLS_CSV_HREF } from "./ExportCsvLink";
 import { CELL_END, CELL_START, fmtCents, fmtQuantity, fmtRowPrice, fmtTs, numberLocale, ROW_CLASS, sideTone, TabTable, usePricePrecisions, type Columns } from "./TabTable";
 
 // 成交详情对话框只在点开时加载(计划 §3.1、§3.6:next/dynamic({ ssr: false }),loading 统一 Skeleton)
@@ -35,6 +36,9 @@ export function fillsPageUrl(cursor: string | null): string {
   if (cursor) params.set("cursor", cursor);
   return `/api/account/fills?${params.toString()}`;
 }
+
+/** CSV 导出(计划 §6.2.2 C5):本页签没有筛选,导出本人全部成交;定义在 ExportCsvLink(BottomTabs 也要用) */
+export { FILLS_CSV_HREF };
 
 async function fetchFillsPage(cursor: string | null): Promise<Page<Fill>> {
   const data = await api<FillsResponse>(fillsPageUrl(cursor));
@@ -128,6 +132,7 @@ export function FillsTab() {
 
   return (
     <>
+      <ExportCsvBar href={FILLS_CSV_HREF} />
       <TabTable<Fill>
         columns={COLUMNS}
         headers={[

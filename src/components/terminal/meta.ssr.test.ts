@@ -23,11 +23,13 @@ import { VintageSelector } from "./VintageSelector";
 const i18n = vi.hoisted(() => ({ lang: "en" as Lang }));
 vi.mock("@/i18n/LangProvider", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/i18n/LangProvider")>();
-  const { MESSAGES } = await import("@/i18n");
+  // 完整文案(核心 + terminal)直接取合并对象:useT 整个被换掉,不经 TerminalMessagesProvider(P2-01 起 @/i18n 的 MESSAGES 只有核心命名空间)。
+  // 不能在这个工厂里引入 @/i18n/test-support:它经 TerminalMessages 又引入正在被替换的 LangProvider,会互相等待
+  const ALL = { en: (await import("@/i18n/messages/en")).default, "zh-CN": (await import("@/i18n/messages/zh-CN")).default };
   return {
     ...actual,
     useLang: () => ({ lang: i18n.lang, setLang: () => {} }),
-    useT: (ns: keyof typeof MESSAGES.en) => MESSAGES[i18n.lang][ns],
+    useT: (ns: keyof typeof ALL.en) => ALL[i18n.lang][ns],
   };
 });
 
@@ -115,7 +117,7 @@ describe("CarbonMetaPanel", () => {
     expect(html).toMatch(/data-meta="vintage".*?<dd[^>]*><span class="tnum">2021<\/span><\/dd>/);
     expect(html).not.toContain("href=");
     expect(html).not.toContain("data-simulated");
-    expect(html).not.toContain(en.terminal.meta.simulatedUnverified);
+    expect(html).not.toContain(en.ui.simulatedUnverified);
     expect(html).not.toContain("data-scenario");
   });
 
@@ -127,7 +129,7 @@ describe("CarbonMetaPanel", () => {
   it("marks SIMULATED_UNVERIFIED as simulated instead of printing a verification claim", () => {
     const html = renderMeta({ ...ALL_NULL, verificationStatus: "SIMULATED_UNVERIFIED" });
     expect(count(html, `>${en.terminal.meta.notProvided}<`)).toBe(4);
-    expect(html).toMatch(new RegExp(`data-simulated=""[^>]*>${en.terminal.meta.simulatedUnverified}<`));
+    expect(html).toMatch(new RegExp(`data-simulated=""[^>]*>${en.ui.simulatedUnverified}<`));
     expect(html).not.toMatch(/\bverified\b/i); // 只有 "unverified",没有单独的 verified 声明
   });
 

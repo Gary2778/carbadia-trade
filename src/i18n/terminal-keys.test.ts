@@ -8,7 +8,7 @@ import en from "./messages/en";
 // 文案引用都必须能在 en 上解析,解析不到即失败——后续波次的组件引用了不存在的键,不用等运行时就能发现。
 // 支持的写法:const t = useT("terminal") 后的 t.a.b、t.a["1m"]、t("a.b");以及内联的 useT("ui").retry。
 // 动态索引(t.tabs.status[status])只解析到静态前缀;叶子(字符串 / 函数)之后的段(.length、.toUpperCase)忽略。
-// 波次 ① 目录尚不存在时扫描结果为空,测试空通过。
+// 键按合并后的完整对象(./messages/en = 核心 + terminal)解析;P2-01 起另有一条断言给 terminal 引用数设下限,扫描不会空转。
 //
 // 扫描器是正则 + 轻量词法,不是完整解析器,边界如下(消费方须知):
 // - 注释按词法剥掉;字符串 / 模板 / 正则字面量里的 `//` `/*` 不当注释。正则字面量只按前一个记号判断
@@ -22,7 +22,8 @@ import en from "./messages/en";
 
 const SRC_DIR = fileURLToPath(new URL("../", import.meta.url));
 // §4.8 列出前三处;任务记录另加 src/lib/market(hooks / toast 文案也可能在这里取)
-const SCAN_ROOTS = ["components/terminal", "components/ui", "components/Nav.tsx", "lib/market"];
+// Phase 2:资产页与注销对话框(components/account、app/trade)也读 terminal.*;资产页另读 account(P2-10);目录还不存在时 listSourceFiles 返回空
+const SCAN_ROOTS = ["components/terminal", "components/ui", "components/Nav.tsx", "lib/market", "components/account", "app/trade"];
 const SOURCE_EXT = /\.(ts|tsx)$/;
 const TEST_FILE = /\.(test|spec)\.(ts|tsx)$/;
 
@@ -410,11 +411,45 @@ describe("terminal-keys scanner", () => {
 
 // ------------------------------------------------------------------ 真实扫描
 describe("terminal i18n keys used in src resolve in en", () => {
-  it("every useT-derived key reference under the scanned roots exists in en (empty roots pass)", () => {
+  it("every useT-derived key reference under the scanned roots exists in en", () => {
     const { files, refs, failures } = scanTree();
-    // Nav.tsx 已存在(nav 命名空间);终端目录在后续波次出现。扫描不是空跑:Nav 的 t.menu 确实被收集
+    // Nav 的 t.menu 确实被收集(nav 命名空间);terminal 命名空间的下限在下一条
     expect(files).toContain("components/Nav.tsx");
     expect(refs.some((r) => r.file === "components/Nav.tsx" && r.path.join(".") === "nav.menu")).toBe(true);
     expect(failures.map(format)).toEqual([]);
+  });
+
+  // P2-01:终端文案拆出核心包之后,这里再钉一条「扫描没有空转」。useT 改名、取词改成扫描器不认的写法、或扫描根挪了位置,
+  // 引用数都会掉到 0 而上一条照样通过;所以给 terminal 命名空间的引用数、涉及的文件数与分组数各设一个下限
+  // (写这条时实测 287 条引用、35 个文件、13 个分组;后续任务只会往上加)。
+  it("actually finds the terminal references: counts stay above a floor, so a rename cannot leave the scan running on nothing", () => {
+    const { refs } = scanTree();
+    const terminalRefs = refs.filter((r) => r.path[0] === "terminal");
+    expect(terminalRefs.length).toBeGreaterThan(200);
+    expect(new Set(terminalRefs.map((r) => r.file)).size).toBeGreaterThanOrEqual(25);
+    expect(new Set(terminalRefs.map((r) => r.path[1])).size).toBeGreaterThanOrEqual(12);
+    // 终端之外也用的四条文案已挪进核心命名空间(nav / ui),消费方的引用同样被扫到并解析
+    const seen = new Set(refs.map((r) => `${r.file} ${r.path.join(".")}`));
+    for (const ref of [
+      "components/terminal/DemoBadge.tsx nav.demoTooltip",
+      "components/ui/Dialog.tsx ui.dialogClose",
+      "components/ui/VirtualList.tsx ui.listHint",
+      "components/terminal/CarbonMetaPanel.tsx ui.simulatedUnverified",
+    ]) {
+      expect(seen.has(ref), ref).toBe(true);
+    }
+  });
+
+  // P2-10:资产页的文案自成 account 命名空间(src/i18n/messages/account/*),组件照样写 const a = useT("account") 后 a.x.y;
+  // 扫描按命名空间在合并对象上解析,这里钉住「确实扫到了、而且不少」,免得取词写法变了扫描空转(写这条时实测约 60 条、6 个文件)
+  it("finds the portfolio page's account references too (components/account), not zero", () => {
+    const { refs } = scanTree();
+    const accountRefs = refs.filter((r) => r.path[0] === "account");
+    expect(accountRefs.length).toBeGreaterThan(40);
+    expect(new Set(accountRefs.map((r) => r.file)).size).toBeGreaterThanOrEqual(5);
+    expect(accountRefs.every((r) => r.file.startsWith("components/account/"))).toBe(true);
+    // 同一批文件里复用的终端文案(与终端持仓页签同义的列名、按钮)也被扫到并解析
+    const reused = new Set(refs.filter((r) => r.file.startsWith("components/account/") && r.path[0] === "terminal").map((r) => r.path.join(".")));
+    for (const key of ["terminal.retire.lockedBy", "terminal.tabs.retire", "terminal.order.sell", "terminal.tabs.colPnl"]) expect(reused.has(key), key).toBe(true);
   });
 });

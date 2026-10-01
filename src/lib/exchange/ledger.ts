@@ -9,7 +9,7 @@ export interface LedgerLine {
   delta: number; // 分(CASH*)或 吨(HOLDING*)
   reason: string;
   assetId?: string;
-  refType?: "ORDER" | "TRADE" | "LISTING" | "DEAL";
+  refType?: "ORDER" | "TRADE" | "LISTING" | "DEAL" | "RETIREMENT"; // RETIREMENT:refId = Retirement.id(计划 §6.2.2 C3)
   refId?: string;
 }
 

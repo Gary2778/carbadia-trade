@@ -230,7 +230,7 @@ export function SimpleTrade({
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
           <Link
-            href="/portfolio"
+            href="/trade/account"
             className="rounded-full bg-accent px-4 py-2.5 text-sm font-semibold text-background"
           >
             {zh ? "查看投资组合" : "View portfolio"}

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createElement, type ReactElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderToStaticMarkup } from "@/i18n/test-support"; // = react-dom/server 的同名函数 + /trade 布局登记终端文案的那层 Provider(P2-01)
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { shallow } from "zustand/shallow";
 import { FILL_DISCLOSURE, type Fill, type FillDetailResponse, type Instrument, type Order, type Position } from "@/shared";
@@ -9,13 +9,27 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import en from "@/i18n/messages/en";
 import { createInitialAccountState, useAccountStore } from "@/lib/market/account-store";
 import { createInitialState, marketActions, useMarketStore } from "@/lib/market/store";
-import { BOTTOM_TABS, BottomTabs, nextTab } from "./BottomTabs";
+import { BOTTOM_TABS, BottomTabs, nextTab, stripExportHref } from "./BottomTabs";
+import { ExportCsvLink, STRIP_ITEM_BOX, STRIP_RULE } from "./ExportCsvLink";
 import { MobileTabs } from "./MobileTabs";
-import { FillDetailView, fillPrecisionSelector, fmtLedgerDelta, fillDetailUrl } from "./FillDetailDialog";
-import { FillRow, FillsTab, fillsPageUrl, fillsQueries, newestFillFirst } from "./FillsTab";
+import { FillDetailView, fillPrecisionSelector, fillDetailUrl } from "./FillDetailDialog";
+import { FILLS_CSV_HREF, FillRow, FillsTab, fillsPageUrl, fillsQueries, newestFillFirst } from "./FillsTab";
 import { armedEscapeAction, cancelOrderRequest, liveArmedId, OpenOrderRow, OpenOrdersView, reconcileArmed } from "./OpenOrdersTab";
-import { HistoryRow, cancelReasonText, historyPageUrl, historyQueries, newestOrderFirst } from "./OrderHistoryTab";
-import { handlePositionSell, PositionsView, retirementHref, vintagesOf } from "./PositionsTab";
+import { HISTORY_CSV_HREF, HistoryRow, OrderHistoryTab, cancelReasonText, historyPageUrl, historyQueries, newestOrderFirst } from "./OrderHistoryTab";
+import { groupPositions, positionMetaOf } from "@/lib/market/position-groups";
+import {
+  focusPositionsRegion,
+  handlePositionSell,
+  PositionGroupRow,
+  positionRows,
+  PositionsTab,
+  PositionsView,
+  reconcileRetireRequest,
+  RetiredGroupRow,
+  RETIREMENT_HISTORY_HREF,
+  type PositionsViewProps,
+  type RetireRequest,
+} from "./PositionsTab";
 import { appendDescribedBy, pricePrecisionsOf, TabTable, type TabTableProps } from "./TabTable";
 
 // 底部四个 Tab 的服务端标记测试(计划 §9.1 第 7 条:node 环境,不引 jsdom;交互靠内置浏览器手工验收)。
@@ -32,6 +46,60 @@ const T = en.terminal;
 const count = (html: string, needle: string) => html.split(needle).length - 1;
 /** renderToStaticMarkup 的转义(& 与 ")*/
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+
+/**
+ * terminal.css 里持仓贴边列(.t-pin*)的规则,按「断点块外」与「贴边所在的断点块」分开读(去掉注释,按花括号配对分块)。
+ * base / wide 返回某个选择器(省略 `[data-terminal] ` 前缀)的声明表;找不到时断言失败。
+ */
+function pinRules() {
+  const css = readFileSync(fileURLToPath(new URL("../../app/terminal.css", import.meta.url)), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const blocks = (src: string) => {
+    const out: { prelude: string; body: string }[] = [];
+    let depth = 0;
+    let start = 0;
+    let open = 0;
+    for (let i = 0; i < src.length; i++) {
+      if (src[i] === "{") {
+        if (depth === 0) open = i;
+        depth++;
+      } else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          out.push({ prelude: src.slice(start, open).trim(), body: src.slice(open + 1, i) });
+          start = i + 1;
+        }
+      }
+    }
+    return out;
+  };
+  // 每条声明按第一个冒号切成「属性: 值」(值里可能还有冒号)
+  const decls = (body: string) =>
+    Object.fromEntries(
+      body
+        .split(";")
+        .filter((d) => d.includes(":"))
+        .map((d) => [d.slice(0, d.indexOf(":")).trim(), d.slice(d.indexOf(":") + 1).trim()]),
+    );
+  const top = blocks(css);
+  const pinSelector = /^\[data-terminal\] \.t-pin/;
+  const baseRules = top.filter((b) => pinSelector.test(b.prelude));
+  const wideBlocks = top.filter((b) => b.prelude.startsWith("@media") && /\.t-pin\b/.test(b.body));
+  expect(wideBlocks, "exactly one breakpoint block holds the pin rules").toHaveLength(1);
+  const wideRules = blocks(wideBlocks[0].body);
+  const pick = (rules: { prelude: string; body: string }[], selector: string) => {
+    const rule = rules.find((r) => r.prelude === `[data-terminal] ${selector}`);
+    expect(rule, selector).toBeDefined();
+    return decls(rule!.body);
+  };
+  const isStickyPin = (r: { prelude: string; body: string }) => /\.t-pin/.test(r.prelude) && /position:\s*sticky/.test(r.body);
+  return {
+    base: (selector: string) => pick(baseRules, selector),
+    wide: (selector: string) => pick(wideRules, selector),
+    baseSelectors: baseRules.map((r) => r.prelude.replace("[data-terminal] ", "")),
+    widePrelude: wideBlocks[0].prelude,
+    stickyCount: [...baseRules, ...top.filter((b) => b.prelude.startsWith("@")).flatMap((b) => blocks(b.body))].filter(isStickyPin).length,
+  };
+}
 
 function instrument(symbol: string, vintage: number, isScenario = false): Instrument {
   return {
@@ -61,7 +129,6 @@ const INSTRUMENTS: Record<string, Instrument> = {
   "CEA-SCEN-2026": instrument("CEA-SCEN-2026", 2026, true),
 };
 const PRECISIONS = pricePrecisionsOf(INSTRUMENTS);
-const VINTAGES = vintagesOf(INSTRUMENTS);
 
 function position(symbol: string, patch: Partial<Position> = {}): Position {
   return {
@@ -69,6 +136,7 @@ function position(symbol: string, patch: Partial<Position> = {}): Position {
     symbol,
     quantity: 120,
     locked: 20,
+    lockedBy: { orders: 20, otc: 0 },
     available: 100,
     retired: 5,
     lastPrice: 6900,
@@ -125,29 +193,170 @@ beforeEach(() => {
 });
 
 describe("PositionsTab (PositionsView)", () => {
+  // VCS-FOR 两个年份同属一个项目;GS-WIND-2022 没有项目编号(按标的单独成组);情景标的自成一组;GS-WIND-2023 已整仓注销
+  const META = positionMetaOf({
+    "VCS-FOR-2021": { ...instrument("VCS-FOR-2021", 2021), projectId: "SIM-PRJ-VCS-FOR", projectType: "林业碳汇", country: "中国" },
+    "VCS-FOR-2023": { ...instrument("VCS-FOR-2023", 2023), projectId: "SIM-PRJ-VCS-FOR", projectType: "林业碳汇", country: "中国" },
+    "GS-WIND-2022": { ...instrument("GS-WIND-2022", 2022), standard: "GS", projectType: "可再生能源", country: "印度" },
+    "GS-WIND-2023": { ...instrument("GS-WIND-2023", 2023), standard: "GS" },
+    "CEA-SCEN-2026": instrument("CEA-SCEN-2026", 2026, true),
+  });
+  const unlocked = { locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 120 };
   const positions = [
-    position("VCS-FOR-2021"),
-    position("GS-WIND-2022", { costBasisStatus: "unknown_acquisition_cost", unrealisedPnl: 999, averagePurchasePrice: null }),
-    position("CEA-SCEN-2026", { isScenario: true, costBasisStatus: "incomplete_ledger", unrealisedPnl: null }),
+    position("VCS-FOR-2023", unlocked),
+    position("GS-WIND-2022", { ...unlocked, costBasisStatus: "unknown_acquisition_cost", unrealisedPnl: 999, averagePurchasePrice: null }),
+    position("VCS-FOR-2021", { lockedBy: { orders: 12, otc: 8 } }),
+    position("CEA-SCEN-2026", { ...unlocked, isScenario: true, costBasisStatus: "incomplete_ledger", unrealisedPnl: null }),
   ];
+  const retiredOut = position("GS-WIND-2023", { quantity: 0, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 0, retired: 40, marketValue: 0 });
+  const render = (patch: Partial<PositionsViewProps> = {}) =>
+    renderToStaticMarkup(createElement(PositionsView, { positions, meta: META, onSell: () => {}, onRetire: () => {}, retiredOpen: false, onToggleRetired: () => {}, ...patch }));
   const rowOf = (markup: string, assetId: string) => {
     const start = markup.indexOf(`data-asset-id="${assetId}"`);
-    const next = markup.indexOf("data-asset-id=", start + 1);
-    return markup.slice(start, next === -1 ? undefined : next);
+    const next = markup.slice(start + 1).search(/data-(?:asset-id|group|locks-for|retired-group|retired-asset-id)=/);
+    return markup.slice(start, next === -1 ? undefined : start + 1 + next);
   };
-  const html = renderToStaticMarkup(createElement(PositionsView, { positions, precisions: PRECISIONS, vintages: VINTAGES, onSell: () => {} }));
+  const html = render();
 
-  it("has the tradable / locked / retired column titles", () => {
-    for (const label of [T.tabs.tradable, T.tabs.locked, T.tabs.retired, T.tabs.colAvgCost, T.tabs.colMarketValue, T.tabs.colPnl]) {
+  it("has the vintage · symbol, tradable / locked / retired, average cost, last price, market value and P&L column titles", () => {
+    for (const label of [T.tabs.tradable, T.tabs.locked, T.tabs.retired, T.tabs.colAvgCost, T.header.lastPrice, T.tabs.colMarketValue, T.tabs.colPnl]) {
       expect(html).toContain(`>${esc(label)}</span>`);
     }
-    expect(html).toContain(`>${T.meta.vintage}</span>`);
+    expect(html).toContain(`>${T.meta.vintage} · ${T.tabs.colSymbol}</span>`);
   });
 
-  it("shows tradable = available, locked and retired as separate numbers", () => {
-    const row = html.slice(html.indexOf('data-asset-id="asset-VCS-FOR-2021"'));
+  it("fits 1440-wide bottom tabs (~798 px) without scrolling; narrower (from 48rem), the first and action columns and the group titles stay pinned (P2-12)", () => {
+    // 最小宽度 46.25rem = 740 px ≤ 1440 宽时底部页签的内容宽约 798 px:不横向滚动就看得到「卖出 / 注销」
+    expect(html).toContain("min-width:46.25rem");
+    expect(parseFloat(/min-width:([\d.]+)rem/.exec(html)?.[1] ?? "99") * 16).toBeLessThanOrEqual(798);
+    // 表头在虚拟列表的滚动容器里贴顶,横向滚动也由那个容器做(外层不再 overflow-x-auto):sticky 的格子才有参照
+    const region = html.slice(html.indexOf('role="region"'));
+    expect(region.indexOf('class="sticky top-0 z-(--z-sticky)"')).toBeGreaterThan(-1);
+    expect(region.indexOf('class="sticky top-0')).toBeLessThan(region.indexOf(`>${T.meta.vintage} · ${T.tabs.colSymbol}</span>`));
+    expect(html).not.toContain("overflow-x-auto");
+    // 表头:首格贴左、操作列贴右
+    expect(html).toContain(`<span class="truncate t-pin t-pin-start">${T.meta.vintage} · ${T.tabs.colSymbol}</span>`);
+    expect(html).toContain('<span class="truncate t-pin t-pin-end"></span>');
+    // 每一行持仓:年份 · 标的贴左,「卖出 / 注销」贴右,行带悬停叠色的标记
+    for (const assetId of ["asset-VCS-FOR-2021", "asset-VCS-FOR-2023", "asset-GS-WIND-2022", "asset-CEA-SCEN-2026"]) {
+      const row = rowOf(html, assetId);
+      expect(row, assetId).toMatch(/class="[^"]*t-pin-row[^"]*"/);
+      expect(row, assetId).toMatch(/<span class="truncate t-pin t-pin-start flex items-center gap-gap ps-panel">/);
+      expect(row, assetId).toMatch(/<span class="t-pin t-pin-end flex items-center justify-end gap-gap"><button type="button" aria-label="Sell /);
+    }
+    // 分组标题、锁定来源、「已注销」组头的文字贴左(分组标题与组头用二级面板色)
+    expect(html.match(/data-group="[^"]+" class="[^"]*"><span class="t-pin t-pin-start t-pin-alt /g)).toHaveLength(3);
+    expect(html).toMatch(/data-locks-for="asset-VCS-FOR-2021"[^>]*><span class="t-pin t-pin-start /);
+    const retired = render({ positions: [...positions, retiredOut], retiredOpen: true });
+    expect(retired).toMatch(/data-retired-group=""[^>]*><span class="t-pin t-pin-start t-pin-alt /);
+    const retiredRow = retired.slice(retired.indexOf('data-retired-asset-id="asset-GS-WIND-2023"'));
+    expect(retiredRow).toMatch(/^[^>]*class="[^"]*t-pin-row/);
+    // 「注销记录」链接比「卖出 / 注销」长:跨盈亏与操作两列、贴右
+    expect(retiredRow).toMatch(/t-pin t-pin-end col-span-2 flex items-center justify-end"><a [^>]*href="\/retirement"/);
+  });
+
+  it("pinned cells fill the whole row height, so the header's empty action cell really covers the labels scrolled under it (P2-12 fix round)", () => {
+    // 行是 items-center 的网格:格子默认只有内容那么高。表头操作列那格没有文字,不撑满的话高度是 0,底色画不出来,
+    // 「未实现盈亏」一类表头文字就露在「卖出 / 注销」上方。贴边格一律 align-self: stretch,内容 flex 竖直居中;贴右的格子内容靠右
+    const pin = pinRules();
+    expect(pin.base(".t-pin")).toMatchObject({ "align-self": "stretch", display: "flex", "align-items": "center" });
+    expect(pin.base(".t-pin-end")).toMatchObject({ "justify-content": "flex-end" });
+    expect(pin.wide(".t-pin")).toMatchObject({ position: "sticky" });
+    expect(pin.wide(".t-pin")["background"]).toMatch(/var\(--terminal-panel\)/);
+    expect(pin.wide(".t-pin-end")).toMatchObject({ "inset-inline-end": "0" });
+    expect(pin.wide(".t-pin-start")).toMatchObject({ "inset-inline-start": "0" });
+    // 表头与各行都是固定行高(h-row)的容器,贴边格撑满的就是这一整行
+    expect(html).toMatch(/<div class="grid h-row items-center [^"]*bg-\(--terminal-panel\)"[^>]*><span class="truncate t-pin t-pin-start">/);
+  });
+
+  it("phones do not pin: sticky, the opaque fill and the gap extension apply only from 48rem, so a 375-wide phone scrolls the whole table and every column can be read in full (P2-12 fix round 2)", () => {
+    // 375 宽时滚动区约 317 px;首列最窄 10.5rem(168 px)、操作列 5.5rem(88 px),两头贴住只剩约 53 px,中间七列哪一列都读不全
+    expect(/grid-template-columns:([^;"]+)/.exec(html)?.[1]).toMatch(/^minmax\(10\.5rem,[^)]*\) .* 5\.5rem$/);
+    const pin = pinRules();
+    // 断点块外:只有撑满行高、竖直居中、贴右格内容靠右这些版面规则,没有 sticky、inset、底色、z-index、伸出间隙
+    expect(pin.base(".t-pin")).toEqual({ "align-self": "stretch", display: "flex", "align-items": "center" });
+    expect(pin.base(".t-pin-end")).toEqual({ "justify-content": "flex-end" });
+    for (const selector of [".t-pin-start", ".t-pin-alt", ".t-pin-row:hover > .t-pin"]) expect(pin.baseSelectors, selector).not.toContain(selector);
+    // 贴边的全部规则只在 ≥ 48rem 的那一个断点块里(48rem 起底部页签占满整行,约 734 px)
+    expect(pin.widePrelude).toBe("@media (width >= 48rem)");
+    expect(pin.wide(".t-pin")).toEqual({ position: "sticky", "z-index": "var(--z-sticky)", background: "var(--t-pin-bg, var(--terminal-panel))" });
+    expect(pin.wide(".t-pin-alt")).toEqual({ "--t-pin-bg": "var(--terminal-panel-2)" });
+    expect(pin.wide(".t-pin-start")).toEqual({ "inset-inline-start": "0", "margin-inline-end": "calc(var(--spacing-gap) * -1)", "padding-inline-end": "var(--spacing-gap)" });
+    expect(pin.wide(".t-pin-end")).toEqual({ "inset-inline-end": "0", "margin-inline-start": "calc(var(--spacing-gap) * -1)", "padding-inline-start": "var(--spacing-gap)" });
+    expect(pin.wide(".t-pin-row:hover > .t-pin")["background"]).toMatch(/var\(--terminal-row-hover\)/);
+    // 整个样式表里 .t-pin 的 sticky 只有这一处
+    expect(pin.stickyCount).toBe(1);
+  });
+
+  it("groups by project with one row per vintage, ascending; an instrument without a project id and a scenario instrument are groups of their own", () => {
+    const order = [...html.matchAll(/data-(group|asset-id|locks-for)="([^"]+)"/g)].map((m) => `${m[1]}:${m[2]}`);
+    expect(order).toEqual([
+      "group:symbol:CEA-SCEN-2026",
+      "asset-id:asset-CEA-SCEN-2026",
+      "group:symbol:GS-WIND-2022",
+      "asset-id:asset-GS-WIND-2022",
+      "group:project:SIM-PRJ-VCS-FOR",
+      "asset-id:asset-VCS-FOR-2021",
+      "locks-for:asset-VCS-FOR-2021",
+      "asset-id:asset-VCS-FOR-2023",
+    ]);
+  });
+
+  it("heads each group with the project id (or the symbol), type, standard and country, and marks a simulated project id as such", () => {
+    const head = (key: string) => {
+      const start = html.indexOf(`data-group="${key}"`);
+      return html.slice(start, html.indexOf("</div>", start));
+    };
+    const project = head("project:SIM-PRJ-VCS-FOR");
+    expect(project).toContain(`<span class="sr-only">${T.meta.projectId}</span>`);
+    expect(project).toContain(`title="${T.meta.simulatedProjectId}"`);
+    expect(project).toContain(">SIM-PRJ-VCS-FOR</span>");
+    // 组头的文字包在一层贴左的 span 里(P2-12:横向滚动时整条标题贴左)
+    expect(project).toMatch(/· Forestry sink<\/span><span>· VCS<\/span><span>· China<\/span><\/span>$/);
+    const solo = head("symbol:GS-WIND-2022");
+    expect(solo).toContain(">GS-WIND-2022</span>");
+    expect(solo).toMatch(/· Renewable energy<\/span><span>· GS<\/span><span>· India<\/span><\/span>$/);
+    expect(solo).not.toContain(T.meta.projectId);
+    expect(solo).not.toContain("title=");
+    // 组头是标题(读屏可按标题跳组),行高与数据行一致(虚拟列表的一行)
+    expect(html.match(/role="heading" aria-level="3" data-group=/g)).toHaveLength(3);
+    expect(html.match(/data-group="[^"]+" class="flex h-row /g)).toHaveLength(3);
+  });
+
+  it("shows the vintage first, then the symbol, and tradable = available, locked and retired as separate numbers", () => {
+    const row = rowOf(html, "asset-VCS-FOR-2021");
+    expect(row).toMatch(/>2021<\/span><span class="truncate text-muted">VCS-FOR-2021<\/span>/);
     expect(row).toMatch(/>100<\/span>[\s\S]*?>20<\/span>[\s\S]*?>5<\/span>/);
-    expect(row).toContain(">2021</span>");
+  });
+
+  it("splits a locked quantity into its sources: a visible line under the row and the same text as the cell's title", () => {
+    const source = T.retire.lockedBy({ orders: "12", otc: "8" });
+    expect(source).toBe("Locked: sell orders 12 · OTC listings 8");
+    expect(rowOf(html, "asset-VCS-FOR-2021")).toContain(`data-locked="" class="tnum truncate text-end text-muted" title="${source}">20</span>`);
+    const line = html.slice(html.indexOf('data-locks-for="asset-VCS-FOR-2021"'));
+    expect(line.slice(0, line.indexOf("</div>"))).toContain(`>${source}</span>`);
+    // 没有锁定的行:没有来源行,也没有 title
+    expect(html.match(/data-locks-for=/g)).toHaveLength(1);
+    expect(rowOf(html, "asset-VCS-FOR-2023")).toContain('data-locked="" class="tnum truncate text-end text-muted">0</span>');
+  });
+
+  it("shows lockedBy as read even when it does not add up to locked (locked stays the figure that counts)", () => {
+    const markup = render({ positions: [position("VCS-FOR-2021", { locked: 20, available: 100, lockedBy: { orders: 12, otc: 3 } })] });
+    expect(rowOf(markup, "asset-VCS-FOR-2021")).toMatch(/>100<\/span><span data-locked=""[^>]*>20<\/span>/);
+    expect(markup).toContain(`>${T.retire.lockedBy({ orders: "12", otc: "3" })}</span>`);
+  });
+
+  it("tolerates positions without lockedBy (a Phase 1 server after a rollback): the locked total only, no sources line or title, no crash", () => {
+    const noSources = (patch: Partial<Position> = {}) => position("VCS-FOR-2021", { ...patch, lockedBy: undefined as unknown as Position["lockedBy"] });
+    const markup = render({ positions: [noSources(), position("VCS-FOR-2023", { ...unlocked, lockedBy: null as unknown as Position["lockedBy"] })] });
+    expect(rowOf(markup, "asset-VCS-FOR-2021")).toContain('data-locked="" class="tnum truncate text-end text-muted">20</span>');
+    expect(rowOf(markup, "asset-VCS-FOR-2021")).toMatch(/>100<\/span><span data-locked=""[^>]*>20<\/span><span[^>]*>5<\/span>/);
+    expect(rowOf(markup, "asset-VCS-FOR-2023")).toContain('data-locked="" class="tnum truncate text-end text-muted">0</span>');
+    expect(markup).not.toContain("data-locks-for=");
+    expect(markup).not.toContain("Locked: sell orders");
+    expect(positionRows(groupPositions([noSources()], META), false).map((r) => r.kind)).toEqual(["group", "position"]);
+    // 来源齐全的行不受影响
+    expect(positionRows(groupPositions([position("VCS-FOR-2021")], META), false)[2]).toEqual({ kind: "locks", key: "locks:asset-VCS-FOR-2021", assetId: "asset-VCS-FOR-2021", orders: 20, otc: 0 });
   });
 
   it("shows a signed P&L only when the cost basis is complete, otherwise the — placeholder with the reason as title", () => {
@@ -157,30 +366,112 @@ describe("PositionsTab (PositionsView)", () => {
     expect(html).toMatch(new RegExp(`data-pnl=""[^>]*title="${T.tabs.pnlUnavailable}"[^>]*>—<span class="sr-only">`));
   });
 
-  it("links Retire to the retirement wizard for real credits and disables it for scenario instruments", () => {
-    expect(html).toContain(`href="${esc(retirementHref("asset-VCS-FOR-2021"))}"`);
-    expect(html).toContain(`title="${T.tabs.retireHint}"`);
-    expect(html).not.toContain(`href="${esc(retirementHref("asset-CEA-SCEN-2026"))}"`);
-    // 情景标的:真正的 disabled 按钮(读屏会报不可用),不是带 aria-disabled 的 span
-    expect(rowOf(html, "asset-CEA-SCEN-2026")).toMatch(new RegExp(`<button type="button" disabled=""[^>]*>${T.tabs.retire}</button>`));
-    expect(html).not.toContain('aria-disabled="true"');
-    expect(html).toContain(`>${T.tabs.scenarioTag}<`);
-    expect(count(html, `>${T.order.sell}</button>`)).toBe(3);
+  it("computes market value and P&L from the last price, not from the figures frozen in the event", () => {
+    // 事件里的 marketValue / unrealisedPnl 是旧的(按 6,800 算:816,000 / 0);这一行现在的价格是 6,900
+    const stale = position("VCS-FOR-2021", { lastPrice: 6900, marketValue: 816_000, averagePurchasePrice: 6800, unrealisedPnl: 12_000 });
+    const row = rowOf(render({ positions: [stale] }), "asset-VCS-FOR-2021");
+    expect(row).toContain('data-last-price="" class="tnum truncate text-end">69.00</span>');
+    expect(row).toContain('data-market-value="" class="tnum truncate text-end">8,280.00</span>'); // 120 × 69.00
+    expect(row).not.toContain("8,160.00");
+    expect(row).toContain(">+120.00<");
   });
 
-  it("shows — for market value when the instrument has never traded (lastPrice null), not the server's (0 × qty) zero", () => {
-    const markup = renderToStaticMarkup(
-      createElement(PositionsView, {
-        positions: [position("VCS-FOR-2021"), position("GS-WIND-2022", { lastPrice: null, marketValue: 0, unrealisedPnl: null })],
-        precisions: PRECISIONS,
-        vintages: VINTAGES,
-        onSell: () => {},
-      }),
-    );
+  it("shows — for last price and market value when the instrument has never traded (lastPrice null), not the server's (0 × qty) zero", () => {
+    const markup = render({ positions: [position("VCS-FOR-2021"), position("GS-WIND-2022", { lastPrice: null, marketValue: 0, unrealisedPnl: null })] });
     expect(rowOf(markup, "asset-VCS-FOR-2021")).toContain('data-market-value="" class="tnum truncate text-end">8,280.00</span>');
     const unpriced = rowOf(markup, "asset-GS-WIND-2022");
+    expect(unpriced).toContain('data-last-price="" class="tnum truncate text-end">—</span>');
     expect(unpriced).toContain('data-market-value="" class="tnum truncate text-end">—</span>');
     expect(unpriced).not.toContain(">0.00<");
+  });
+
+  it("Retire is a button that opens the dialog (no link to the old wizard), disabled with the reason for scenario instruments", () => {
+    const retire = rowOf(html, "asset-VCS-FOR-2021");
+    expect(retire).toMatch(new RegExp(`<button type="button" data-retire="" aria-label="${T.tabs.retire} VCS-FOR-2021" aria-haspopup="dialog" title="${T.tabs.retireHint}"[^>]*>${T.tabs.retire}</button>`));
+    expect(html).not.toContain('href="/retirement');
+    expect(html.match(/data-retire=""/g)).toHaveLength(3);
+    // 情景标的:真正的 disabled 按钮(读屏会报不可用),原因在 title 与 sr-only 文字里;不是带 aria-disabled 的 span
+    const scenario = rowOf(html, "asset-CEA-SCEN-2026");
+    expect(scenario).toMatch(new RegExp(`<span title="${T.retire.scenarioBlocked}"[^>]*><button type="button" disabled=""[^>]*>${T.tabs.retire}</button><span class="sr-only">${T.retire.scenarioBlocked}</span></span>`));
+    expect(scenario).not.toContain("data-retire");
+    expect(html).not.toContain('aria-disabled="true"');
+    expect(html).toContain(`>${T.tabs.scenarioTag}<`);
+    // 卖出不变:每个持仓行一个,读屏名带标的
+    expect(count(html, `>${T.order.sell}</button>`)).toBe(4);
+    expect(html).toContain(`aria-label="${T.order.sell} GS-WIND-2022"`);
+  });
+
+  it("loads the retire dialog with next/dynamic only (no static import: it must stay out of the terminal's first load)", () => {
+    const source = readFileSync(fileURLToPath(new URL("./PositionsTab.tsx", import.meta.url)), "utf8");
+    expect(source).toMatch(/dynamic\(\(\) => import\("@\/components\/account\/RetireDialog"\)[^\n]*ssr: false/);
+    expect(source).not.toMatch(/^import [^\n]*from "@\/components\/account\/RetireDialog"/m);
+    expect(source).not.toMatch(/from "@\/lib\/(?:market\/retire-flow|exchange\/retirement-form)"/);
+    // 服务端标记里没有对话框(没点过「注销」就不挂载)
+    expect(html).not.toContain("<dialog");
+    expect(renderToStaticMarkup(createElement(PositionsTab))).not.toContain("<dialog");
+  });
+
+  it("keeps fully retired rows in a collapsed group at the bottom, headed by their count and total tonnes", () => {
+    const another = position("VCS-FOR-2023", { quantity: 0, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 0, retired: 1260, marketValue: 0 });
+    const held = positions.filter((p) => p.symbol !== "VCS-FOR-2023");
+    const collapsed = render({ positions: [...held, retiredOut, another] });
+    const label = T.retire.retiredGroup({ count: 2, tonnes: "1,300" });
+    // 不说「全部注销」:数量 0 的行也可能是注销一部分、其余卖掉(P2-13,终审 UI-2)
+    expect(label).toBe("Retired, no longer held (2) · 1,300 t");
+    expect(collapsed).toMatch(new RegExp(`<button type="button" data-retired-group="" aria-expanded="false"[^>]*>.*?<span>${esc(label).replace(/[()]/g, "\\$&")}</span></span></button>`));
+    expect(collapsed).not.toContain("data-retired-asset-id=");
+    expect(collapsed).not.toContain('data-asset-id="asset-GS-WIND-2023"');
+    expect(collapsed.match(/data-asset-id=/g)).toHaveLength(held.length);
+    // 折叠按钮排在所有项目组之后
+    expect(collapsed.lastIndexOf("data-group=")).toBeLessThan(collapsed.indexOf("data-retired-group="));
+    expect(collapsed.lastIndexOf("data-asset-id=")).toBeLessThan(collapsed.indexOf("data-retired-group="));
+  });
+
+  it("lists the retired rows when the group is open: retired tonnes only, a link to the retirement history (certificates), no Sell / Retire", () => {
+    const open = render({ positions: [...positions, retiredOut], retiredOpen: true });
+    expect(open).toContain('data-retired-group="" aria-expanded="true"');
+    const start = open.indexOf('data-retired-asset-id="asset-GS-WIND-2023"');
+    expect(start).toBeGreaterThan(open.indexOf("data-retired-group="));
+    const row = open.slice(start);
+    expect(row).toMatch(/>2023<\/span><span class="truncate text-muted">GS-WIND-2023<\/span>/);
+    expect(row).toContain('<span class="tnum truncate text-end">40</span>');
+    expect(row).toContain(`href="${RETIREMENT_HISTORY_HREF}"`);
+    expect(row).toContain(`>${T.retire.history}</a>`);
+    expect(row).not.toContain(`>${T.order.sell}</button>`);
+    expect(row).not.toContain("data-retire=");
+    // 只有整仓注销的行:不是空态,是一个折叠的分组
+    const onlyRetired = render({ positions: [retiredOut] });
+    expect(onlyRetired).not.toContain(esc(T.tabs.emptyPositions));
+    expect(onlyRetired).toContain(esc(T.retire.retiredGroup({ count: 1, tonnes: "40" })));
+  });
+
+  it("builds the row list: group head, vintages, lock sources, and the retired group only when there is something in it", () => {
+    const kinds = (list: Position[], retiredOpen: boolean) => positionRows(groupPositions(list, META), retiredOpen).map((r) => r.kind);
+    expect(kinds([position("VCS-FOR-2021"), position("VCS-FOR-2023", unlocked)], false)).toEqual(["group", "position", "locks", "position"]);
+    expect(kinds([position("VCS-FOR-2021", unlocked), retiredOut], false)).toEqual(["group", "position", "retiredHeader"]);
+    expect(kinds([position("VCS-FOR-2021", unlocked), retiredOut], true)).toEqual(["group", "position", "retiredHeader", "retired"]);
+    expect(kinds([], true)).toEqual([]);
+    const keys = positionRows(groupPositions([...positions, retiredOut], META), true).map((r) => r.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("group heads and the retired-group toggle are memoised and take primitives only, so an unchanged group does not re-render", () => {
+    const MEMO = Symbol.for("react.memo");
+    expect((PositionGroupRow as unknown as { $$typeof: symbol }).$$typeof).toBe(MEMO);
+    expect((RetiredGroupRow as unknown as { $$typeof: symbol }).$$typeof).toBe(MEMO);
+    // 组头只收原始类型:groupPositions 每次都生成新的组对象,传对象进来 memo 的浅比较永远不中
+    const head = renderToStaticMarkup(
+      createElement(PositionGroupRow, { groupKey: "project:SIM-PRJ-VCS-FOR", projectId: "SIM-PRJ-VCS-FOR", symbol: "VCS-FOR-2021", projectType: "林业碳汇", standard: "VCS", country: "中国" }),
+    );
+    expect(head).toContain('data-group="project:SIM-PRJ-VCS-FOR"');
+    expect(head).toMatch(/· Forestry sink<\/span><span>· VCS<\/span><span>· China<\/span>/);
+    const source = readFileSync(fileURLToPath(new URL("./PositionsTab.tsx", import.meta.url)), "utf8");
+    expect(source).not.toMatch(/<PositionGroupRow group=/);
+    // 两次分组(持仓事件前后)组对象不同,但组头拿到的每个值都相等
+    const a = groupPositions(positions, META).groups;
+    const b = groupPositions(positions.map((p) => ({ ...p })), META).groups;
+    expect(a[2]).not.toBe(b[2]);
+    for (const key of ["key", "projectId", "symbol", "projectType", "standard", "country"] as const) expect(a[2][key]).toBe(b[2][key]);
   });
 
   it("names its scroll region terminal.a11y.positionsRegion (not the orders table)", () => {
@@ -198,9 +489,65 @@ describe("PositionsTab (PositionsView)", () => {
     expect("price" in draft).toBe(false);
   });
 
+  it("after the dialog closes, focus goes to the table only when it has nowhere else to be (the row moved into the collapsed retired group)", () => {
+    const focus = vi.fn();
+    const host = { querySelector: vi.fn(() => ({ focus })) } as unknown as Element;
+    const body = {} as Element;
+    const button = {} as Element;
+    focusPositionsRegion(host, button, body); // 焦点已还给「注销」按钮
+    expect(focus).not.toHaveBeenCalled();
+    focusPositionsRegion(host, body, body);
+    focusPositionsRegion(host, null, body);
+    expect(focus).toHaveBeenCalledTimes(2);
+    expect(host.querySelector).toHaveBeenCalledWith('[role="region"]');
+    expect(() => focusPositionsRegion(null, null, body)).not.toThrow();
+  });
+
+  it("drops the retire request once its position leaves the store, so the dialog does not open by itself when the asset is bought again", () => {
+    // 按 PositionsTab 的写法模拟几次渲染:dropped 时把返回的 request 写回 state;wasOpen 时记一次「对话框随持仓消失」(焦点兜底)
+    let request: RetireRequest | null = { assetId: "asset-VCS-FOR-2021", open: true };
+    let orphaned = 0;
+    const renderWith = (list: Position[]) => {
+      const r = reconcileRetireRequest(request, list);
+      if (r.dropped) {
+        request = r.request;
+        if (r.wasOpen) orphaned++;
+      }
+      const target = request ? list.find((p) => p.assetId === request?.assetId) : undefined;
+      return request && target ? { mounted: true, open: request.open } : { mounted: false, open: false };
+    };
+    const held = position("VCS-FOR-2021");
+    expect(renderWith([held, position("GS-WIND-2022")])).toEqual({ mounted: true, open: true });
+    expect(orphaned).toBe(0);
+    // 整仓注销的行(数量 0、已注销 > 0)还在 store 里:请求不作废(回执还要显示)
+    expect(renderWith([position("VCS-FOR-2021", { quantity: 0, available: 0, locked: 0, retired: 125 })])).toEqual({ mounted: true, open: true });
+    // 卖光且没注销过:行被移除 → 请求作废,对话框卸载,记一次焦点兜底
+    expect(renderWith([position("GS-WIND-2022")])).toEqual({ mounted: false, open: false });
+    expect(request).toBeNull();
+    expect(orphaned).toBe(1);
+    // 同一标的再买回来:不会自己弹出来,也不再记
+    expect(renderWith([held, position("GS-WIND-2022")])).toEqual({ mounted: false, open: false });
+    expect(renderWith([position("GS-WIND-2022")])).toEqual({ mounted: false, open: false });
+    expect(orphaned).toBe(1);
+  });
+
+  it("reconcileRetireRequest: a closed request is dropped quietly; a live or absent one is left alone", () => {
+    const list = [position("GS-WIND-2022")];
+    expect(reconcileRetireRequest({ assetId: "asset-VCS-FOR-2021", open: false }, list)).toEqual({ request: null, dropped: true, wasOpen: false });
+    expect(reconcileRetireRequest({ assetId: "asset-VCS-FOR-2021", open: true }, [])).toEqual({ request: null, dropped: true, wasOpen: true });
+    const live: RetireRequest = { assetId: "asset-GS-WIND-2022", open: true };
+    expect(reconcileRetireRequest(live, list)).toEqual({ request: live, dropped: false, wasOpen: false });
+    expect(reconcileRetireRequest(live, list).request).toBe(live);
+    expect(reconcileRetireRequest(null, list)).toEqual({ request: null, dropped: false, wasOpen: false });
+  });
+
   it("uses EmptyState when there are no positions", () => {
-    const empty = renderToStaticMarkup(createElement(PositionsView, { positions: [], precisions: {}, vintages: {}, onSell: () => {} }));
+    const empty = render({ positions: [], meta: {} });
     expect(empty).toContain(renderToStaticMarkup(createElement(EmptyState, { title: T.tabs.emptyPositions })));
+    // 元数据还没到(行情 store 为空):按标的各自成组,年份显示「—」,不猜
+    const bare = render({ positions: [position("VCS-FOR-2021")], meta: {} });
+    expect(bare).toContain('data-group="symbol:VCS-FOR-2021"');
+    expect(rowOf(bare, "asset-VCS-FOR-2021")).toMatch(/>—<\/span><span class="truncate text-muted">VCS-FOR-2021<\/span>/);
   });
 });
 
@@ -300,6 +647,23 @@ describe("FillDetailDialog (FillDetailView)", () => {
     expect(html).toContain(`>${T.tabs.ledger}<`);
   });
 
+  it("shows ledger deltas with a sign and the neutral foreground, like the Ledger tab — never the up / down direction tokens", () => {
+    // 账本变动是账户的增减,不是价格方向:正负号 + 读屏的增 / 减,文字中性色(红涨模式下涨跌色对调,含义会反转)
+    const cells = [...html.matchAll(/<td data-direction="(in|out|none)" class="([^"]*)">(.*?)<\/td>/g)].map((m) => [m[1], m[2], m[3]]);
+    expect(cells).toEqual([
+      ["in", "truncate px-0.5 py-gap whitespace-nowrap tnum text-end text-foreground", `<span class="sr-only">${T.ledger.increase} </span>+685.00`],
+      ["out", "truncate px-0.5 py-gap whitespace-nowrap tnum text-end text-foreground", `<span class="sr-only">${T.ledger.decrease} </span>-10`],
+      ["out", "truncate px-0.5 py-gap whitespace-nowrap tnum text-end text-foreground", `<span class="sr-only">${T.ledger.decrease} </span>-10`],
+    ]);
+    const zero = renderToStaticMarkup(createElement(FillDetailView, { detail: { ...detail, ledger: [{ ...detail.ledger[0], delta: 0 }] }, precision: 2 }));
+    expect(zero).toContain('<td data-direction="none" class="truncate px-0.5 py-gap whitespace-nowrap tnum text-end text-muted">0.00</td>');
+    // 账本表里没有涨跌色;成交字段里的方向(卖出)仍是方向色,不受影响
+    const table = html.slice(html.indexOf("<table"), html.indexOf("</table>"));
+    expect(table).not.toContain("--terminal-up");
+    expect(table).not.toContain("--terminal-down");
+    expect(html).toContain(`<dd class="tnum text-end text-(--terminal-down)">${T.order.sell}</dd>`);
+  });
+
   it("names the counterparty type only", () => {
     expect(html).toContain(T.tabs.counterpartyBot);
     const human = renderToStaticMarkup(createElement(FillDetailView, { detail: { ...detail, counterpartyIsBot: false }, precision: 2 }));
@@ -325,9 +689,8 @@ describe("FillDetailDialog (FillDetailView)", () => {
     expect(src).toContain("useMarketStore(fillPrecisionSelector(symbol))");
   });
 
-  it("formats ledger deltas as cents for cash accounts and tonnes for holdings", () => {
-    expect(fmtLedgerDelta({ account: "CASH_LOCKED", delta: -123_456 }, "en-US")).toBe("-1,234.56");
-    expect(fmtLedgerDelta({ account: "HOLDING", delta: 1200 }, "en-US")).toBe("+1,200");
+  // 账本变动的格式化(现金按分、持仓按整数数量)在 TabTable 的 fmtLedgerDelta,与流水页签共用,测试在 ledger.ssr.test.ts
+  it("builds the private fill detail URL with the id encoded", () => {
     expect(fillDetailUrl("a b")).toBe("/api/account/fills/a%20b");
   });
 });
@@ -626,14 +989,18 @@ describe("BottomTabs", () => {
     expect(html).toContain(`<div id="${labelledBy}" role="tablist"`);
     // tablist 自己有名字(P1-25d):读屏不只念「标签列表」;面板区域经 aria-labelledby 取到同一个名字
     expect(html).toContain(`<div id="${labelledBy}" role="tablist" aria-label="${T.tabs.tablistLabel}"`);
-    expect(count(html, 'role="tab"')).toBe(4);
-    for (const label of [T.tabs.open, T.tabs.history, T.tabs.fills, T.tabs.positions]) expect(html).toContain(`>${label}</button>`);
+    // 五个页签(P2-07 加「流水」),标题与顺序:当前委托 / 历史委托 / 成交记录 / 持仓 / 流水
+    expect(count(html, 'role="tab"')).toBe(5);
+    const titles = [...html.matchAll(/<button type="button" role="tab"[^>]*>([^<]*)<\/button>/g)].map((m) => m[1]);
+    expect(titles).toEqual([T.tabs.open, T.tabs.history, T.tabs.fills, T.tabs.positions, T.ledger.tab]);
     expect(html).toMatch(new RegExp(`aria-selected="true"[^>]*tabindex="0"[^>]*>${T.tabs.open}<`));
-    expect(count(html, 'aria-selected="false"')).toBe(3);
-    expect(count(html, 'role="tabpanel"')).toBe(4);
+    expect(count(html, 'aria-selected="false"')).toBe(4);
+    expect(count(html, 'role="tabpanel"')).toBe(5);
     // 非激活面板:hidden + content-visibility:auto,没有内容
-    expect(count(html, "content-visibility:auto")).toBe(3);
+    expect(count(html, "content-visibility:auto")).toBe(4);
     expect(html).toMatch(/data-tab="history" hidden="" style="content-visibility:auto"><\/div>/);
+    // 流水页签的面板也在(空的、hidden):它的代码是懒加载的,没选中时不渲染、不取数
+    expect(html).toMatch(/data-tab="ledger" hidden="" style="content-visibility:auto"><\/div>/);
     // 账户状态在服务端恒为 idle:激活面板是 Skeleton,不渲染任何表格
     expect(html).toMatch(/data-tab="open" class="flex min-h-0 flex-1 flex-col"><div role="status" aria-busy="true"/);
     expect(html).not.toContain("data-cancel-for");
@@ -646,13 +1013,165 @@ describe("BottomTabs", () => {
   });
 
   it("moves between tabs with the arrow keys, Home and End", () => {
-    expect(BOTTOM_TABS).toEqual(["open", "history", "fills", "positions"]);
+    expect(BOTTOM_TABS).toEqual(["open", "history", "fills", "positions", "ledger"]);
     expect(nextTab("open", "ArrowRight")).toBe("history");
-    expect(nextTab("open", "ArrowLeft")).toBe("positions");
-    expect(nextTab("positions", "ArrowRight")).toBe("open");
+    // 循环经过第五个页签:第一个往左到「流水」,「持仓」往右到「流水」,「流水」往右回到第一个
+    expect(nextTab("open", "ArrowLeft")).toBe("ledger");
+    expect(nextTab("positions", "ArrowRight")).toBe("ledger");
+    expect(nextTab("ledger", "ArrowRight")).toBe("open");
+    expect(nextTab("ledger", "ArrowLeft")).toBe("positions");
     expect(nextTab("fills", "Home")).toBe("open");
-    expect(nextTab("history", "End")).toBe("positions");
+    expect(nextTab("history", "End")).toBe("ledger");
+    expect(nextTab("ledger", "Home")).toBe("open");
     expect(nextTab("history", "Enter")).toBeNull();
+  });
+
+  it("statically imports only the default Open orders tab; the other four load with next/dynamic when selected (P2-06: out of the terminal's first load)", () => {
+    const source = readFileSync(fileURLToPath(new URL("./BottomTabs.tsx", import.meta.url)), "utf8");
+    expect(source).toMatch(/^import \{ OpenOrdersTab \} from "\.\/OpenOrdersTab";$/m);
+    for (const name of ["OrderHistoryTab", "FillsTab", "PositionsTab", "LedgerTab"]) {
+      expect(source, name).toMatch(new RegExp(`^const ${name} = dynamic\\(\\(\\) => import\\("\\./${name}"\\)\\.then\\(\\(m\\) => m\\.${name}\\), \\{ ssr: false, loading: tabLoading \\}\\);$`, "m"));
+      expect(source, name).not.toMatch(new RegExp(`from "\\./${name}"`));
+    }
+    // 加载中是统一的 Skeleton,与账户状态未知时同一个占位
+    expect(source).toMatch(/^const tabLoading = \(\) => <Skeleton rows=\{5\} \/>;$/m);
+  });
+});
+
+describe("CSV export entries (P2-06)", () => {
+  /** 查询参数(去掉分页用的 limit / cursor)按顺序列出 */
+  const filterParams = (url: string) => {
+    const params = new URL(url, "http://localhost").searchParams;
+    params.delete("limit");
+    params.delete("cursor");
+    return [...params];
+  };
+
+  it("point at the .csv twin of each tab's JSON query, with the same filters and no limit / cursor", () => {
+    expect(new URL(HISTORY_CSV_HREF, "http://localhost").pathname).toBe("/api/account/orders.csv");
+    expect(filterParams(HISTORY_CSV_HREF)).toEqual(filterParams(historyPageUrl("some-cursor")));
+    expect(filterParams(HISTORY_CSV_HREF)).toEqual([["status", "history"]]);
+    expect(FILLS_CSV_HREF).toBe("/api/account/fills.csv");
+    expect(filterParams(fillsPageUrl("some-cursor"))).toEqual([]);
+  });
+
+  it.each([
+    ["history", () => renderToStaticMarkup(createElement(OrderHistoryTab)), HISTORY_CSV_HREF, T.tabs.colStatus],
+    ["fills", () => renderToStaticMarkup(createElement(FillsTab)), FILLS_CSV_HREF, T.tabs.colAuditRef],
+  ] as const)("%s: a plain download link (not a button that fetches) in a toolbar row above the table", (_name, render, href, lastHeader) => {
+    const html = render();
+    expect(count(html, "data-export-csv")).toBe(1);
+    expect(html).toContain(`<a href="${esc(href)}" download="" data-export-csv="" title="${esc(T.exportCsv.hint)}"`);
+    expect(html).toMatch(new RegExp(`data-export-csv=""[^>]*>${T.exportCsv.label}</a>`));
+    // 工具行在表头之前,不在表格里
+    expect(html.indexOf("data-export-csv")).toBeLessThan(html.indexOf(`>${lastHeader}</span>`));
+    expect(html).not.toContain("<button type=\"button\" data-export-csv");
+    // 手机上这一行不显示(入口并进页签条,见下一条),≥ 48rem 照旧
+    expect(html).toContain(`<div class="hidden shrink-0 items-center justify-end p-0.5 md:flex"><a href="${esc(href)}"`);
+  });
+
+  it("on phones, the History and Fills links sit at the end of the tab strip, outside the tablist, once the account is ready (P2-12)", () => {
+    expect(stripExportHref("history", "ready")).toBe(HISTORY_CSV_HREF);
+    expect(stripExportHref("fills", "ready")).toBe(FILLS_CSV_HREF);
+    // 流水页签的入口在它自己的筛选行里;当前委托与持仓没有导出
+    for (const tab of ["open", "positions", "ledger"] as const) expect(stripExportHref(tab, "ready"), tab).toBeNull();
+    for (const status of ["idle", "loading", "anon"] as const) {
+      expect(stripExportHref("history", status), status).toBeNull();
+      expect(stripExportHref("fills", status), status).toBeNull();
+    }
+    // 标记:tablist 里只有 tab;入口(有的话)是 tablist 的兄弟节点、只在手机上显示
+    const source = readFileSync(fileURLToPath(new URL("./BottomTabs.tsx", import.meta.url)), "utf8");
+    expect(source).toMatch(/<\/div>\s*\{stripExport \? \(\s*<div className="[^"]*\bmd:hidden\b[^"]*">\s*<ExportCsvLink href=\{stripExport\} compact \/>/);
+    // 默认页签(当前委托)的服务端标记里没有它
+    useAccountStore.setState({ status: "ready", me: { id: "u1", email: "u1@example.test", name: "U" } as never });
+    expect(renderToStaticMarkup(createElement(BottomTabs, { symbol: "VCS-FOR-2021" }))).not.toContain("data-export-csv");
+    useAccountStore.setState(createInitialAccountState(), true);
+  });
+
+  it("on phones, the strip keeps one height whichever tab is selected: the link shares the tabs' vertical box and adds no padding of its own (P2-12 fix round)", () => {
+    const source = readFileSync(fileURLToPath(new URL("./BottomTabs.tsx", import.meta.url)), "utf8");
+    // tab 与入口共用同一个纵向盒子:行高、下内边距、下边框一样
+    expect(STRIP_ITEM_BOX.split(" ").sort()).toEqual(["-mb-px", "border-b-2", "leading-t-tight", "pb-gap"]);
+    expect(source).toMatch(/role="tab"[\s\S]*?className=\{`\$\{STRIP_ITEM_BOX\} shrink-0 px-1\.5 text-t-sm /);
+    // 入口外层贴底对齐、没有上下内边距(原来的 pb-gap + 带边框的 py-1 小按钮把页签条撑高约 10 px,tab 随之下移)
+    const wrapper = /\{stripExport \? \(\s*<div className="([^"]*)">/.exec(source)?.[1] ?? "";
+    expect(wrapper.split(" ")).toEqual(expect.arrayContaining(["flex", "items-end", "border-b", "md:hidden"]));
+    expect(wrapper).not.toMatch(/\b(?:p|py|pt|pb)-/);
+    // 入口:同一个纵向盒子,字号不大于 tab(text-t-xs ≤ text-t-sm),没有边框小按钮的上下内边距与触控最小高度
+    const link = renderToStaticMarkup(createElement(ExportCsvLink, { href: HISTORY_CSV_HREF, compact: true }));
+    const cls = (/class="([^"]*)"/.exec(link)?.[1] ?? "").split(" ");
+    expect(cls).toEqual(expect.arrayContaining([...STRIP_ITEM_BOX.split(" "), "border-transparent", "text-t-xs"]));
+    expect(cls.filter((c) => /^(?:py-|pt-|min-h-|border$|text-t-(?:sm|base|md|lg))/.test(c))).toEqual([]);
+    // 命中区只伸进旁边的空白(那里没有别的可点的东西):向上伸进面板的上内边距,向下伸进页签条与表格之间的间隙,左右各一个 gap;
+    // 可见的盒子不变高(P2-12 第二轮修复:原来只向上伸,命中区约 31 px)
+    expect(cls).toEqual(expect.arrayContaining(["relative", "before:absolute", "before:-top-panel", "before:-bottom-[calc(var(--spacing-gap)+0.125rem)]", "before:-inset-x-gap"]));
+    expect(cls.filter((c) => c.startsWith("before:"))).toHaveLength(4);
+    // 伸出的下沿正好是页签条与表格之间的间隙:外层 section 的 gap-gap;绝对定位从内边距盒量起,所以再加上下边框的宽度。
+    // 边框与下沿成对定义在 STRIP_RULE(P2-12 收尾):盒子里的下边框只有 STRIP_RULE.border 这一个类,入口用的就是 STRIP_RULE.hitBelow,
+    // 而且二者的数一致 —— Tailwind 的 border-b-N 是 N px,即 N/16 rem,下沿里加的正是这个数(border-b-2 ↔ 0.125rem)
+    expect(STRIP_ITEM_BOX.split(" ").filter((c) => /^border-b(?:-|$)/.test(c))).toEqual([STRIP_RULE.border]);
+    expect(STRIP_RULE.border).toBe("border-b-2");
+    const ruleWidth = Number(/^border-b-(\d+)$/.exec(STRIP_RULE.border)?.[1]);
+    expect(STRIP_RULE.hitBelow).toBe(`before:-bottom-[calc(var(--spacing-gap)+${ruleWidth / 16}rem)]`);
+    expect(STRIP_RULE.hitBelow).toBe("before:-bottom-[calc(var(--spacing-gap)+0.125rem)]");
+    expect(cls).toContain(STRIP_RULE.hitBelow);
+    expect(source).toMatch(/<section\s[^>]*className="flex [^"]*\bgap-gap\b[^"]*\bp-panel\b/);
+    // 左边伸出的 gap 正好是外层的 ps-gap
+    expect(wrapper.split(" ")).toContain("ps-gap");
+    expect(link).toMatch(new RegExp(`>${T.exportCsv.label}</a>$`));
+    // 桌面与流水页签的那一版不变
+    const full = renderToStaticMarkup(createElement(ExportCsvLink, { href: HISTORY_CSV_HREF }));
+    expect(full).toContain('class="inline-flex shrink-0 items-center rounded-control border border-(--terminal-border) bg-(--terminal-panel-2) px-2 text-t-xs font-medium text-foreground hover:bg-(--terminal-row-hover) focus-visible:outline-none focus-visible:shadow-focus min-h-touch lg:min-h-0 lg:py-0.5"');
+  });
+
+  it("the tab container never shows it before the account is ready (tabs are not mounted for anonymous or unknown users)", () => {
+    const idle = renderToStaticMarkup(createElement(BottomTabs, { symbol: "VCS-FOR-2021" }));
+    expect(idle).not.toContain("data-export-csv");
+    useAccountStore.setState({ status: "anon", me: null });
+    expect(renderToStaticMarkup(createElement(BottomTabs, { symbol: "VCS-FOR-2021" }))).not.toContain("data-export-csv");
+    useAccountStore.setState(createInitialAccountState(), true);
+  });
+});
+
+describe("TabTable pinEdges (P2-12)", () => {
+  const columns = { template: "1fr 1fr", minWidth: "30rem" };
+  const base: TabTableProps<string> = {
+    columns,
+    headers: [{ label: "A" }, { label: "B", align: "end" }],
+    items: ["x", "y"],
+    getKey: (item) => item,
+    renderRow: (item) => createElement("span", { "data-item": item }, item),
+    label: "Table",
+    empty: createElement("p", { "data-empty": "" }, "nothing"),
+  };
+  const plain = renderToStaticMarkup(createElement(TabTable<string>, base));
+  const pinned = renderToStaticMarkup(createElement(TabTable<string>, { ...base, pinEdges: true }));
+
+  it("default: the outer wrapper scrolls sideways, the header sits above the list, the list only scrolls vertically (the other tabs, unchanged)", () => {
+    expect(plain).toContain('class="flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-hidden"');
+    expect(plain).toContain('style="min-width:30rem"');
+    expect(plain.indexOf(">A</span>")).toBeLessThan(plain.indexOf('role="region"'));
+    expect(plain).not.toContain("sticky top-0");
+    expect(plain).not.toContain("t-pin");
+  });
+
+  it("pinEdges: the header moves into the list's scroll container (sticky top, opaque), which scrolls both ways; track and header carry the minimum width", () => {
+    expect(pinned).not.toContain("overflow-x-auto");
+    const region = pinned.slice(pinned.indexOf('role="region"'));
+    expect(region).toMatch(/^role="region"[^>]*class="relative overflow-auto /);
+    // 贴顶表头(--z-sticky)关在 region 自己的层叠上下文里:页面滚动时不压到终端头部上(P2-12 收尾)
+    expect(/^role="region"[^>]*class="([^"]*)"/.exec(region)?.[1].split(" ")).toContain("isolate");
+    expect(plain).not.toContain("isolate");
+    expect(region).toContain('<div class="sticky top-0 z-(--z-sticky)" style="min-width:30rem"><div class="grid h-row ');
+    expect(region).toMatch(/bg-\(--terminal-panel\)" style="grid-template-columns:1fr 1fr"><span class="truncate">A<\/span>/);
+    expect(region).toContain('style="height:calc(var(--spacing-row) * 2);min-width:30rem"');
+    expect(region).toContain('data-item="x"');
+  });
+
+  it("pinEdges: an empty list still shows the header above the empty state", () => {
+    const empty = renderToStaticMarkup(createElement(TabTable<string>, { ...base, items: [], pinEdges: true }));
+    expect(empty.indexOf(">A</span>")).toBeGreaterThan(empty.indexOf('role="region"'));
+    expect(empty.indexOf(">A</span>")).toBeLessThan(empty.indexOf("data-empty"));
   });
 });
 
@@ -670,14 +1189,15 @@ describe("TabTable helpers", () => {
     expect(() => appendDescribedBy(null, "x")).not.toThrow();
   });
 
-  it("derives primitive precision / vintage maps, shallow-equal when polling replaces the instruments with equal data", () => {
+  it("derives a primitive precision map, shallow-equal when polling replaces the instruments with equal data; the positions tab's metadata keeps its reference", () => {
     expect(PRECISIONS).toEqual({ "VCS-FOR-2021": 2, "GS-WIND-2022": 2, "CEA-SCEN-2026": 2 });
-    expect(VINTAGES).toEqual({ "VCS-FOR-2021": 2021, "GS-WIND-2022": 2022, "CEA-SCEN-2026": 2026 });
-    // 轮询:instruments 整体换新(每个 Instrument 也是新对象,lastPrice 变了),精度与 vintage 没变 → 浅比较相等,Tab 不重渲染
+    const meta = positionMetaOf(INSTRUMENTS);
+    expect(Object.fromEntries(Object.entries(meta).map(([k, v]) => [k, v.vintage]))).toEqual({ "VCS-FOR-2021": 2021, "GS-WIND-2022": 2022, "CEA-SCEN-2026": 2026 });
+    // 轮询:instruments 整体换新(每个 Instrument 也是新对象,lastPrice 变了),精度与元数据没变 → 精度表浅比较相等、元数据是同一个对象,Tab 不重渲染
     const polled = Object.fromEntries(Object.entries(INSTRUMENTS).map(([k, v]) => [k, { ...v, lastPrice: 7100 }]));
     expect(polled).not.toBe(INSTRUMENTS);
     expect(shallow(pricePrecisionsOf(polled), PRECISIONS)).toBe(true);
-    expect(shallow(vintagesOf(polled), VINTAGES)).toBe(true);
+    expect(positionMetaOf(polled)).toBe(meta);
     const repriced = { ...polled, "GS-WIND-2022": { ...polled["GS-WIND-2022"], pricePrecision: 3 } };
     expect(shallow(pricePrecisionsOf(repriced), PRECISIONS)).toBe(false);
   });

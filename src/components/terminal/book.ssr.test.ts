@@ -24,11 +24,13 @@ import { TradesTape, newestFirst, tapePanelState } from "./TradesTape";
 const i18n = vi.hoisted(() => ({ lang: "en" as Lang }));
 vi.mock("@/i18n/LangProvider", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/i18n/LangProvider")>();
-  const { MESSAGES } = await import("@/i18n");
+  // 完整文案(核心 + terminal)直接取合并对象:useT 整个被换掉,不经 TerminalMessagesProvider(P2-01 起 @/i18n 的 MESSAGES 只有核心命名空间)。
+  // 不能在这个工厂里引入 @/i18n/test-support:它经 TerminalMessages 又引入正在被替换的 LangProvider,会互相等待
+  const ALL = { en: (await import("@/i18n/messages/en")).default, "zh-CN": (await import("@/i18n/messages/zh-CN")).default };
   return {
     ...actual,
     useLang: () => ({ lang: i18n.lang, setLang: () => {} }),
-    useT: (ns: keyof typeof MESSAGES.en) => MESSAGES[i18n.lang][ns],
+    useT: (ns: keyof typeof ALL.en) => ALL[i18n.lang][ns],
   };
 });
 // 「组件 prop 不得叫 ref」由 tokens-only.test.ts 对整个 components/terminal 目录做静态扫描,这里不重复。

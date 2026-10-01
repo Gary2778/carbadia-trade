@@ -24,7 +24,7 @@ const filled = (s: string | null | undefined): s is string => typeof s === "stri
  * 碳信用元数据面板(计划 §3.1、§1.1「碳市场特有的部分不靠杜撰」、§9.1 第 15 条):
  *   - 项目类型、方法学、年份、注册机构、核证状态、项目编号六项;值缺失(null、空串、非正整数年份)一律显示
  *     terminal.meta.notProvided,不补、不猜;
- *   - 核证状态只可能是 SIMULATED_UNVERIFIED(字面联合,边界已收窄),显示 simulatedUnverified 并带「模拟」标记;
+ *   - 核证状态只可能是 SIMULATED_UNVERIFIED(字面联合,边界已收窄),显示 ui.simulatedUnverified(核心包,/market 也用)并带「模拟」标记;
  *   - 项目编号以 SIM-PRJ- 开头时加注 simulatedProjectId(模拟编号,不是登记机构记录);
  *   - 注册机构只链 getCreditProfile().registryUrl(按 standard 取,不拼任何项目级 URL;情景标的不链)。链接文字用中性的
  *     terminal.meta.registrySite「登记处或项目方网站」:CDM 的地址是项目检索页、ACCU 是计划页,不都是登记簿首页(§9.2 D20);
@@ -34,6 +34,7 @@ const filled = (s: string | null | undefined): s is string => typeof s === "stri
  */
 export function CarbonMetaPanel({ symbol, initial }: CarbonMetaPanelProps) {
   const t = useT("terminal");
+  const ui = useT("ui");
   const { lang } = useLang();
   const titleId = useId();
   const collapsed = useTerminalLayout() === "mobile";
@@ -87,7 +88,7 @@ export function CarbonMetaPanel({ symbol, initial }: CarbonMetaPanelProps) {
         value:
           instrument.verificationStatus === "SIMULATED_UNVERIFIED" ? (
             <span data-simulated="" className="inline-flex rounded-chip bg-warning-soft px-1.5 text-t-xs text-warning">
-              {t.meta.simulatedUnverified}
+              {ui.simulatedUnverified}
             </span>
           ) : (
             notProvided

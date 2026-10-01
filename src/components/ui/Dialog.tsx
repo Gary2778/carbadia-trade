@@ -35,7 +35,7 @@ export function Dialog(props: DialogProps) {
 function OpenDialog({ onClose, title, children, initialFocusRef, describedBy, className = "" }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
-  const t = useT("terminal");
+  const ui = useT("ui");
 
   useEffect(() => {
     const dialog = ref.current;
@@ -77,7 +77,7 @@ function OpenDialog({ onClose, title, children, initialFocusRef, describedBy, cl
           <button
             type="button"
             data-dialog-close
-            aria-label={t.a11y.dialogClose}
+            aria-label={ui.dialogClose}
             onClick={onClose}
             className="-m-1 shrink-0 rounded-control p-1 text-muted hover:bg-surface-2 focus-visible:outline-none focus-visible:shadow-focus"
           >

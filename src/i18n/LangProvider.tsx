@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 import { DEFAULT_LANG, LANG_META, isActiveLang, isLang, type Lang } from "@/i18n/config";
-import { MESSAGES, type Messages } from "@/i18n";
+import { MESSAGES, type AccountMessagesByLang, type CoreMessages, type Messages, type TerminalMessagesByLang } from "@/i18n";
 
 export type { Lang };
 
@@ -56,14 +56,53 @@ export function LangProvider({ children }: { children: React.ReactNode }) {
 export const useLang = () => useContext(Ctx);
 
 /**
+ * 终端文案的上下文(计划 §6.2.2 C9)。terminal 命名空间不在核心包里:src/app/trade/layout.tsx 渲染的
+ * TerminalMessagesProvider(src/i18n/TerminalMessages.tsx,只在 /trade 的 chunk 里)把两种语言的终端文案放进这里,
+ * useT("terminal") 从这里读。默认值 null = 不在 /trade 的子树里。本文件从根布局可达,所以这里只放上下文对象本身,
+ * 文案模块一律不在这里引入。
+ */
+export const TerminalMessagesContext = createContext<TerminalMessagesByLang | null>(null);
+
+const TERMINAL_OUTSIDE_TRADE =
+  'useT("terminal") was called outside <TerminalMessagesProvider>. Terminal copy is only loaded under /trade ' +
+  "(src/app/trade/layout.tsx); a component rendered anywhere else must read a core namespace (nav, ui, …) instead. " +
+  'In tests, render with renderToStaticMarkup from "@/i18n/test-support".';
+
+/**
+ * 资产页文案的上下文(P2-10,与终端文案同一套办法):account 命名空间既不在核心包里,也不在 terminal 里,
+ * src/app/trade/account/layout.tsx 渲染的 AccountMessagesProvider(src/i18n/AccountMessages.tsx,只在资产页的 chunk 里)
+ * 把两种语言放进这里,useT("account") 从这里读。默认值 null = 不在资产页的子树里。本文件只放上下文对象本身。
+ */
+export const AccountMessagesContext = createContext<AccountMessagesByLang | null>(null);
+
+const ACCOUNT_OUTSIDE_PAGE =
+  'useT("account") was called outside <AccountMessagesProvider>. Portfolio page copy is only loaded under /trade/account ' +
+  "(src/app/trade/account/layout.tsx); a component rendered anywhere else must read another namespace instead. " +
+  'In tests, render with renderAccountMarkup from "@/i18n/test-support".';
+
+/**
  * 按命名空间取当前语言文案（中央目录见 src/i18n/messages/）：
- *   const t = useT("portfolio");
- *   t.holdings
+ *   const t = useT("nav");
+ *   t.portfolio
  * en.ts 是 source of truth，其余语言文件类型 = typeof en，缺 key 编译报错。
+ *
+ * useT("terminal") 只能在 /trade 的布局之下调用(终端文案只随 /trade 加载);在别处调用直接抛错,而不是静默拿到 undefined。
+ * useT("account") 同理,只能在 /trade/account 的布局之下调用(资产页文案只随那一页加载)。
+ * 终端之外也要用的文案放核心命名空间(nav / ui …)。
  */
 export function useT<K extends keyof Messages>(ns: K): Messages[K] {
   const { lang } = useLang();
-  return MESSAGES[lang][ns];
+  const terminal = useContext(TerminalMessagesContext);
+  const account = useContext(AccountMessagesContext);
+  if (ns === "terminal") {
+    if (terminal === null) throw new Error(TERMINAL_OUTSIDE_TRADE);
+    return terminal[lang] as Messages[K];
+  }
+  if (ns === "account") {
+    if (account === null) throw new Error(ACCOUNT_OUTSIDE_PAGE);
+    return account[lang] as Messages[K];
+  }
+  return MESSAGES[lang][ns as keyof CoreMessages] as Messages[K];
 }
 
 /** 当前语言的 BCP-47 代码(给 toLocaleString 等 Intl API 用) */

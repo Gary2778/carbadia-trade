@@ -10,7 +10,8 @@ import { CANDLE_INTERVALS, DEPTH_OPTIONS } from "@/shared";
 
 export const PREFS_KEY = "carbadia-terminal-prefs";
 
-export type BottomTab = "open" | "history" | "fills" | "positions";
+/** 底部页签;"ledger"(流水)是 P2-07 加的第五个。旧存储里的四个值照旧有效,认不得的值(含以后才有的页签)回默认 */
+export type BottomTab = "open" | "history" | "fills" | "positions" | "ledger";
 export type IndicatorPrefs = { ma: boolean; ema: boolean; vol: boolean };
 export type TerminalPrefs = {
   interval: CandleInterval;
@@ -23,7 +24,7 @@ export type TerminalPrefs = {
   lastSymbol: string | null;
 };
 
-const BOTTOM_TABS: readonly BottomTab[] = ["open", "history", "fills", "positions"];
+const BOTTOM_TABS: readonly BottomTab[] = ["open", "history", "fills", "positions", "ledger"];
 
 export const DEFAULT_PREFS: TerminalPrefs = Object.freeze({
   interval: "1m",
