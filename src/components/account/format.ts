@@ -8,6 +8,11 @@ export const localeOf = (lang: string): string => (lang === "zh-CN" ? "zh-CN" : 
 
 const DASH = "—";
 
+/** 碳信用类别 / 类型名:getCreditProfile 给的英文名 → 当前语言(account.credit.*);表里没有的(项目类型的原值)原样返回 */
+export function creditName(names: Readonly<Record<string, string>>, english: string): string {
+  return Object.hasOwn(names, english) ? names[english] : english;
+}
+
 /** 整数分 → $1,234.56(precision 是标的的价格精度,金额合计用默认 2);null → — */
 export function usd(cents: number | null | undefined, locale: string, precision = 2): string {
   if (cents == null || !Number.isFinite(cents)) return DASH;
@@ -48,18 +53,6 @@ export function share(ratio: number, locale: string): string {
 /** 数量(整数吨)→ 带千分位;null → — */
 export function tonnes(qty: number | null | undefined, locale: string): string {
   return qty == null ? DASH : formatQty(qty, 1, locale);
-}
-
-const timeFormats = new Map<string, Intl.DateTimeFormat>();
-/** unix ms → 「MM/DD HH:mm」(浏览器时区,24 小时制;24 小时变化的基准时刻) */
-export function shortTime(ms: number, locale: string): string {
-  if (!Number.isFinite(ms)) return DASH;
-  let fmt = timeFormats.get(locale);
-  if (!fmt) {
-    fmt = new Intl.DateTimeFormat(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-    timeFormats.set(locale, fmt);
-  }
-  return fmt.format(ms);
 }
 
 /**

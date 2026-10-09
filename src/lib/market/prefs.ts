@@ -10,9 +10,11 @@ import { CANDLE_INTERVALS, DEPTH_OPTIONS } from "@/shared";
 
 export const PREFS_KEY = "carbadia-terminal-prefs";
 
-/** 底部页签;"ledger"(流水)是 P2-07 加的第五个。旧存储里的四个值照旧有效,认不得的值(含以后才有的页签)回默认 */
-export type BottomTab = "open" | "history" | "fills" | "positions" | "ledger";
+/** 底部页签;"ledger"(流水)是 P2-07 加的第五个,"triggers"(条件单)是 P3-07 加的第六个。旧存储里的值照旧有效,认不得的值(含以后才有的页签)回默认 */
+export type BottomTab = "open" | "triggers" | "history" | "fills" | "positions" | "ledger";
 export type IndicatorPrefs = { ma: boolean; ema: boolean; vol: boolean };
+/** 表格行密度(P3-10):comfortable = --spacing-row(22 px),compact = --spacing-row-dense(20 px);终端根的 data-density 把前者换成后者 */
+export type Density = "comfortable" | "compact";
 export type TerminalPrefs = {
   interval: CandleInterval;
   /** 盘口聚合档(分);null = 用标的 tickSize */
@@ -22,9 +24,11 @@ export type TerminalPrefs = {
   bottomTab: BottomTab;
   indicators: IndicatorPrefs;
   lastSymbol: string | null;
+  /** 旧存储里没有这个键:读出来是默认值 comfortable */
+  density: Density;
 };
 
-const BOTTOM_TABS: readonly BottomTab[] = ["open", "history", "fills", "positions", "ledger"];
+const BOTTOM_TABS: readonly BottomTab[] = ["open", "triggers", "history", "fills", "positions", "ledger"];
 
 export const DEFAULT_PREFS: TerminalPrefs = Object.freeze({
   interval: "1m",
@@ -33,12 +37,14 @@ export const DEFAULT_PREFS: TerminalPrefs = Object.freeze({
   bottomTab: "open",
   indicators: Object.freeze({ ma: true, ema: false, vol: true }),
   lastSymbol: null,
+  density: "comfortable",
 }) as TerminalPrefs;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isInterval = (v: unknown): v is CandleInterval => typeof v === "string" && (CANDLE_INTERVALS as readonly string[]).includes(v);
 const isDepth = (v: unknown): v is number => typeof v === "number" && (DEPTH_OPTIONS as readonly number[]).includes(v);
 const isBottomTab = (v: unknown): v is BottomTab => typeof v === "string" && BOTTOM_TABS.includes(v as BottomTab);
+const isDensity = (v: unknown): v is Density => v === "comfortable" || v === "compact";
 const bool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
 
 /** 非法 JSON、非对象、缺键或非法值一律逐键回默认;永不抛错 */
@@ -63,6 +69,7 @@ export function readPrefs(raw: string | null): TerminalPrefs {
       vol: bool(ind.vol, DEFAULT_PREFS.indicators.vol),
     },
     lastSymbol: typeof parsed.lastSymbol === "string" && parsed.lastSymbol.length > 0 ? parsed.lastSymbol : DEFAULT_PREFS.lastSymbol,
+    density: isDensity(parsed.density) ? parsed.density : DEFAULT_PREFS.density,
   };
 }
 
@@ -131,6 +138,14 @@ export const readPrefsSnapshot = (): TerminalPrefs => {
   return cachedPrefs;
 };
 const getServerSnapshot = (): TerminalPrefs => DEFAULT_PREFS;
+
+/**
+ * 行密度单独订阅(TerminalShell 的 data-density、行高估值、头部开关):只在密度变时重渲染,
+ * 周期 / 页签 / 盘口档数的偏好变化不牵动壳。服务端与水合首帧恒为 comfortable,挂载后切到存储值(根上只多一个属性,没有布局位移:行高只在定高面板里变)。
+ */
+export function useDensity(): Density {
+  return useSyncExternalStore(subscribePrefs, () => readPrefsSnapshot().density, () => DEFAULT_PREFS.density);
+}
 
 /** 服务端与水合首帧恒为 DEFAULT_PREFS(ChartPanel 的 1m、盘口的 15 档、BottomTabs 的 open),挂载后切到 localStorage 值 */
 export function usePrefs(): TerminalPrefs {

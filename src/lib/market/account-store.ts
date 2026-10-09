@@ -20,12 +20,12 @@
 // 账户 hooks(useMe / useBalance / …)也因此放在本文件而不是 selectors.ts(selectors 引 store.ts);下游从 @/lib/market/account-store 导入。
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { Balance, Fill, Me, Order, Position, PositionsResponse, ServerEvent } from "@/shared";
+import type { Balance, Fill, Me, Notice, Order, Position, PositionsResponse, ServerEvent, Trigger } from "@/shared";
 import { ApiError, api } from "@/lib/http/client";
 import { fetchOpenOrders, registerAccountSource, requestTransportReconnect, type AccountEvent, type AccountSource, type OpenOrdersPages } from "./account-bridge";
 import { registerOpenOrdersSource } from "./open-orders-source";
 
-/** account topic 的四种事件与判别函数:定义在 account-bridge.ts(P1-14),这里再导出,不重复定义 */
+/** account topic 的事件(order / fill / balance / position / trigger / notice)与判别函数:定义在 account-bridge.ts(P1-14),这里再导出,不重复定义 */
 export type { AccountEvent } from "./account-bridge";
 export { isAccountEvent } from "./account-bridge";
 
@@ -39,10 +39,22 @@ export type AccountState = {
   balance: Balance | null;
   /** 当前挂单(OPEN / PARTIAL)按 id;只整体替换、从不就地修改 */
   openOrders: Map<string, Order>;
+  /** 未完结(PENDING / TRIGGERING)的条件单与价格提醒按 id;只整体替换、从不就地修改。终态(TRIGGERED / REJECTED / CANCELLED)的不放这里:历史走 REST(P3-07) */
+  openTriggers: Map<string, Trigger>;
   /** 持仓按 assetId;有数量或有注销记录(quantity > 0 || retired > 0)才留 —— 整仓注销的行留着,卖光且没注销过的移除(见 holdsPosition) */
   positions: Map<string, Position>;
   /** 新 → 旧,≤ MAX_RECENT_FILLS;hydrate 不拉历史(FillsTab 自己分页 /api/account/fills),只收 fill 事件 */
   recentFills: Fill[];
+  /**
+   * 本人未读的站内通知条数(P3-08,铃铛的角标):me 一设就取 me.unreadNotices(缺失按 0;这次 /api/auth/me 发出之后角标又被写过的,
+   * 同一用户不拿它覆盖),之后由 notice 事件的 unread(服务端最新数)覆盖,面板标已读后由 setUnreadNotices 写回。与 me.unreadNotices 不同步 —— 铃铛只读这里。
+   */
+  unreadNotices: number;
+  /**
+   * 最近一条 notice 账户事件的 id,只给重复投递的判定用(同一条且同一个未读数不算变化);换人 / 登出即清空。
+   * 通知本身不留在 store 里:逐条拿到(Toast)用 subscribeNotices,列表走 REST。
+   */
+  lastNoticeId: string | null;
   status: AccountStatus;
   /**
    * 非 null = 这个 anon 没有经过确认:不是 ready 时 /api/auth/me 瞬时失败(网络 status 0、5xx、响应不可解析、HYDRATE_TIMEOUT_MS 超时;首次 hydrate,
@@ -83,13 +95,14 @@ const POSITIONS_URL = "/api/account/positions";
 const LOGOUT_URL = "/api/auth/logout";
 
 export function createInitialAccountState(): AccountState {
-  return { me: undefined, balance: null, openOrders: new Map(), positions: new Map(), recentFills: [], status: "idle", unverified: null };
+  return { me: undefined, balance: null, openOrders: new Map(), openTriggers: new Map(), positions: new Map(), recentFills: [], unreadNotices: 0, lastNoticeId: null, status: "idle", unverified: null };
 }
 
 /** 模块级单例。不含 action:写入一律走下面的函数 / accountActions */
 export const useAccountStore = create<AccountState>()(() => createInitialAccountState());
 
 const isOpenStatus = (status: Order["status"]): boolean => status === "OPEN" || status === "PARTIAL";
+const isOpenTrigger = (status: Trigger["status"]): boolean => status === "PENDING" || status === "TRIGGERING";
 
 /**
  * 这一行算不算持仓(计划 §6.2.2 C1,与服务端 positions.ts 的列表口径同一条规则):还有数量,或者有注销记录。
@@ -109,16 +122,26 @@ export const holdsPosition = (position: Pick<Position, "quantity" | "retired">):
  */
 export const CLOSED_ORDERS_MAX = 256;
 let closedOrders = new Set<string>();
-function rememberClosed(ids: readonly string[]): void {
+/** 把 ids 记进有界记录 set(插入序,满 max 丢最早记下的);挂单与条件单各一份记录,同一规则 */
+function rememberClosed(set: Set<string>, ids: readonly string[], max: number): void {
   for (const id of ids) {
-    closedOrders.delete(id); // 重新记一次挪到最新
-    closedOrders.add(id);
+    set.delete(id); // 重新记一次挪到最新
+    set.add(id);
   }
-  for (const id of closedOrders) {
-    if (closedOrders.size <= CLOSED_ORDERS_MAX) break;
-    closedOrders.delete(id);
+  for (const id of set) {
+    if (set.size <= max) break;
+    set.delete(id);
   }
 }
+
+/**
+ * 已终结(TRIGGERED / REJECTED / CANCELLED)条件单 id 的有界记录,与 closedOrders 同一套保护:终结不可逆,之后同一 id 的
+ * PENDING / TRIGGERING 一律丢弃。典型的迟到者:POST /api/account/triggers 的响应(PENDING)晚于已经到了的 trigger 事件(触发得足够快时,
+ * TRIGGERED 先到),订阅快照 / 轮询读在终结之前,OCO 的另一条被撤(CANCELLED)的事件先于它自己的 PENDING 回执。
+ * 不管这条在不在本地都记;属于当前用户:me.id 变化即清空(模块末尾的 subscribe)。
+ */
+export const CLOSED_TRIGGERS_MAX = 256;
+let closedTriggers = new Set<string>();
 
 /**
  * 迟到的旧行:已存的版本成交更多或更新得更晚(与 order-submit.ts 的 supersededByPush 同一判据)。
@@ -126,23 +149,33 @@ function rememberClosed(ids: readonly string[]): void {
  */
 const olderThan = (incoming: Order, existing: Order): boolean => existing.filledQuantity > incoming.filledQuantity || existing.updatedAt > incoming.updatedAt;
 
+/** 条件单迟到的旧行:已存的版本更新得更晚(同一条的 PENDING 晚于 TRIGGERING 到达时不回退);相等(快照重发同一行)照常覆盖 */
+const triggerOlderThan = (incoming: Trigger, existing: Trigger): boolean => existing.updatedAt > incoming.updatedAt;
+
 /**
  * 归约本体:patch 只含被触碰的切片(无变化为 null);applied = 真正改了状态的账户事件条数
- * (终态单本来不在挂单里、重复的 fill、本来没有的空持仓(数量 0 且没注销过)、被判为旧的 / 已终结的 OPEN·PARTIAL 都不算;未登录时恒为 0);
- * closed = 本批里终结的挂单 id(调用方记进 closedOrders;纯归约本身不写模块状态)。
+ * (终态单本来不在挂单里、重复的 fill、本来没有的空持仓(数量 0 且没注销过)、被判为旧的 / 已终结的 OPEN·PARTIAL 都不算;
+ * 终态条件单本来不在 openTriggers 里、被判为旧的 / 已终结的 PENDING·TRIGGERING 同样不算;未登录时恒为 0);
+ * closed / closedTriggers = 本批里终结的挂单 / 条件单 id(调用方记进 closedOrders / closedTriggers;纯归约本身不写模块状态)。
  */
 function foldAccountEvents(
   state: AccountState,
   events: readonly ServerEvent[],
   closed: ReadonlySet<string>,
-): { patch: Partial<AccountState> | null; applied: number; closed: string[] } {
+  closedTrig: ReadonlySet<string>,
+): { patch: Partial<AccountState> | null; applied: number; closed: string[]; closedTriggers: string[]; notices: Notice[]; noticeEvents: number } {
   const newlyClosed: string[] = [];
-  if (!state.me) return { patch: null, applied: 0, closed: newlyClosed };
+  const newlyClosedTriggers: string[] = [];
+  const notices: Notice[] = [];
+  if (!state.me) return { patch: null, applied: 0, closed: newlyClosed, closedTriggers: newlyClosedTriggers, notices, noticeEvents: 0 };
   let openOrders: Map<string, Order> | null = null;
+  let openTriggers: Map<string, Trigger> | null = null;
   let positions: Map<string, Position> | null = null;
   let recentFills: Fill[] | null = null;
   let fillIds: Set<string> | null = null;
   let balance: Balance | undefined;
+  let notice: { lastId: string; unread: number } | undefined;
+  let noticeEvents = 0;
   let applied = 0;
 
   for (const ev of events) {
@@ -194,6 +227,34 @@ function foldAccountEvents(
         }
         break;
       }
+      case "trigger": {
+        const { trigger } = ev;
+        if (isOpenTrigger(trigger.status)) {
+          if (closedTrig.has(trigger.id) || newlyClosedTriggers.includes(trigger.id)) break; // 已终结:终结不可逆
+          const existing = (openTriggers ?? state.openTriggers).get(trigger.id);
+          if (existing && triggerOlderThan(trigger, existing)) break;
+          openTriggers ??= new Map(state.openTriggers);
+          openTriggers.set(trigger.id, trigger);
+          applied++;
+        } else {
+          newlyClosedTriggers.push(trigger.id);
+          if (!(openTriggers ?? state.openTriggers).has(trigger.id)) break;
+          openTriggers ??= new Map(state.openTriggers);
+          openTriggers.delete(trigger.id);
+          applied++;
+        }
+        break;
+      }
+      case "notice": {
+        // 同一条、同一个未读数(重复投递)不算变化;状态里只留最后一条的 id(通知逐条交给监听器:subscribeNotices),列表走 REST
+        const isNew = ev.notice.id !== (notice?.lastId ?? state.lastNoticeId);
+        if (!isNew && ev.unread === (notice?.unread ?? state.unreadNotices)) break;
+        notice = { lastId: ev.notice.id, unread: ev.unread };
+        if (isNew) notices.push(ev.notice); // 只有新到的通知才交给监听器;同一条换了未读数只更新计数
+        noticeEvents++;
+        applied++;
+        break;
+      }
       default:
         // hello / subscribed / … / book / trades / ticker / candle:属于市场 store
         break;
@@ -206,6 +267,10 @@ function foldAccountEvents(
     patch.openOrders = openOrders;
     changed = true;
   }
+  if (openTriggers) {
+    patch.openTriggers = openTriggers;
+    changed = true;
+  }
   if (positions) {
     patch.positions = positions;
     changed = true;
@@ -214,12 +279,17 @@ function foldAccountEvents(
     patch.recentFills = recentFills;
     changed = true;
   }
+  if (notice) {
+    patch.lastNoticeId = notice.lastId;
+    patch.unreadNotices = notice.unread;
+    changed = true;
+  }
   if (balance) {
     patch.balance = balance;
     patch.me = { ...state.me, cashBalance: balance.cashBalance, lockedCash: balance.lockedCash };
     changed = true;
   }
-  return { patch: changed ? patch : null, applied, closed: newlyClosed };
+  return { patch: changed ? patch : null, applied, closed: newlyClosed, closedTriggers: newlyClosedTriggers, notices, noticeEvents };
 }
 
 /**
@@ -227,23 +297,51 @@ function foldAccountEvents(
  * order:OPEN / PARTIAL 写入 openOrders(比已存的旧 —— 成交更少或更新得更早 —— 或已终结的单跳过),FILLED / CANCELLED 移出;
  * fill:前插 recentFills、按 id 去重、上限 MAX_RECENT_FILLS;balance:整体替换并镜像进 me;
  * position:按 assetId 整行覆盖 —— 有数量或有注销记录(holdsPosition)就 upsert,整仓注销的行因此保留;数量 0 且没注销过的空行移除。
+ * trigger:PENDING / TRIGGERING 写入 openTriggers(比已存的旧 —— 更新时间更早 —— 或已终结的条件单跳过),其余状态(TRIGGERED / REJECTED / CANCELLED)移出。
+ * notice:lastNoticeId = 这条通知的 id、unreadNotices = 事件带的未读数(同一条且同一个数的重复事件无变化)。
  * 未登录(me 为空)时一律忽略:没有身份就没有 account 订阅,迟到的事件不该复活状态。市场事件与协议事件不改本 store。
- * 读 closedOrders(已终结挂单的记录)但不写它:记录由 applyAccountEvents 落。
+ * 读 closedOrders / closedTriggers(已终结挂单 / 条件单的记录)但不写它们:记录由 applyAccountEvents 落。
  */
 export function reduceAccountEvents(state: AccountState, events: readonly ServerEvent[]): Partial<AccountState> | null {
-  return foldAccountEvents(state, events, closedOrders).patch;
+  return foldAccountEvents(state, events, closedOrders, closedTriggers).patch;
 }
 
 /**
  * 一批事件一次 set();返回真正改了状态的账户事件条数(未登录、整批无变化 —— 补丁为空 —— 时为 0,且不 set())。
  * MarketProvider 的 batcher 经 account-bridge 的批量入口调到这里:一次 flush 里的 N 条账户事件只触发一次 store 更新。
- * 本批终结的挂单记进 closedOrders(补丁为空时也记)。
+ * 本批终结的挂单 / 条件单记进 closedOrders / closedTriggers(补丁为空时也记)。
  */
 export function applyAccountEvents(events: readonly ServerEvent[]): number {
-  const { patch, applied, closed } = foldAccountEvents(useAccountStore.getState(), events, closedOrders);
+  const { patch, applied, closed, closedTriggers: closedTrig, notices, noticeEvents } = foldAccountEvents(useAccountStore.getState(), events, closedOrders, closedTriggers);
+  noticeSeq += noticeEvents;
   if (patch) useAccountStore.setState(patch);
-  rememberClosed(closed);
+  rememberClosed(closedOrders, closed, CLOSED_ORDERS_MAX);
+  rememberClosed(closedTriggers, closedTrig, CLOSED_TRIGGERS_MAX);
+  for (const notice of notices) deliverNotice(notice);
   return patch ? applied : 0;
+}
+
+/**
+ * 新到的通知逐条交给监听器(Toast):每条真正改了状态的 notice 事件各一次,按到达顺序,在这一批的 set() 之后同步调用。
+ * 为什么不在 store 里放通知让 Toast 读:同一次触发 / 成交常常一口气写出两三条通知(例如「已触发」与市价单的成交、止盈止损的撤销),
+ * 它们落在同一批里,渲染只看得到最后一条 —— 前面的 Toast 就丢了(实测:被拒的触发盖掉了同一笔成交的通知)。
+ * 监听器抛错只记日志,不影响 store 与其它监听器。
+ */
+const noticeListeners = new Set<(notice: Notice) => void>();
+export function subscribeNotices(listener: (notice: Notice) => void): () => void {
+  noticeListeners.add(listener);
+  return () => {
+    noticeListeners.delete(listener);
+  };
+}
+function deliverNotice(notice: Notice): void {
+  for (const listener of [...noticeListeners]) {
+    try {
+      listener(notice);
+    } catch (err) {
+      console.error("[account-store] notice listener failed", err);
+    }
+  }
 }
 
 export function applyAccountEvent(ev: AccountEvent): void {
@@ -280,6 +378,15 @@ export function retainPositions(assetIds: ReadonlySet<string>): void {
   if (next) useAccountStore.setState({ positions: next });
 }
 
+/**
+ * 与 retainOpenOrders 同形:WS 订阅快照与轮询读到的未完结条件单只能覆盖、表达不了「已经没有了」(断线 / 轮询期间触发、被撤、被拒的那条
+ * 不会以终态出现在快照里)。只保留这些 id;无变化时引用不变。
+ */
+export function retainTriggers(ids: ReadonlySet<string>): void {
+  const next = retainKeys(useAccountStore.getState().openTriggers, ids);
+  if (next) useAccountStore.setState({ openTriggers: next });
+}
+
 // ---- 登录态迁移 ----
 // 身份 = me?.id;「已知」指 status 为 ready / anon。只有从已知身份变到另一个身份才请求传输层重连:
 // 首次 hydrate(idle → 任意)不重连,因为 WS 在 upgrade 时已带同一份 cookie 验过签。
@@ -288,6 +395,7 @@ export function retainPositions(assetIds: ReadonlySet<string>): void {
 const knownIdentity = (state: AccountState): string | null | undefined => (state.status === "ready" || state.status === "anon" ? (state.me?.id ?? null) : undefined);
 
 const EMPTY_ORDERS: Map<string, Order> = new Map();
+const EMPTY_TRIGGERS: Map<string, Trigger> = new Map();
 const EMPTY_POSITIONS: Map<string, Position> = new Map();
 const NO_FILLS: Fill[] = [];
 
@@ -299,7 +407,7 @@ function becomeAnon(): void {
   const prev = useAccountStore.getState();
   const wasKnown = knownIdentity(prev);
   if (prev.status === "anon" && prev.me === null && !prev.unverified) return;
-  useAccountStore.setState({ me: null, balance: null, openOrders: EMPTY_ORDERS, positions: EMPTY_POSITIONS, recentFills: NO_FILLS, status: "anon", unverified: null });
+  useAccountStore.setState({ me: null, balance: null, openOrders: EMPTY_ORDERS, openTriggers: EMPTY_TRIGGERS, positions: EMPTY_POSITIONS, recentFills: NO_FILLS, unreadNotices: 0, lastNoticeId: null, status: "anon", unverified: null });
   if (wasKnown !== undefined && wasKnown !== null) requestTransportReconnect();
 }
 
@@ -315,8 +423,11 @@ function becomeUnverifiedAnon(fromRetry: boolean): void {
     me: null,
     balance: null,
     openOrders: EMPTY_ORDERS,
+    openTriggers: EMPTY_TRIGGERS,
     positions: EMPTY_POSITIONS,
     recentFills: NO_FILLS,
+    unreadNotices: 0,
+    lastNoticeId: null,
     status: "anon",
     unverified: { attempts, retryAt: Date.now() + hydrateRetryDelay(attempts) },
   });
@@ -340,20 +451,29 @@ function positionsFrom(snapshot: PositionsResponse): Map<string, Position> {
 
 /**
  * 登录态就绪:me 与 balance 同步(balance 以 positions 快照为准,与持仓同一事务读出;没有快照时取 me 自带的余额);
- * positions / orders 传 null 表示「保留现状」(账户端点暂时失败、翻页中途失败、setMe 未拉列表);换用户时上一位的挂单 / 持仓 / 成交一律清空。
+ * positions / orders 传 null 表示「保留现状」(账户端点暂时失败、翻页中途失败、setMe 未拉列表);换用户时上一位的挂单 / 条件单 / 持仓 / 成交一律清空
+ * (条件单不由 hydrate 拉:account 订阅快照或轮询送来,同一位用户保留现状)。
+ * seq = 发出 /api/auth/me 那一刻的戳序号(noticeSeq;setMe 拿到的就是此刻的身份,传当前值):同一用户且之后角标又被写过
+ *(notice 事件、setUnreadNotices)时,这份应答里的未读数比角标旧,不覆盖。
  */
-function becomeReady(me: NonNullable<Me>, positions: PositionsResponse | null, orders: OpenOrdersPages | null): void {
+function becomeReady(me: NonNullable<Me>, positions: PositionsResponse | null, orders: OpenOrdersPages | null, seq: number): void {
   const prev = useAccountStore.getState();
   const wasKnown = knownIdentity(prev);
   const sameUser = prev.me?.id === me.id;
   const prevOrders = sameUser ? prev.openOrders : EMPTY_ORDERS;
   const balance: Balance = positions ? positions.balance : { cashBalance: me.cashBalance, lockedCash: me.lockedCash };
+  // 回滚到旧镜像后,还开着的新版页面拿到的 me 没有 unreadNotices:不是整数一律按 0(铃铛的名字里不能出现 undefined)
+  const unread = Number.isSafeInteger(me.unreadNotices) ? me.unreadNotices : 0;
+  const staleUnread = sameUser && seq !== noticeSeq;
   useAccountStore.setState({
-    me: { ...me, cashBalance: balance.cashBalance, lockedCash: balance.lockedCash },
+    me: { ...me, unreadNotices: unread, cashBalance: balance.cashBalance, lockedCash: balance.lockedCash },
     balance,
     openOrders: orders ? openOrdersFrom(orders, prevOrders) : prevOrders,
+    openTriggers: sameUser ? prev.openTriggers : EMPTY_TRIGGERS,
     positions: positions ? positionsFrom(positions) : sameUser ? prev.positions : EMPTY_POSITIONS,
     recentFills: sameUser ? prev.recentFills : NO_FILLS,
+    unreadNotices: staleUnread ? prev.unreadNotices : unread,
+    lastNoticeId: sameUser ? prev.lastNoticeId : null,
     status: "ready",
     unverified: null,
   });
@@ -436,7 +556,7 @@ let lastHydrateAt = Number.NEGATIVE_INFINITY;
 
 /**
  * fromRetry:由 retryHydrateIfUnverified 发起(重试链),/api/auth/me 失败时沿用并累加失败次数。
- * mode "me":/api/auth/me 成功即 becomeReady(me, null, null) —— 同一用户保留挂单 / 持仓 / 成交,换了用户清空;失败语义与 full 相同。
+ * mode "me":/api/auth/me 成功即 becomeReady(me, null, null, seq) —— 同一用户保留挂单 / 持仓 / 成交,换了用户清空;失败语义与 full 相同。
  */
 async function runHydrate(fetchJson: FetchJson, fromRetry: boolean, mode: HydrateMode): Promise<void> {
   const ticket = ++hydrateTicket;
@@ -444,6 +564,7 @@ async function runHydrate(fetchJson: FetchJson, fromRetry: boolean, mode: Hydrat
   lastHydrateAt = Date.now();
   const fresh = (): boolean => ticket === hydrateTicket;
   if (useAccountStore.getState().status === "idle") useAccountStore.setState({ status: "loading" });
+  const seq = noticeSeq; // /api/auth/me 读在这一刻之后;回来之前角标又被写过的,同一用户不拿它的未读数覆盖(becomeReady)
   const deadline = createDeadline(HYDRATE_TIMEOUT_MS);
   const timed = withDeadline(fetchJson, deadline);
 
@@ -463,17 +584,17 @@ async function runHydrate(fetchJson: FetchJson, fromRetry: boolean, mode: Hydrat
       return;
     }
     if (mode === "me") {
-      becomeReady(me, null, null);
+      becomeReady(me, null, null, seq);
       return;
     }
     try {
       const [positions, orders] = await Promise.all([timed<PositionsResponse>(POSITIONS_URL), fetchOpenOrders(timed)]);
       if (!fresh()) return;
-      becomeReady(me, positions, orders);
+      becomeReady(me, positions, orders, seq);
     } catch (err) {
       if (!fresh()) return;
       if (isUnauthorized(err)) becomeAnon();
-      else becomeReady(me, null, null);
+      else becomeReady(me, null, null, seq);
     }
   } finally {
     deadline.settle();
@@ -496,10 +617,35 @@ export function hydrateForNavigation(fetchJson: FetchJson = api, maxWaitMs: numb
   return Promise.race([run, waited]).finally(() => clearTimeout(timer));
 }
 
+// ---- 未读通知数的写回与重读 ----
+// 角标的数有三个来源:/api/auth/me(becomeReady)、notice 事件带的 unread(WS,最新)、以及主动读一次服务端(面板标已读的应答、notice-refresh.ts 的重读)。
+// 第一个与第三个都是「请求发出去、过一会儿才回来」,回来时数可能已经过期 —— 期间换了人、又来了一条 notice 事件(它的 unread 比这份应答更新)、
+// 或面板标已读写回了更新的数:发请求时用 noticeStamp() 取一张戳,写回时带上,对不上就不写(/api/auth/me 只对同一用户这样比,见 becomeReady)。
+
+/** 到目前为止应用过的 notice 事件条数(含只换了未读数的重复投递)加上 setUnreadNotices 的写入次数:戳里的序号 */
+let noticeSeq = 0;
+
+/** 发请求那一刻的戳:登录用户 id 与 notice 事件序号 */
+export type NoticeStamp = { meId: string | null; seq: number };
+export const noticeStamp = (): NoticeStamp => ({ meId: useAccountStore.getState().me?.id ?? null, seq: noticeSeq });
+
+/**
+ * 把一次读到的未读数写回铃铛的角标(面板标已读的应答、重读的应答)。没有 me(已登出)不写;带了戳的,戳对不上
+ * (登录用户变了、或之后又来了 notice 事件)也不写 —— 事件带的数更新。返回写没写(调用方据此决定要不要重读一次,见 notice-refresh 的 "stale")。
+ */
+export function setUnreadNotices(count: number, stamp?: NoticeStamp): boolean {
+  const me = useAccountStore.getState().me;
+  if (!me) return false;
+  if (stamp && (stamp.meId !== me.id || stamp.seq !== noticeSeq)) return false;
+  noticeSeq += 1; // 写过之后,在这之前发出的读取(/api/auth/me、别的重读)回来时戳对不上,不会把它盖回旧数
+  useAccountStore.setState({ unreadNotices: count });
+  return true;
+}
+
 /** 直接写入登录态(登录流程拿到用户对象时用;null = 本地登出)。不拉列表:挂单 / 持仓由随后的 account 订阅快照或 hydrate 补上 */
 export function setMe(me: Me): void {
   hydrateTicket++;
-  if (me) becomeReady(me, null, null);
+  if (me) becomeReady(me, null, null, noticeSeq);
   else becomeAnon();
 }
 
@@ -524,12 +670,22 @@ export function retryHydrateIfUnverified(fetchJson: FetchJson = api): Promise<vo
   return runHydrate(fetchJson, true, "me");
 }
 
+/** 市场总览页(P3-05):在 /trade 之下,却不订阅 account(公开页面、没有账户数据),余额没有推送在维护。与 Nav.tsx 的 MARKETS_PAGE 同一个路径(本文件是根布局的叶子,不能反向引 Nav,各存一份) */
+const MARKETS_PAGE = "/trade/markets";
+
+/** 这个路径上有 account 推送 / 轮询在维护余额(终端与资产页):/trade 下除总览页以外的全部路径 */
+function runsAccountFeed(pathname: string): boolean {
+  if (!pathname.startsWith("/trade")) return false;
+  return !(pathname === MARKETS_PAGE || pathname.startsWith(`${MARKETS_PAGE}/`));
+}
+
 /**
  * Nav 的路径 effect(计划 §4.1 把 Nav 改成读 store 之后,终端之外没有别的东西刷新它 —— main 的 Nav 每次换路径都拉 /api/auth/me):
  *   - 未确认的 anon:照旧走自愈重试(retryHydrateIfUnverified,任何路径);
- *   - 已确认的状态(ready,以及确认的 anon —— 别的标签页登录 / 登出、会话过期也要在下一次导航时反映出来),路径不以 /trade 开头:
+ *   - 已确认的状态(ready,以及确认的 anon —— 别的标签页登录 / 登出、会话过期也要在下一次导航时反映出来),路径不以 /trade 开头(或是总览页 /trade/markets):
  *     只拉 /api/auth/me(mode "me"),距上一次任何 hydrate 开始不足 NAV_REFRESH_MIN_MS、或有 hydrate 在途时不拉;
  *   - /trade 下不拉:那里 MarketProvider(终端)或 AccountFeed(资产页 /trade/account,P2-10)的推送 / 轮询在维护余额,REST 结果可能比刚到的推送旧;
+ *     例外是总览页 /trade/markets(P3-05):它只订行情、不订 account,余额没人维护,照常按导航节流刷新(runsAccountFeed);
  *   - idle / loading:挂载那次还没回,不插队。
  * 票号照旧丢弃过期结果;ready 重刷不闪(status 只在 idle 时进 loading)。返回发起的 hydrate(没发起为 null)。
  */
@@ -537,7 +693,7 @@ export function refreshOnNavigation(pathname: string, fetchJson: FetchJson = api
   const { status, unverified } = useAccountStore.getState();
   if (unverified) return retryHydrateIfUnverified(fetchJson);
   if (status !== "ready" && status !== "anon") return null;
-  if (pathname.startsWith("/trade") || runningTicket === hydrateTicket) return null;
+  if (runsAccountFeed(pathname) || runningTicket === hydrateTicket) return null;
   const since = Date.now() - lastHydrateAt;
   if (since >= 0 && since < NAV_REFRESH_MIN_MS) return null; // 时钟被往回调过(since < 0)时不算刚刷过
   return runHydrate(fetchJson, false, "me");
@@ -655,18 +811,26 @@ export const accountActions = {
   applyAccountEvents,
   retainOpenOrders,
   retainPositions,
+  retainTriggers,
   setMe,
+  setUnreadNotices,
   logout,
   retryHydrateIfUnverified,
 };
 
-/** 挂单 / 持仓切片的版本号:任一引用被替换就 +1(结构共享保证真改了才换引用)。轮询快照与 loadAccountLists 据此判断请求期间 store 有没有被写过 */
+/**
+ * 挂单 / 持仓 / 条件单切片的版本号:任一引用被替换就 +1(结构共享保证真改了才换引用)。轮询快照与 loadAccountLists 据此判断请求期间 store 有没有被写过
+ * (条件单也算:请求期间本地新建了一条条件单,读在它之前的快照收口会把它删掉)
+ */
 let listsVersion = 0;
 
-// 已终结挂单的记录属于当前用户:身份变化(登出、换人、store 重置)即清空
+// 已终结挂单 / 条件单的记录属于当前用户:身份变化(登出、换人、store 重置)即清空
 useAccountStore.subscribe((state, prev) => {
-  if (state.me?.id !== prev.me?.id) closedOrders = new Set();
-  if (state.openOrders !== prev.openOrders || state.positions !== prev.positions) listsVersion++;
+  if (state.me?.id !== prev.me?.id) {
+    closedOrders = new Set();
+    closedTriggers = new Set();
+  }
+  if (state.openOrders !== prev.openOrders || state.openTriggers !== prev.openTriggers || state.positions !== prev.positions) listsVersion++;
 });
 
 // ---- 接缝(模块初始化时注册,两个都是零依赖叶子)----
@@ -685,6 +849,7 @@ export const accountSource: AccountSource = {
   applyAccountEvents,
   retainOpenOrders,
   retainPositions,
+  retainTriggers,
   listsVersion: () => listsVersion,
   knownMeId: () => knownIdentity(useAccountStore.getState()),
   loadLists: () => void loadAccountLists(),
@@ -699,6 +864,13 @@ export function openOrdersOf(openOrders: ReadonlyMap<string, Order>, symbol?: st
   const out: Order[] = [];
   for (const order of openOrders.values()) if (!symbol || order.symbol === symbol) out.push(order);
   return out.sort(byNewest);
+}
+const triggersByNewest = (a: Trigger, b: Trigger): number => b.createdAt - a.createdAt || (b.id > a.id ? 1 : b.id < a.id ? -1 : 0);
+/** 未完结的条件单,新 → 旧;symbol 传入时只取该标的(传 undefined = 全部;传空串 = 没有) */
+export function openTriggersOf(openTriggers: ReadonlyMap<string, Trigger>, symbol?: string): Trigger[] {
+  const out: Trigger[] = [];
+  for (const trigger of openTriggers.values()) if (symbol === undefined || trigger.symbol === symbol) out.push(trigger);
+  return out.sort(triggersByNewest);
 }
 /** 持仓按 symbol 升序(与 /api/account/positions 同序) */
 export function positionsOf(positions: ReadonlyMap<string, Position>): Position[] {
@@ -723,4 +895,16 @@ export function usePositions(): Position[] {
 }
 export function useOpenOrders(symbol?: string): Order[] {
   return useAccountStore(useShallow((s) => openOrdersOf(s.openOrders, symbol)));
+}
+/** 本人未读通知条数(铃铛角标);未登录与 SSR 首帧恒 0 */
+export function useUnreadNotices(): number {
+  return useAccountStore((s) => s.unreadNotices);
+}
+/** 全部未完结的条件单与价格提醒(PENDING / TRIGGERING),新 → 旧;引用稳定(元素没变就不换数组,同 useOpenOrders) */
+export function useOpenTriggers(): Trigger[] {
+  return useAccountStore(useShallow((s) => openTriggersOf(s.openTriggers)));
+}
+/** 某个标的的未完结条件单与价格提醒,新 → 旧;引用稳定 */
+export function useOpenTriggersFor(symbol: string): Trigger[] {
+  return useAccountStore(useShallow((s) => openTriggersOf(s.openTriggers, symbol)));
 }

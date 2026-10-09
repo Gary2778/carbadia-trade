@@ -3,7 +3,9 @@
 import { useEffect, useSyncExternalStore, type ReactNode } from "react";
 import Link from "next/link";
 import type { InstrumentListItem } from "@/shared";
+import { NoticeToaster } from "@/components/notices/NoticeToaster";
 import { DemoBadge } from "@/components/terminal/DemoBadge";
+import { TimeZoneSelect } from "@/components/terminal/TimeZoneSelect";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useT } from "@/i18n/LangProvider";
@@ -74,6 +76,9 @@ export function AccountHeader() {
       <div className="flex flex-wrap items-center gap-x-panel gap-y-gap">
         <h1 className="text-t-2xl font-semibold text-foreground">{a.title}</h1>
         <DemoBadge />
+        <span className="ms-auto">
+          <TimeZoneSelect />
+        </span>
       </div>
       <p className="max-w-3xl text-t-md text-muted">{a.intro}</p>
       <p data-demo-note="" className="text-t-sm font-medium text-warning">
@@ -85,7 +90,7 @@ export function AccountHeader() {
             key={link.href}
             href={link.href}
             prefetch={false}
-            className="inline-flex min-h-touch items-center rounded-pill border border-(--terminal-border) bg-(--terminal-panel-2) px-3 text-t-sm text-foreground transition-colors duration-(--motion-fast) hover:border-accent hover:text-accent focus-visible:outline-none focus-visible:shadow-focus lg:min-h-0 lg:py-1"
+            className="inline-flex min-h-touch items-center rounded-control border border-(--terminal-border) bg-(--terminal-panel-2) px-3 text-t-sm text-foreground transition-colors duration-(--motion-fast) hover:border-accent hover:text-accent focus-visible:outline-none focus-visible:shadow-focus lg:min-h-0 lg:py-1"
           >
             {a.links[link.key]}
           </Link>
@@ -164,6 +169,7 @@ export function AccountPage({ initialInstruments, transportMode }: AccountPagePr
   return (
     <AccountFrame>
       {hydrated ? <AccountFeed initialInstruments={initialInstruments} transportMode={transportMode} /> : null}
+      <NoticeToaster />
       <AccountBody
         phase={phase}
         onRetry={retry}

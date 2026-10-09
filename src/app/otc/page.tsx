@@ -73,7 +73,7 @@ export default function OtcPage() {
         {me && (
           <button
             onClick={() => setShowCreate((s) => !s)}
-            className="px-4 py-2 rounded-full bg-accent text-background text-sm font-medium hover:bg-accent-strong transition-colors hover:opacity-90"
+            className="px-4 py-2 rounded-control bg-accent text-background text-sm font-medium hover:bg-accent-strong transition-colors hover:opacity-90"
           >{showCreate ? t.collapse : t.newListing}</button>
         )}
       </div>
@@ -84,7 +84,7 @@ export default function OtcPage() {
       {showCreate && me && <CreateListing assets={assets} onDone={() => { setShowCreate(false); load(); }} />}
 
       <Reveal>
-        <div className="rounded-2xl border border-border bg-surface shadow-card overflow-hidden">
+        <div className="rounded-panel border border-border bg-surface shadow-card overflow-hidden">
           {loading || !accountKnown ? (
             <div className="p-10 text-center text-muted">{t.loading}</div>
           ) : listings.length === 0 && err ? (
@@ -169,14 +169,14 @@ function CreateListing({ assets, onDone }: { assets: Asset[]; onDone: () => void
   }
 
   return (
-    <div className="rounded-2xl border border-border bg-surface shadow-card p-5 space-y-3">
+    <div className="rounded-panel border border-border bg-surface shadow-card p-5 space-y-3">
       <h2 className="font-semibold text-sm">{t.createTitle}</h2>
       <p className="text-xs text-muted">{t.createHint}</p>
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
         <label className="block sm:col-span-1">
           <span className="text-xs text-muted">{t.fieldInstrument}</span>
           <select value={assetId} onChange={(e) => setAssetId(e.target.value)}
-            className="w-full mt-1 bg-surface-2 border border-border rounded-md px-2 py-2 text-sm outline-none focus:border-accent">
+            className="w-full mt-1 bg-surface-2 border border-border rounded-control px-2 py-2 text-sm outline-none focus:border-accent">
             {assets.map((a) => <option key={a.id} value={a.id}>{a.symbol}</option>)}
           </select>
         </label>
@@ -186,7 +186,7 @@ function CreateListing({ assets, onDone }: { assets: Asset[]; onDone: () => void
       </div>
       {err && <div className="text-danger text-xs">{err}</div>}
       <button onClick={submit} disabled={busy || !assetId || !quantity || !price}
-        className="px-4 py-2 rounded-full bg-accent text-background text-sm font-medium hover:bg-accent-strong transition-colors disabled:opacity-40">
+        className="px-4 py-2 rounded-control bg-accent text-background text-sm font-medium hover:bg-accent-strong transition-colors disabled:opacity-40">
         {busy ? t.submitting : t.confirmPublish}
       </button>
     </div>
@@ -199,7 +199,7 @@ function Field({ label, value, onChange, step }: { label: string; value: string;
       <span className="text-xs text-muted">{label}</span>
       {/* 移动端键盘类型:整数字段弹九宫格,带小数步进的价格字段弹小数键盘 */}
       <input type="number" min="0" step={step ?? "1"} inputMode={step ? "decimal" : "numeric"} value={value} onChange={(e) => onChange(e.target.value)}
-        className="w-full mt-1 bg-surface-2 border border-border rounded-xl px-3.5 py-2.5 text-sm tnum outline-none focus:border-accent" />
+        className="w-full mt-1 bg-surface-2 border border-border rounded-control px-3.5 py-2.5 text-sm tnum outline-none focus:border-accent" />
     </label>
   );
 }

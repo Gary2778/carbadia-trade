@@ -1,3 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <text x="50" y="52" font-size="86" text-anchor="middle" dominant-baseline="central">🌿</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 1500">
+  <path fill="#2ee27f" d="M0 0H750V750H0Z"/>
+  <path fill="#5271ff" d="M750 0H975C1264.29 0 1500 235.71 1500 525V750H750Z"/>
+  <path fill="#ffde59" d="M0 750H225C514.29 750 750 985.71 750 1275V1500H525C235.71 1500 0 1264.29 0 975Z"/>
+  <path fill="#38b6ff" d="M750 750H1500V1500H750Z"/>
 </svg>

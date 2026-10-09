@@ -4,6 +4,9 @@ import type { ConnectionState } from "@/shared";
 import { useLang, useT } from "@/i18n/LangProvider";
 import { connectionKind, useConnection, type ConnectionBadgeKind } from "@/lib/market/selectors";
 import { transportModeFromEnv, type TransportMode } from "@/lib/market/transport";
+import { formatTime } from "@/lib/time-format";
+import type { TimeZonePref } from "@/providers/timeZoneState";
+import { useTimeZone } from "@/providers/useTimeZone";
 
 export type { ConnectionBadgeKind };
 
@@ -18,10 +21,10 @@ export function connectionBadgeKind(conn: ConnectionState, mode: TransportMode =
   return connectionKind(conn, mode);
 }
 
-/** 悬停说明里的「最后一条消息」时间:按界面语言格式化(计划 §4.8:数字与日期经 Intl 按当前 lang),不跟浏览器默认 locale */
-export function lastMessageTime(lastMessageAt: number | null, lang: string): string | null {
+/** 悬停说明里的「最后一条消息」时间:按界面语言格式化(计划 §4.8:数字与日期经 Intl 按当前 lang),不跟浏览器默认 locale;时区按偏好(lib/time-format.ts 的 clock 样式) */
+export function lastMessageTime(lastMessageAt: number | null, lang: string, tz: TimeZonePref): string | null {
   if (lastMessageAt === null) return null;
-  return new Date(lastMessageAt).toLocaleTimeString(lang === "zh-CN" ? "zh-CN" : "en-US", { hour12: false });
+  return formatTime(lastMessageAt, lang === "zh-CN" ? "zh-CN" : "en-US", tz, "clock");
 }
 
 // 语义色,不随涨跌轴翻转
@@ -46,11 +49,12 @@ export function ConnectionBadge({ mode }: { mode?: TransportMode } = {}) {
   const t = useT("terminal");
   const { lang } = useLang();
   const conn = useConnection();
+  const tz = useTimeZone();
   // mode "poll" = 服务端没有 /ws(transportModeForServer:START_MODE=next、本进程没有 hub、或 WS_DISABLED=1):占位也显示「轮询」,服务端 HTML 里就不出现「已连接」。
   // 占位(pending)时 kind 为 polling 只可能是轮询模式,所以 kind === "polling" 时降级说明照常输出(SSR 与水合首帧一致)
   const { kind, pending } = connectionBadgeKind(conn, mode === "poll" ? "poll" : BUILD_MODE);
   const label = t.connection[kind];
-  const lastMessage = lastMessageTime(conn.lastMessageAt, lang);
+  const lastMessage = lastMessageTime(conn.lastMessageAt, lang, tz);
   return (
     <span className="inline-flex min-w-0 items-center gap-gap max-md:basis-full">
       <span
@@ -58,7 +62,7 @@ export function ConnectionBadge({ mode }: { mode?: TransportMode } = {}) {
         data-pending={pending ? "" : undefined}
         aria-busy={pending || undefined}
         title={lastMessage ? `${t.a11y.connection(label)} · ${lastMessage}` : undefined}
-        className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-pill border border-(--terminal-border) px-2 py-0.5 text-t-xs leading-4 ${
+        className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-chip border border-(--terminal-border) px-2 py-0.5 text-t-xs leading-4 ${
           pending ? "text-muted-2" : "text-muted"
         }`}
       >

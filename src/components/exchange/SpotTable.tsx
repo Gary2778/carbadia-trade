@@ -53,9 +53,9 @@ const detailFilterKeys = [
   "minSupply",
 ];
 const fieldClass =
-  "min-w-0 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent focus:ring-2 focus:ring-accent/10";
+  "min-w-0 w-full rounded-control border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent focus:ring-2 focus:ring-accent/10";
 const buttonClass =
-  "inline-flex items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs font-medium hover:border-accent/40 hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40";
+  "inline-flex items-center justify-center gap-1.5 rounded-control border border-border bg-surface px-3 py-2 text-xs font-medium hover:border-accent/40 hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40";
 /** 交易终端的深链(= lib/market/navigation 的 terminalHref(symbol);这里不为一条路径把终端的导航模块带进首页包) */
 const terminalPath = (symbol: string) => `/trade/${encodeURIComponent(symbol)}`;
 // 情景标的只有终端能交易(旧标的页的 tab=trade 对它们也会跳到终端),行直接指向 /trade/<symbol>
@@ -338,7 +338,7 @@ export function SpotTable({
   );
 
   return (
-    <section className="rounded-2xl border border-border bg-surface shadow-card overflow-hidden">
+    <section className="rounded-panel border border-border bg-surface shadow-card overflow-hidden">
       <div className="px-5 py-3 border-b border-border flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <h2 className="font-semibold">
@@ -379,11 +379,11 @@ export function SpotTable({
             aria-expanded={toolsOpen}
             aria-controls={toolsId}
             onClick={() => setToolsOpen((open) => !open)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-accent"
+            className="inline-flex items-center gap-1.5 rounded-control border border-border px-2.5 py-1.5 text-xs font-medium text-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-accent"
           >
             {c("Filters & tools", "筛选与工具")}
             {anyFilters && (
-              <span className="rounded-full bg-accent/10 px-1.5 text-accent">
+              <span className="rounded-chip bg-accent/10 px-1.5 text-accent">
                 {activeFilters.length}
               </span>
             )}
@@ -660,7 +660,7 @@ export function SpotTable({
                 `移除筛选：${label}：${value}`,
               )}
               title={`${label}: ${value}`}
-              className="inline-flex max-w-full items-center gap-2 rounded-full border border-accent/20 bg-accent/5 px-2.5 py-1 text-xs text-accent hover:bg-accent/10"
+              className="inline-flex max-w-full items-center gap-2 rounded-control border border-accent/20 bg-accent/5 px-2.5 py-1 text-xs text-accent hover:bg-accent/10"
             >
               <span className="truncate">
                 {label}: {value}
@@ -918,7 +918,7 @@ export function SpotTable({
                         href={terminalPath(asset.symbol)}
                         prefetch={false}
                         aria-label={`${tn.terminal} · ${asset.symbol}`}
-                        className="inline-flex items-center rounded-full border border-border px-2.5 py-1 text-xs font-medium text-muted hover:border-accent/40 hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        className="inline-flex items-center rounded-control border border-border px-2.5 py-1 text-xs font-medium text-muted hover:border-accent/40 hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                       >
                         {tn.terminal}
                       </Link>
@@ -999,7 +999,7 @@ export function SpotTable({
                     if (compared.length > 1) comparisonTray.current?.focus();
                     else toolsButton.current?.focus();
                   }}
-                  className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-2.5 py-1 text-xs hover:border-accent/40"
+                  className="inline-flex items-center gap-2 rounded-control border border-border bg-surface px-2.5 py-1 text-xs hover:border-accent/40"
                   aria-label={c(
                     `Remove ${tName(asset.symbol, asset.name, lang)} from comparison`,
                     `从比较移除 ${tName(asset.symbol, asset.name, lang)}`,
@@ -1158,7 +1158,7 @@ function ComparisonDialog({
       onCancel={onClose}
       onClose={onClose}
       aria-labelledby={titleId}
-      className="glass-overlay fixed inset-0 m-auto max-h-[85dvh] w-[calc(100%-2rem)] max-w-5xl overflow-auto rounded-2xl border border-border bg-surface p-5 text-foreground shadow-card backdrop:bg-black/40 sm:p-7"
+      className="glass-overlay fixed inset-0 m-auto max-h-[85dvh] w-[calc(100%-2rem)] max-w-5xl overflow-auto rounded-dialog border border-border bg-surface p-5 text-foreground shadow-card backdrop:bg-black/40 sm:p-7"
     >
       <header className="mb-5 flex items-start justify-between gap-4">
         <div>
@@ -1176,7 +1176,7 @@ function ComparisonDialog({
           type="button"
           aria-label={c("Close comparison", "关闭比较")}
           onClick={onClose}
-          className="rounded-lg p-2 text-muted hover:bg-surface-2"
+          className="rounded-control p-2 text-muted hover:bg-surface-2"
         >
           <ExchangeIcon name="close" size={18} />
         </button>

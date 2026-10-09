@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Balance, BookResponse, CandlesResponse, InstrumentsResponse, Order, Position, ServerEvent, TradesResponse } from "@/shared";
+import type { Balance, BookResponse, CandlesResponse, InstrumentsResponse, Order, Position, ServerEvent, TradesResponse, Trigger } from "@/shared";
 import { DEFAULT_FEE_SCHEDULE, auditRefOf } from "@/shared";
 import { serverEventSchema, serverFrameSchema } from "../../../server/ws-schema.mjs";
 import { createBatcher } from "./batcher";
@@ -65,6 +65,27 @@ const position = (symbol: string): Position => ({
   isScenario: false,
 });
 const balance: Balance = { cashBalance: 100_000, lockedCash: 6_000 };
+const trigger = (id: string, over: Partial<Trigger> = {}): Trigger => ({
+  id,
+  kind: "ORDER",
+  assetId: `a-${SYM}`,
+  symbol: SYM,
+  direction: "ABOVE",
+  triggerPrice: 1300,
+  side: "SELL",
+  orderType: "MARKET",
+  limitPrice: null,
+  quantity: 2,
+  ocoGroupId: null,
+  status: "PENDING",
+  reason: null,
+  orderId: null,
+  firedPrice: null,
+  createdAt: 1,
+  updatedAt: 1,
+  firedAt: null,
+  ...over,
+});
 
 const validFrame = (frame: ServerEvent[]) => {
   const parsed = serverFrameSchema.safeParse(frame);
@@ -135,6 +156,17 @@ describe("poll-frames", () => {
     expect(framesFromAccount([], [], balance)).toHaveLength(1);
   });
 
+  it("framesFromAccount 带条件单:trigger 逐条排在 position 之后(与 hub 的订阅快照同序),seq 0,与 WS 事件同形(通过服务端的帧 schema)", () => {
+    const frame = framesFromAccount([order("o1")], [position(SYM)], balance, [trigger("t1"), trigger("t2", { kind: "ALERT", side: null, orderType: null, quantity: null, status: "TRIGGERING" })]);
+    validFrame(frame);
+    expect(frame.map((e) => e.t)).toEqual(["balance", "order", "position", "trigger", "trigger"]);
+    expect(frame[3]).toEqual({ t: "trigger", topic: "account", seq: NO_SEQ, trigger: trigger("t1") });
+    expect((frame[4] as { trigger: Trigger }).trigger.id).toBe("t2");
+    // 不传(或传空)= 没有条件单帧,与加这个参数之前同形
+    expect(framesFromAccount([order("o1")], [position(SYM)], balance).map((e) => e.t)).toEqual(["balance", "order", "position"]);
+    expect(framesFromAccount([], [], balance, [])).toHaveLength(1);
+  });
+
   it("seq 0 的轮询帧经 batcher 只到 apply;喂给 ws-client 也不发重订阅;轮询模式的传输管理器从不建 socket", () => {
     vi.useFakeTimers();
     try {
@@ -145,7 +177,7 @@ describe("poll-frames", () => {
         ...framesFromTrades(SYM, { trades: [trade("a", 1)], seq: 0 }),
         ...framesFromInstruments({ instruments: [{ instrument: instrument(SYM), ticker: ticker(SYM) }], feeSchedule: DEFAULT_FEE_SCHEDULE, serverTime: 1 }),
         ...framesFromCandles(SYM, "1m", { interval: "1m", candles: [{ t: 0, o: 1, h: 1, l: 1, c: 1, v: 1 }] }),
-        ...framesFromAccount([order("o1")], [], balance),
+        ...framesFromAccount([order("o1")], [], balance, [trigger("t1")]),
       ];
       b.push(frames);
       b.flush();

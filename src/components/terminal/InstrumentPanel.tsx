@@ -4,7 +4,7 @@ import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
 import type { Instrument, InstrumentListItem } from "@/shared";
 import { useWatchlist } from "@/components/exchange/useExchange";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { DEFAULT_ROW_HEIGHT, VirtualList } from "@/components/ui/VirtualList";
+import { VirtualList } from "@/components/ui/VirtualList";
 import { LANGS } from "@/i18n/config";
 import { useLang, useT } from "@/i18n/LangProvider";
 import { tName, tProjectType, tRegistry } from "@/i18n/data";
@@ -50,7 +50,8 @@ export function focusInstrumentSearch(): boolean {
 /**
  * 触屏行高:(pointer: coarse) 或 < 64rem 时行高换成 --spacing-row-touch(2.75rem)。CSS 那一半在面板根的两个变体类上
  * (把 --spacing-row 就地改指 --spacing-row-touch,行与 VirtualList 的定高包装层都用 h-row,跟着一起变);
- * JS 这一半只给 react-virtual 的 estimateSize 一个像素初值,挂载后 measureElement 按真实高度校正。
+ * JS 这一半只给 react-virtual 的 estimateSize 一个像素初值,挂载后 measureElement 按真实高度校正;
+ * 非触屏不传,由 VirtualList 按行密度取 22 或 20(触屏的 44 不随密度:--spacing-row-touch 写在面板根上,压过终端根的 data-density)。
  */
 const TOUCH_ROWS_QUERY = "(pointer: coarse), (width < 64rem)";
 /** = --spacing-row-touch(2.75rem)在根字号 16 下的像素值,只作 estimateSize 的初值 */
@@ -184,7 +185,7 @@ export function InstrumentPanel({ symbol, initialItems, initialFilters, actionsR
       </div>
       <VirtualList
         items={rows}
-        rowHeight={touchRows ? TOUCH_ROW_HEIGHT : DEFAULT_ROW_HEIGHT}
+        rowHeight={touchRows ? TOUCH_ROW_HEIGHT : undefined}
         label={t.a11y.instrumentsRegion}
         getKey={rowKey}
         className="min-h-0 flex-1 pb-gap"

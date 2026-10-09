@@ -4,7 +4,9 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/http/client";
-import { fmtMoney, fmtQty, fmtTime } from "@/lib/format";
+import { fmtMoney, fmtQty } from "@/lib/format";
+import { formatTime } from "@/lib/time-format";
+import { useTimeZone } from "@/providers/useTimeZone";
 import { usePolling } from "@/hooks/usePolling";
 import { useLang } from "@/i18n/LangProvider";
 import { tName } from "@/i18n/data";
@@ -36,6 +38,7 @@ type OrderStatusFilter = (typeof ORDER_STATUSES)[number];
 export function OrderWorkspace() {
   const c = useExchangeText();
   const { lang } = useLang();
+  const tz = useTimeZone();
   const toast = useToast();
   const searchParams = useSearchParams();
   const pathname = usePathname();
@@ -345,7 +348,7 @@ export function OrderWorkspace() {
                                 )}
                               </Link>
                               <span className="ex-subline">
-                                {fmtTime(order.createdAt)}
+                                {formatTime(new Date(order.createdAt), "en", tz, "datetime")}
                               </span>
                               <span className="ex-subline" title={order.id}>
                                 {order.id.slice(-12)}

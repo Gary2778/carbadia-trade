@@ -3,7 +3,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-// tokens-only 门禁(计划 §4.6):终端组件、ui 基础件、资产页组件(P2-10)、terminal.css 与 chart-adapter.ts 只引用 token,不写原始值;
+// tokens-only 门禁(计划 §4.6):终端组件、ui 基础件、资产页组件(P2-10)、市场总览页组件(P3-05)、通知组件(P3-08)、terminal.css 与 chart-adapter.ts 只引用 token,不写原始值;
 // 进 npm run test,即 Dockerfile 的 RUN npm run test && npm run lint —— 违规的镜像构不出来。不引 stylelint / eslint 插件(§9.1 第 29 条)。
 //
 // 逐行规则(整行扫描,注释也算:注释里写原始值同样会被人照抄,Nav.ssr.test.ts 对 DemoBadge 是同一口径):
@@ -18,7 +18,9 @@ import { describe, expect, it } from "vitest";
 
 const SRC_DIR = fileURLToPath(new URL("../../", import.meta.url));
 // P2-10:资产页 /trade/account 的组件(components/account,含共用的注销对话框)同样只引 token;资产页的样式在 terminal.css 里,已在扫描之列
-const SCAN_DIRS = ["components/terminal", "components/ui", "components/account"];
+// P3-05:市场总览页 /trade/markets 的组件(components/markets)同样只引 token
+// P3-08:Nav 的通知铃铛、面板与 Toast 触发器(components/notices)同样只引 token(Nav.tsx 本身不在扫描内)
+const SCAN_DIRS = ["components/terminal", "components/ui", "components/account", "components/markets", "components/notices"];
 const SCAN_FILES = ["app/terminal.css", "lib/market/chart-adapter.ts"];
 const SOURCE_EXT = /\.(ts|tsx|css)$/;
 const TEST_FILE = /\.test\.(ts|tsx)$/;
@@ -249,6 +251,10 @@ describe("tokens-only (plan §4.6)", () => {
     expect(rel).toContain("components/ui/Skeleton.tsx");
     expect(rel).toContain("components/account/Holdings.tsx");
     expect(rel).toContain("components/account/RetireDialog.tsx");
+    expect(rel).toContain("components/markets/MarketsPage.tsx");
+    expect(rel).toContain("components/markets/RankedLists.tsx");
+    expect(rel).toContain("components/notices/NoticeBell.tsx");
+    expect(rel).toContain("components/notices/NoticePanel.tsx");
   });
 
   it("has no raw colours, px literals, palette classes or arbitrary values", () => {

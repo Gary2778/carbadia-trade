@@ -84,22 +84,102 @@ describe("chartShiftFor(日内时间平移到本地时区)", () => {
   // 按运行时区断言(门禁在本机时区跑,另在 TZ=America/Los_Angeles / Asia/Kolkata / Asia/Shanghai / UTC 下各跑一遍)
   it("日内 interval = 本地时区在该时刻相对 UTC 的偏移(秒);日线 = 0", () => {
     const at = new Date(2026, 8, 28, 12).getTime();
-    for (const interval of ["1m", "5m", "15m", "1h", "4h"] as const) expect(chartShiftFor(interval, at)).toBe(-new Date(at).getTimezoneOffset() * 60);
-    expect(chartShiftFor("1d", at)).toBe(0);
+    // 0 - x 而不是 -x:UTC 机器上偏移是 0,写成 -0 * 60 会得到 -0,toBe 用 Object.is 认为它不等于 +0
+    for (const interval of ["1m", "5m", "15m", "1h", "4h"] as const) expect(chartShiftFor(interval, at, "local")).toBe(0 - new Date(at).getTimezoneOffset() * 60);
+    expect(chartShiftFor("1d", at, "local")).toBe(0);
   });
 
   it("平移后本地零点落在 UTC 日界、本地整点落在 UTC 整点(图表库按 UTC 日历选日 / 小时刻度的位置),半小时时区也一样", () => {
     const midnight = new Date(2026, 8, 28).getTime(); // 本地 28 日零点
-    const sec = chartTime(midnight, chartShiftFor("1m", midnight));
+    const sec = chartTime(midnight, chartShiftFor("1m", midnight, "local"));
     expect(sec % 86_400).toBe(0);
     const d = new Date(sec * 1000);
     expect([d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()]).toEqual([2026, 8, 28]);
     for (const hour of [1, 9, 15, 23]) {
       const at = new Date(2026, 8, 28, hour).getTime();
-      const shifted = chartTime(at, chartShiftFor("1h", at));
+      const shifted = chartTime(at, chartShiftFor("1h", at, "local"));
       expect(shifted % 3600).toBe(0);
       expect(new Date(shifted * 1000).getUTCHours()).toBe(hour);
     }
+  });
+});
+
+describe("chartShiftFor 与时区偏好(P3-09)", () => {
+  // 区名走函数自己的参数,不靠机器的时区
+  const at = Date.UTC(2026, 8, 28, 12);
+
+  it("日内 interval 按所选时区的偏移:北京 +28800、UTC 0;日线恒为 0,与偏好无关", () => {
+    for (const interval of ["1m", "5m", "15m", "1h", "4h"] as const) {
+      expect(chartShiftFor(interval, at, "Asia/Shanghai")).toBe(28_800);
+      expect(chartShiftFor(interval, at, "UTC")).toBe(0);
+    }
+    for (const zone of ["local", "Asia/Shanghai", "UTC", "America/Los_Angeles"]) expect(chartShiftFor("1d", at, zone)).toBe(0);
+  });
+
+  it("local 是浏览器时区(原来的行为);带夏令时的区取 at 这一刻的偏移", () => {
+    expect(chartShiftFor("1m", at, "local")).toBe(0 - new Date(at).getTimezoneOffset() * 60);
+    expect(chartShiftFor("1m", Date.UTC(2026, 6, 1), "America/Los_Angeles")).toBe(-25_200);
+    expect(chartShiftFor("1m", Date.UTC(2026, 0, 1), "America/Los_Angeles")).toBe(-28_800);
+    expect(chartShiftFor("1h", at, "Asia/Kolkata")).toBe(19_800);
+  });
+});
+
+describe("tz 是必传参数(忘了传就编译不过,不会悄悄按浏览器时区算)", () => {
+  it("chartShiftFor 与 formatChartTime 都要求 tz(tsc 守着;下面两行的 @ts-expect-error 一旦不再报错,tsc 会反过来报它多余)", () => {
+    const at = Date.UTC(2026, 8, 28, 12);
+    // @ts-expect-error tz 必传:少一个参数
+    const shift: unknown = () => chartShiftFor("1m", at);
+    // @ts-expect-error tz 必传:少一个参数
+    const label: unknown = () => formatChartTime(at, "en-US", false);
+    expect(typeof shift).toBe("function");
+    expect(typeof label).toBe("function");
+  });
+});
+
+describe("时区偏好下 K 线、刻度与十字线读同一个墙上时刻(P3-09)", () => {
+  type Options = ReturnType<typeof buildChartOptions>;
+  const tickMarkFormatter = (o: Options) => o.timeScale?.tickMarkFormatter as unknown as (time: unknown, type: number, locale: string) => string | null;
+  const timeFormatter = (o: Options) => o.localization?.timeFormatter as unknown as (time: unknown) => string;
+  /** 不经本模块的独立算法:这个时区里 at 的「时:分」 */
+  const wallHm = (zone: string, ms: number) => new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(ms);
+  const wallDate = (zone: string, ms: number) => new Intl.DateTimeFormat("en-US", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
+
+  // 2026-09-28 20:30 UTC:北京是 09-29 04:30,洛杉矶 13:30,加尔各答 09-29 02:00,Lord Howe 09-29 07:00(半小时夏令时的区)
+  const instants = [Date.UTC(2026, 8, 28, 20, 30), Date.UTC(2026, 0, 5, 3, 45), Date.UTC(2026, 6, 14, 23, 59)];
+
+  it.each(["UTC", "Asia/Shanghai", "America/Los_Angeles", "Asia/Kolkata", "Australia/Lord_Howe"])("%s", (zone) => {
+    for (const at of instants) {
+      const shift = chartShiftFor("1m", at, zone);
+      const o = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: true, shift, tz: zone });
+      const sec = chartTime(at, shift);
+      const hm = wallHm(zone, at);
+      // 1. K 线的位置:平移后的秒按 UTC 读,就是这个时区的墙上时刻
+      const d = new Date(sec * 1000);
+      expect(`${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`, `candle ${zone} ${at}`).toBe(hm);
+      // 2. 时间轴刻度
+      expect(tickMarkFormatter(o)(sec, 3, "en-US"), `tick ${zone} ${at}`).toBe(hm);
+      // 3. 十字线标签 = 读数(formatChartTime):同一个日期、同一个「时:分」
+      expect(timeFormatter(o)(sec), `crosshair ${zone} ${at}`).toBe(formatChartTime(at, "en-US", false, zone));
+      expect(timeFormatter(o)(sec), `crosshair ${zone} ${at}`).toBe(`${wallDate(zone, at)}, ${hm}`);
+    }
+  });
+
+  it("日线只显示日期、按 UTC:不随时区偏好变(桶从 UTC 零点起)", () => {
+    const utcMidnight = Date.UTC(2026, 8, 28);
+    for (const zone of ["local", "UTC", "Asia/Shanghai", "America/Los_Angeles"]) {
+      const o = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: false, shift: chartShiftFor("1d", utcMidnight, zone), tz: zone });
+      expect(timeFormatter(o)(utcMidnight / 1000), zone).toBe("09/28/2026");
+      expect(tickMarkFormatter(o)(utcMidnight / 1000, 2, "en-US"), zone).toBe("28");
+      expect(formatChartTime(utcMidnight, "en-US", true, zone), zone).toBe("09/28/2026");
+    }
+  });
+
+  it("换时区偏好 = 同一批 bar 换一个 shift:时间平移的差就是两个时区的偏移差,价格与 bar 的相对位置不变", () => {
+    const b = { t: Date.UTC(2026, 8, 28, 20, 30), o: 7001, h: 7050, l: 6990, c: 7025, v: 3 };
+    const utc = toChartBar(b, chartShiftFor("1m", b.t, "UTC"));
+    const beijing = toChartBar(b, chartShiftFor("1m", b.t, "Asia/Shanghai"));
+    expect(beijing.time - utc.time).toBe(8 * 3600);
+    expect({ ...beijing, time: 0 }).toEqual({ ...utc, time: 0 });
   });
 });
 
@@ -512,38 +592,38 @@ describe("buildChartOptions", () => {
   });
 
   it("价格轴按标的精度与语言格式化(图表值是元,formatPrice 收分)", () => {
-    const en = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: true, shift: 0 });
+    const en = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: true, shift: 0, tz: "local" });
     expect(priceFormatter(en)(1234.5)).toBe("1,234.50");
-    const zero = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 0, timeVisible: true, shift: 0 });
+    const zero = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 0, timeVisible: true, shift: 0, tz: "local" });
     expect(priceFormatter(zero)(70.4)).toBe("70");
     expect(en.localization?.locale).toBe("en-US");
   });
 
   it("日线不显示时刻", () => {
-    expect(buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: false, shift: 0 }).timeScale?.timeVisible).toBe(false);
+    expect(buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: false, shift: 0, tz: "local" }).timeScale?.timeVisible).toBe(false);
     expect(buildChartOptions(TOKENS).timeScale?.timeVisible).toBe(true);
   });
 
   it("日内:刻度收平移后的秒、读作本地时刻;十字线标签减回平移,与读数(formatChartTime)一致", () => {
     const at = new Date(2026, 8, 28, 14, 5).getTime(); // 本地 2026-09-28 14:05
-    const shift = chartShiftFor("1m", at);
-    const o = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: true, shift });
+    const shift = chartShiftFor("1m", at, "local");
+    const o = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: true, shift, tz: "local" });
     const sec = chartTime(at, shift);
     expect(tickMarkFormatter(o)(sec, 3, "en-US")).toBe("14:05");
     expect(tickMarkFormatter(o)(sec, 0, "en-US")).toBe("2026");
     expect(tickMarkFormatter(o)("2026-09-28", 3, "en-US")).toBeNull();
-    expect(timeFormatter(o)(sec)).toBe(formatChartTime(at, "en-US"));
-    expect(formatChartTime(at, "en-US")).toContain("14:05");
+    expect(timeFormatter(o)(sec)).toBe(formatChartTime(at, "en-US", false, "local"));
+    expect(formatChartTime(at, "en-US", false, "local")).toContain("14:05");
     // 日刻度落在本地零点那根上,标签是本地日期(不再是 UTC 日界上的前一天 / 后一天)
     const midnight = new Date(2026, 8, 28).getTime();
-    expect(tickMarkFormatter(o)(chartTime(midnight, chartShiftFor("1m", midnight)), 2, "en-US")).toBe("28");
-    expect(tickMarkFormatter(o)(chartTime(midnight, chartShiftFor("1m", midnight)), 1, "en-US")).toBe("Sep");
+    expect(tickMarkFormatter(o)(chartTime(midnight, chartShiftFor("1m", midnight, "local")), 2, "en-US")).toBe("28");
+    expect(tickMarkFormatter(o)(chartTime(midnight, chartShiftFor("1m", midnight, "local")), 1, "en-US")).toBe("Sep");
   });
 
   it("日线只显示日期,按 UTC(桶从 UTC 零点起,本地时区在西半球会差一天)", () => {
-    const o = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: false, shift: chartShiftFor("1d") });
+    const o = buildChartOptions(TOKENS, { locale: "en-US", pricePrecision: 2, timeVisible: false, shift: chartShiftFor("1d", Date.now(), "local"), tz: "local" });
     const utcMidnight = Date.UTC(2026, 8, 28);
-    expect(formatChartTime(utcMidnight, "en-US", true)).toBe("09/28/2026");
+    expect(formatChartTime(utcMidnight, "en-US", true, "local")).toBe("09/28/2026");
     expect(timeFormatter(o)(utcMidnight / 1000)).toBe("09/28/2026");
     expect(tickMarkFormatter(o)(utcMidnight / 1000, 2, "en-US")).toBe("28");
     expect(tickMarkFormatter(o)(Date.UTC(2026, 0, 1) / 1000, 0, "en-US")).toBe("2026");

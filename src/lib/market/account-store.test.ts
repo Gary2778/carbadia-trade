@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import type { Balance, Fill, Me, Order, Position, ServerEvent } from "@/shared";
+import type { Balance, Fill, Me, Notice, Order, Position, ServerEvent, Trigger } from "@/shared";
 import { auditRefOf } from "@/shared";
 import { ApiError } from "@/lib/http/client";
 import {
@@ -15,6 +15,7 @@ import {
   requestAccountRefresh,
   retainOpenOrders as bridgeRetainOpenOrders,
   retainPositions as bridgeRetainPositions,
+  retainTriggers as bridgeRetainTriggers,
   subscribeAccount,
 } from "./account-bridge";
 import { readOpenOrders as leafReadOpenOrders } from "./open-orders-source";
@@ -22,6 +23,7 @@ import { readOpenOrders } from "./selectors";
 import {
   AUTH_NAVIGATE_WAIT_MS,
   CLOSED_ORDERS_MAX,
+  CLOSED_TRIGGERS_MAX,
   HYDRATE_RETRY_BASE_MS,
   HYDRATE_RETRY_MAX_MS,
   HYDRATE_TIMEOUT_MS,
@@ -36,15 +38,19 @@ import {
   hydrateForNavigation,
   loadAccountLists,
   logout,
+  noticeStamp,
   openOrdersOf,
+  openTriggersOf,
   positionsOf,
   reduceAccountEvents,
   refresh,
   refreshOnNavigation,
   retainOpenOrders,
   retainPositions,
+  retainTriggers,
   retryHydrateIfUnverified,
   setMe,
+  subscribeNotices,
   useAccountStore,
   watchHydrateRetry,
   type AccountEvent,
@@ -63,8 +69,8 @@ const OPEN_ORDERS_URL = "/api/account/orders?status=open&limit=100";
 const openOrdersPage = (cursor: string) => `${OPEN_ORDERS_URL}&cursor=${cursor}`;
 const LOGOUT_URL = "/api/auth/logout";
 
-const alice: NonNullable<Me> = { id: "u-alice", email: "alice@example.com", name: "Alice", cashBalance: 100_000_00, lockedCash: 5_000_00 };
-const bob: NonNullable<Me> = { id: "u-bob", email: "bob@example.com", name: "Bob", cashBalance: 50_000_00, lockedCash: 0 };
+const alice: NonNullable<Me> = { id: "u-alice", email: "alice@example.com", name: "Alice", cashBalance: 100_000_00, lockedCash: 5_000_00, unreadNotices: 0 };
+const bob: NonNullable<Me> = { id: "u-bob", email: "bob@example.com", name: "Bob", cashBalance: 50_000_00, lockedCash: 0, unreadNotices: 0 };
 
 const order = (id: string, partial: Partial<Order> = {}): Order => ({
   id,
@@ -114,10 +120,47 @@ const fill = (id: string, ts: number): Fill => ({
   ledgerRefs: [],
 });
 
+const trigger = (id: string, partial: Partial<Trigger> = {}): Trigger => ({
+  id,
+  kind: "ORDER",
+  assetId: "a-vcs",
+  symbol: "VCS-FOR-2021",
+  direction: "ABOVE",
+  triggerPrice: 7200,
+  side: "SELL",
+  orderType: "MARKET",
+  limitPrice: null,
+  quantity: 5,
+  ocoGroupId: null,
+  status: "PENDING",
+  reason: null,
+  orderId: null,
+  firedPrice: null,
+  createdAt: 1_000,
+  updatedAt: 1_000,
+  firedAt: null,
+  ...partial,
+});
 const orderEvent = (o: Order, seq = 1): AccountEvent => ({ t: "order", topic: "account", seq, order: o });
 const fillEvent = (f: Fill, seq = 1): AccountEvent => ({ t: "fill", topic: "account", seq, fill: f });
 const balanceEvent = (balance: Balance, seq = 1): AccountEvent => ({ t: "balance", topic: "account", seq, balance });
 const positionEvent = (p: Position, seq = 1): AccountEvent => ({ t: "position", topic: "account", seq, position: p });
+const triggerEvent = (t: Trigger, seq = 1): AccountEvent => ({ t: "trigger", topic: "account", seq, trigger: t });
+const notice = (id: string, partial: Partial<Extract<Notice, { kind: "fill" }>> = {}): Notice => ({
+  id,
+  createdAt: 1_000,
+  readAt: null,
+  kind: "fill",
+  orderId: "o-1",
+  symbol: "VCS-FOR-2021",
+  side: "BUY",
+  role: "MAKER",
+  quantity: 1,
+  price: 7000,
+  orderStatus: "FILLED",
+  ...partial,
+});
+const noticeEvent = (n: Notice, unread: number, seq = 1): AccountEvent => ({ t: "notice", topic: "account", seq, notice: n, unread });
 
 /** 按 URL 应答的假 fetchJson:值可以是数据、Error(抛出)或 Promise(测试自己决定何时回)。不理会 init.signal —— 超时要靠 hydrate 自己结束 */
 type Responder = unknown | Error | (() => Promise<unknown>);
@@ -438,6 +481,23 @@ describe("refreshOnNavigation (Nav's path effect): keeps cash and login fresh ou
     await first;
     expect(refreshOnNavigation("/orders", probe.fetchJson)).toBeNull(); // 刚刷过
     expect(probe.calls).toEqual([ME_URL]);
+  });
+
+  it("the market overview page /trade/markets (P3-05) is the one /trade path that is refreshed: it subscribes to tickers only, so nothing else keeps the cash fresh", async () => {
+    await hydrate(loggedIn(alice).fetchJson, "me");
+    vi.advanceTimersByTime(NAV_REFRESH_MIN_MS);
+    const { fetchJson, calls } = loggedIn({ ...alice, cashBalance: alice.cashBalance - 75_00 });
+    const p = refreshOnNavigation("/trade/markets", fetchJson);
+    expect(p).not.toBeNull();
+    await p;
+    expect(calls).toEqual([ME_URL]);
+    expect(useAccountStore.getState().balance?.cashBalance).toBe(alice.cashBalance - 75_00);
+    // 同一套节流;带结尾斜杠也算这一页;名字只是前缀相似的路径与终端、资产页一样不拉
+    expect(refreshOnNavigation("/trade/markets/", fetchJson)).toBeNull();
+    vi.advanceTimersByTime(NAV_REFRESH_MIN_MS);
+    expect(refreshOnNavigation("/trade/markets/", fetchJson)).not.toBeNull();
+    vi.advanceTimersByTime(NAV_REFRESH_MIN_MS);
+    for (const path of ["/trade/marketsX", "/trade/account", "/trade/VCS-FOR-2021"]) expect(refreshOnNavigation(path, fetchJson), path).toBeNull();
   });
 
   it("a confirmed anon is refreshed too (a login in another tab shows up on the next navigation); idle / loading are left to the mount hydrate", async () => {
@@ -1255,6 +1315,48 @@ describe("applyAccountEvents / reduceAccountEvents", () => {
     unsub();
   });
 
+  it("folds a notice event into lastNoticeId and the unread count with a single set(), leaving the other slices alone", () => {
+    const listener = vi.fn();
+    const unsub = useAccountStore.subscribe(listener);
+    const before = useAccountStore.getState();
+    const n = notice("n-1");
+    expect(reduceAccountEvents(before, [noticeEvent(n, 3)])).toEqual({ lastNoticeId: "n-1", unreadNotices: 3 });
+    expect(applyAccountEvents([noticeEvent(n, 3)])).toBe(1);
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsub();
+    const after = useAccountStore.getState();
+    expect(after.lastNoticeId).toBe("n-1");
+    expect(after.unreadNotices).toBe(3);
+    expect(after.openOrders).toBe(before.openOrders);
+    expect(after.recentFills).toBe(before.recentFills);
+    expect(after.me).toBe(before.me);
+  });
+
+  it("takes the unread count of the newest event as it comes (it can go down) and the last notice of a batch", () => {
+    applyAccountEvents([noticeEvent(notice("n-1"), 4)]);
+    expect(useAccountStore.getState().unreadNotices).toBe(4);
+    expect(applyAccountEvents([noticeEvent(notice("n-2"), 2), noticeEvent(notice("n-3"), 3)])).toBe(2);
+    expect(useAccountStore.getState().lastNoticeId).toBe("n-3");
+    expect(useAccountStore.getState().unreadNotices).toBe(3);
+    // 同一条、同一个数的重复投递不算变化,不 set();同一条换了未读数(别处标了已读)照样更新数
+    const listener = vi.fn();
+    const unsub = useAccountStore.subscribe(listener);
+    expect(applyAccountEvents([noticeEvent(notice("n-3"), 3)])).toBe(0);
+    expect(listener).not.toHaveBeenCalled();
+    expect(applyAccountEvents([noticeEvent(notice("n-3"), 1)])).toBe(1);
+    unsub();
+    expect(useAccountStore.getState().unreadNotices).toBe(1);
+  });
+
+  it("applies a notice together with other events in one batch", () => {
+    expect(applyAccountEvents([noticeEvent(notice("n-1"), 1), balanceEvent({ cashBalance: 9, lockedCash: 1 })])).toBe(2);
+    const s = useAccountStore.getState();
+    expect(s.lastNoticeId).toBe("n-1");
+    expect(s.balance).toEqual({ cashBalance: 9, lockedCash: 1 });
+    // 余额事件改写 me,但铃铛读的是 store 自己的 unreadNotices,不受影响
+    expect(s.unreadNotices).toBe(1);
+  });
+
   it("returns 0 while nobody is logged in, even for a batch full of account events", () => {
     useAccountStore.setState(createInitialAccountState(), true);
     expect(applyAccountEvents([orderEvent(order("o-9")), balanceEvent({ cashBalance: 1, lockedCash: 0 })])).toBe(0);
@@ -1501,5 +1603,541 @@ describe("seams and pure selectors", () => {
       ["a-gs", position("a-gs")],
     ]);
     expect(positionsOf(positions).map((p) => p.symbol)).toEqual(["GS-REN-2020", "VCS-FOR-2021"]);
+  });
+});
+
+describe("trigger events (conditional orders and price alerts)", () => {
+  beforeEach(seedAlice);
+  const openIds = () => [...useAccountStore.getState().openTriggers.keys()];
+
+  it("a PENDING or TRIGGERING row is upserted by id; every other status removes it", () => {
+    applyAccountEvent(triggerEvent(trigger("t-1")));
+    applyAccountEvent(triggerEvent(trigger("t-2", { kind: "ALERT", side: null, orderType: null, quantity: null, createdAt: 2_000, updatedAt: 2_000 })));
+    expect(openIds()).toEqual(["t-1", "t-2"]);
+    applyAccountEvent(triggerEvent(trigger("t-1", { status: "TRIGGERING", updatedAt: 1_500 })));
+    expect(useAccountStore.getState().openTriggers.get("t-1")?.status).toBe("TRIGGERING");
+    for (const [id, status, reason] of [
+      ["t-1", "TRIGGERED", null],
+      ["t-2", "CANCELLED", "USER"],
+    ] as const) {
+      applyAccountEvent(triggerEvent(trigger(id, { status, reason, updatedAt: 3_000, firedPrice: status === "TRIGGERED" ? 7200 : null })));
+    }
+    expect(openIds()).toEqual([]);
+  });
+
+  it("each finished status (TRIGGERED, REJECTED, CANCELLED) takes a row out of openTriggers", () => {
+    const rows = [
+      trigger("t-fired", { status: "TRIGGERED", updatedAt: 2_000 }),
+      trigger("t-rejected", { status: "REJECTED", reason: "INSUFFICIENT_QTY", updatedAt: 2_000 }),
+      trigger("t-cancelled", { status: "CANCELLED", reason: "OCO", updatedAt: 2_000 }),
+    ];
+    applyAccountEvents(rows.map((r) => triggerEvent(trigger(r.id))));
+    expect(openIds()).toEqual(["t-fired", "t-rejected", "t-cancelled"]);
+    expect(applyAccountEvents(rows.map((r) => triggerEvent(r)))).toBe(3);
+    expect(openIds()).toEqual([]);
+  });
+
+  it("a finished status for a row that was never open here is not an applied event: no set(), the reference stays (it is still remembered as finished)", () => {
+    const listener = vi.fn();
+    const unsub = useAccountStore.subscribe(listener);
+    const before = useAccountStore.getState().openTriggers;
+    expect(applyAccountEvents([triggerEvent(trigger("t-unknown", { status: "REJECTED", reason: "NO_FILL", updatedAt: 2_000 }))])).toBe(0);
+    expect(listener).not.toHaveBeenCalled();
+    expect(useAccountStore.getState().openTriggers).toBe(before);
+    unsub();
+  });
+
+  it("a batch is one set(); slices it does not touch keep their references", () => {
+    const listener = vi.fn();
+    const unsub = useAccountStore.subscribe(listener);
+    const before = useAccountStore.getState();
+    expect(applyAccountEvents([triggerEvent(trigger("t-1")), triggerEvent(trigger("t-2", { createdAt: 2_000 }))])).toBe(2);
+    expect(listener).toHaveBeenCalledTimes(1);
+    const after = useAccountStore.getState();
+    expect(after.openOrders).toBe(before.openOrders);
+    expect(after.positions).toBe(before.positions);
+    expect(after.recentFills).toBe(before.recentFills);
+    expect(after.openTriggers).not.toBe(before.openTriggers);
+    unsub();
+  });
+
+  it("goes through the account bridge like the other account events (batcher path), one set() per batch", () => {
+    const setCount = vi.fn();
+    const unsub = useAccountStore.subscribe(setCount);
+    expect(bridgeApplyAccountEvents([triggerEvent(trigger("t-1")), orderEvent(order("o-9", { createdAt: 9_000 })), triggerEvent(trigger("t-2", { createdAt: 2_000 }))])).toBe(3);
+    expect(setCount).toHaveBeenCalledTimes(1);
+    expect(openIds()).toEqual(["t-1", "t-2"]);
+    unsub();
+  });
+
+  it("applying the same open row twice does not change anything beyond the first set (equal updatedAt overwrites with an equal row)", () => {
+    applyAccountEvent(triggerEvent(trigger("t-1")));
+    const first = useAccountStore.getState().openTriggers.get("t-1");
+    applyAccountEvent(triggerEvent(trigger("t-1")));
+    expect(useAccountStore.getState().openTriggers.get("t-1")).toEqual(first);
+    expect(openIds()).toEqual(["t-1"]);
+  });
+
+  it("ignores trigger events while nobody is logged in", () => {
+    useAccountStore.setState({ me: null, status: "anon", openOrders: new Map(), openTriggers: new Map(), positions: new Map(), recentFills: [], balance: null });
+    const before = useAccountStore.getState();
+    applyAccountEvent(triggerEvent(trigger("t-9")));
+    expect(useAccountStore.getState()).toBe(before);
+  });
+});
+
+describe("late or stale trigger events never bring back a finished trigger or roll back a newer one", () => {
+  beforeEach(seedAlice);
+  const openIds = () => [...useAccountStore.getState().openTriggers.keys()];
+
+  it("TRIGGERED then a late PENDING (the POST response that lost the race with the engine's event): the row stays gone", () => {
+    applyAccountEvent(triggerEvent(trigger("t-1")));
+    applyAccountEvent(triggerEvent(trigger("t-1", { status: "TRIGGERED", orderId: "o-5", firedPrice: 7200, firedAt: 2_000, updatedAt: 2_000 })));
+    expect(openIds()).toEqual([]);
+    applyAccountEvent(triggerEvent(trigger("t-1", { updatedAt: 1_000 })));
+    expect(openIds()).toEqual([]);
+    // 同一批里先终结后挂上:同样不回来
+    applyAccountEvents([triggerEvent(trigger("t-2", { status: "CANCELLED", reason: "OCO", updatedAt: 3_000 })), triggerEvent(trigger("t-2", { updatedAt: 2_500 }))]);
+    expect(openIds()).toEqual([]);
+  });
+
+  it("remembers a finished trigger even when it was never open here (its TRIGGERED overtook the creation response), without a set()", () => {
+    const listener = vi.fn();
+    const unsub = useAccountStore.subscribe(listener);
+    expect(applyAccountEvents([triggerEvent(trigger("t-new", { status: "TRIGGERED", updatedAt: 5_000 }))])).toBe(0);
+    expect(listener).not.toHaveBeenCalled();
+    applyAccountEvent(triggerEvent(trigger("t-new", { updatedAt: 4_000 })));
+    expect(openIds()).toEqual([]);
+    unsub();
+  });
+
+  it("the REST cancel response (CANCELLED / USER) followed by an in-flight TRIGGERING from the engine: stays cancelled", () => {
+    applyAccountEvent(triggerEvent(trigger("t-1")));
+    accountActions.applyAccountEvent(triggerEvent(trigger("t-1", { status: "CANCELLED", reason: "USER", updatedAt: 3_000 }), 0));
+    applyAccountEvent(triggerEvent(trigger("t-1", { status: "TRIGGERING", updatedAt: 2_900 })));
+    expect(openIds()).toEqual([]);
+  });
+
+  it("an older open row (earlier updatedAt) does not overwrite a newer one; an equal or newer one does", () => {
+    applyAccountEvent(triggerEvent(trigger("t-1", { status: "TRIGGERING", updatedAt: 4_000 })));
+    applyAccountEvent(triggerEvent(trigger("t-1", { status: "PENDING", updatedAt: 3_000 })));
+    expect(useAccountStore.getState().openTriggers.get("t-1")?.status).toBe("TRIGGERING");
+    applyAccountEvent(triggerEvent(trigger("t-1", { status: "TRIGGERING", updatedAt: 4_000, triggerPrice: 7300 })));
+    expect(useAccountStore.getState().openTriggers.get("t-1")?.triggerPrice).toBe(7300);
+    // 被跳过的事件不算生效、不 set()
+    const before = useAccountStore.getState();
+    expect(applyAccountEvents([triggerEvent(trigger("t-1", { updatedAt: 1_000 }))])).toBe(0);
+    expect(useAccountStore.getState()).toBe(before);
+  });
+
+  it("a stale snapshot row for a finished trigger is dropped too (the WS snapshot read before it fired)", () => {
+    applyAccountEvent(triggerEvent(trigger("t-1", { status: "TRIGGERED", updatedAt: 2_000 })));
+    applyAccountEvents([triggerEvent(trigger("t-1")), triggerEvent(trigger("t-3", { createdAt: 3_000, updatedAt: 3_000 }))]);
+    expect(openIds()).toEqual(["t-3"]);
+  });
+
+  it(`the record is bounded (${CLOSED_TRIGGERS_MAX} ids, oldest forgotten first) and belongs to the signed-in user: sign-out or a switch clears it`, () => {
+    applyAccountEvent(triggerEvent(trigger("t-first", { status: "CANCELLED", reason: "USER" })));
+    for (let i = 0; i < CLOSED_TRIGGERS_MAX; i++) applyAccountEvent(triggerEvent(trigger(`t-c${i}`, { status: "CANCELLED", reason: "USER" })));
+    applyAccountEvent(triggerEvent(trigger("t-first")));
+    expect(useAccountStore.getState().openTriggers.has("t-first")).toBe(true);
+    applyAccountEvent(triggerEvent(trigger(`t-c${CLOSED_TRIGGERS_MAX - 1}`)));
+    expect(useAccountStore.getState().openTriggers.has(`t-c${CLOSED_TRIGGERS_MAX - 1}`)).toBe(false);
+
+    applyAccountEvent(triggerEvent(trigger("t-x", { status: "TRIGGERED" })));
+    setMe(bob);
+    setMe(alice);
+    applyAccountEvent(triggerEvent(trigger("t-x")));
+    expect(useAccountStore.getState().openTriggers.has("t-x")).toBe(true);
+  });
+});
+
+describe("retainTriggers (snapshot reconciliation: a trigger that finished while the client was away never arrives as a finished row)", () => {
+  beforeEach(seedAlice);
+
+  it("drops triggers that are not in the snapshot and keeps the reference when nothing changes", () => {
+    applyAccountEvents([triggerEvent(trigger("t-1")), triggerEvent(trigger("t-2", { createdAt: 2_000 }))]);
+    const listener = vi.fn();
+    const unsub = useAccountStore.subscribe(listener);
+    retainTriggers(new Set(["t-2"]));
+    expect([...useAccountStore.getState().openTriggers.keys()]).toEqual(["t-2"]);
+    expect(listener).toHaveBeenCalledTimes(1);
+    const before = useAccountStore.getState().openTriggers;
+    retainTriggers(new Set(["t-2", "t-other"]));
+    expect(useAccountStore.getState().openTriggers).toBe(before);
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsub();
+  });
+
+  it("an empty snapshot clears them all (nothing is open any more)", () => {
+    applyAccountEvents([triggerEvent(trigger("t-1")), triggerEvent(trigger("t-2", { createdAt: 2_000 }))]);
+    retainTriggers(new Set());
+    expect(useAccountStore.getState().openTriggers.size).toBe(0);
+  });
+
+  it("does not touch orders or positions", () => {
+    applyAccountEvent(triggerEvent(trigger("t-1")));
+    const { openOrders, positions } = useAccountStore.getState();
+    retainTriggers(new Set());
+    expect(useAccountStore.getState().openOrders).toBe(openOrders);
+    expect(useAccountStore.getState().positions).toBe(positions);
+  });
+
+  it("is exposed on accountActions and through the bridge", () => {
+    expect(accountActions.retainTriggers).toBe(retainTriggers);
+    applyAccountEvents([triggerEvent(trigger("t-1")), triggerEvent(trigger("t-2", { createdAt: 2_000 }))]);
+    bridgeRetainTriggers(new Set(["t-1"]));
+    expect([...useAccountStore.getState().openTriggers.keys()]).toEqual(["t-1"]);
+  });
+});
+
+describe("openTriggers is reset wherever the open orders are", () => {
+  const seedTriggers = () => applyAccountEvents([triggerEvent(trigger("t-1")), triggerEvent(trigger("t-2", { createdAt: 2_000 }))]);
+
+  it("starts empty, and a different user clears it (setMe); the same user keeps it", () => {
+    expect(createInitialAccountState().openTriggers.size).toBe(0);
+    seedAlice();
+    seedTriggers();
+    setMe({ ...alice, cashBalance: 1 });
+    expect(useAccountStore.getState().openTriggers.size).toBe(2);
+    setMe(bob);
+    expect(useAccountStore.getState().openTriggers.size).toBe(0);
+  });
+
+  it("a hydrate of the same user keeps them (they arrive by snapshot, not by hydrate), of another user clears them", async () => {
+    seedAlice();
+    seedTriggers();
+    await hydrate(loggedIn(alice).fetchJson);
+    expect([...useAccountStore.getState().openTriggers.keys()]).toEqual(["t-1", "t-2"]);
+    await hydrate(loggedIn(alice).fetchJson, "me");
+    expect(useAccountStore.getState().openTriggers.size).toBe(2);
+    await hydrate(loggedIn(bob).fetchJson);
+    expect(useAccountStore.getState().openTriggers.size).toBe(0);
+  });
+
+  it("logout, setMe(null) and a confirmed anonymous hydrate (null / 401) clear them", async () => {
+    seedAlice();
+    seedTriggers();
+    await logout(fakeFetch({ [LOGOUT_URL]: { loggedOut: true } }).fetchJson);
+    expect(useAccountStore.getState().openTriggers.size).toBe(0);
+
+    seedAlice();
+    seedTriggers();
+    setMe(null);
+    expect(useAccountStore.getState().openTriggers.size).toBe(0);
+
+    seedAlice();
+    seedTriggers();
+    await hydrate(fakeFetch({ [ME_URL]: null }).fetchJson);
+    expect(useAccountStore.getState().openTriggers.size).toBe(0);
+
+    seedAlice();
+    seedTriggers();
+    await hydrate(fakeFetch({ [ME_URL]: new ApiError("Not logged in", 401) }).fetchJson);
+    expect(useAccountStore.getState().openTriggers.size).toBe(0);
+  });
+
+  it("an unverified anonymous state (/me failed transiently while not ready) clears them too", async () => {
+    // idle → 瞬时失败:becomeUnverifiedAnon;此前即便有残留也一并清空
+    useAccountStore.setState({ ...createInitialAccountState(), openTriggers: new Map([["t-stale", trigger("t-stale")]]) }, true);
+    await hydrate(fakeFetch({ [ME_URL]: new ApiError("Failed to fetch", 0) }).fetchJson);
+    expect(useAccountStore.getState().unverified).not.toBeNull();
+    expect(useAccountStore.getState().openTriggers.size).toBe(0);
+  });
+
+  it("a REST lists load (loadAccountLists) leaves them alone", async () => {
+    seedAlice();
+    seedTriggers();
+    const before = useAccountStore.getState().openTriggers;
+    await loadAccountLists(loggedIn(alice).fetchJson);
+    expect(useAccountStore.getState().openTriggers).toBe(before);
+  });
+});
+
+describe("the lists version also moves with the trigger slice (a poll snapshot read before a local create must be discarded)", () => {
+  it("bumps when a trigger row is applied, retained away or removed, not for a balance or a fill", () => {
+    seedAlice();
+    const v0 = readListsVersion();
+    applyAccountEvent(balanceEvent({ cashBalance: 5, lockedCash: 0 }));
+    expect(readListsVersion()).toBe(v0);
+    applyAccountEvent(triggerEvent(trigger("t-1")));
+    expect(readListsVersion()).toBe(v0 + 1);
+    retainTriggers(new Set());
+    expect(readListsVersion()).toBe(v0 + 2);
+    retainTriggers(new Set());
+    expect(readListsVersion()).toBe(v0 + 2);
+  });
+});
+
+describe("openTriggersOf (the selectors' pure part)", () => {
+  const rows = new Map<string, Trigger>([
+    ["t-1", trigger("t-1", { createdAt: 1_000 })],
+    ["t-2", trigger("t-2", { symbol: "GS-REN-2020", assetId: "a-gs", createdAt: 3_000 })],
+    ["t-3", trigger("t-3", { createdAt: 2_000 })],
+    ["t-4", trigger("t-4", { createdAt: 2_000 })],
+  ]);
+
+  it("orders newest first (createdAt desc, id desc on ties) and filters by symbol", () => {
+    expect(openTriggersOf(rows).map((t) => t.id)).toEqual(["t-2", "t-4", "t-3", "t-1"]);
+    expect(openTriggersOf(rows, "VCS-FOR-2021").map((t) => t.id)).toEqual(["t-4", "t-3", "t-1"]);
+    expect(openTriggersOf(rows, "GS-REN-2020").map((t) => t.id)).toEqual(["t-2"]);
+  });
+
+  it("an unknown symbol gives nothing; an empty symbol is a symbol, not 'all' (openOrdersOf differs: it treats '' as all)", () => {
+    expect(openTriggersOf(rows, "NOPE")).toEqual([]);
+    expect(openTriggersOf(rows, "")).toEqual([]);
+  });
+
+  it("an empty map gives an empty list", () => {
+    expect(openTriggersOf(new Map())).toEqual([]);
+  });
+});
+
+describe("unread notices and the last notice (the bell's badge and the toasts)", () => {
+  const withUnread = (me: NonNullable<Me>, unreadNotices: number): NonNullable<Me> => ({ ...me, unreadNotices });
+
+  it("starts at 0 / null, in the initial state too", () => {
+    expect(createInitialAccountState().unreadNotices).toBe(0);
+    expect(createInitialAccountState().lastNoticeId).toBeNull();
+  });
+
+  it("takes the count from /api/auth/me on every hydrate (light and full), and from setMe", async () => {
+    await hydrate(loggedIn(withUnread(alice, 3)).fetchJson, "me");
+    expect(useAccountStore.getState().unreadNotices).toBe(3);
+    await hydrate(loggedIn(withUnread(alice, 5)).fetchJson);
+    expect(useAccountStore.getState().unreadNotices).toBe(5);
+    setMe(withUnread(alice, 2));
+    expect(useAccountStore.getState().unreadNotices).toBe(2);
+  });
+
+  it("is overwritten by notice events, and by the panel after it marked everything read", async () => {
+    await hydrate(loggedIn(withUnread(alice, 3)).fetchJson, "me");
+    applyAccountEvents([noticeEvent(notice("n-1"), 4)]);
+    expect(useAccountStore.getState().unreadNotices).toBe(4);
+    accountActions.setUnreadNotices(0);
+    expect(useAccountStore.getState().unreadNotices).toBe(0);
+    // 标已读不动 lastNoticeId
+    expect(useAccountStore.getState().lastNoticeId).toBe("n-1");
+  });
+
+  it("ignores a late write-back from the panel once the user has logged out", async () => {
+    await hydrate(loggedIn(withUnread(alice, 3)).fetchJson, "me");
+    await logout(fakeFetch({ [LOGOUT_URL]: { loggedOut: true } }).fetchJson);
+    accountActions.setUnreadNotices(2);
+    expect(useAccountStore.getState().unreadNotices).toBe(0);
+  });
+
+  it("keeps lastNoticeId across a re-hydrate of the same user, but takes the server's count", async () => {
+    await hydrate(loggedIn(withUnread(alice, 1)).fetchJson, "me");
+    applyAccountEvents([noticeEvent(notice("n-1"), 2)]);
+    await hydrate(loggedIn(withUnread(alice, 6)).fetchJson, "me");
+    expect(useAccountStore.getState().lastNoticeId).toBe("n-1");
+    expect(useAccountStore.getState().unreadNotices).toBe(6);
+  });
+
+  it("a different user starts from their own count with no last notice", () => {
+    setMe(withUnread(alice, 2));
+    applyAccountEvents([noticeEvent(notice("n-1"), 3)]);
+    setMe(withUnread(bob, 7));
+    expect(useAccountStore.getState().unreadNotices).toBe(7);
+    expect(useAccountStore.getState().lastNoticeId).toBeNull();
+  });
+
+  it("logout, setMe(null), a confirmed anonymous hydrate and an unverified one all clear both", async () => {
+    const clears = () => {
+      const s = useAccountStore.getState();
+      return [s.unreadNotices, s.lastNoticeId];
+    };
+    const seed = () => {
+      setMe(withUnread(alice, 2));
+      applyAccountEvents([noticeEvent(notice("n-1"), 3)]);
+    };
+    seed();
+    await logout(fakeFetch({ [LOGOUT_URL]: { loggedOut: true } }).fetchJson);
+    expect(clears()).toEqual([0, null]);
+    seed();
+    setMe(null);
+    expect(clears()).toEqual([0, null]);
+    seed();
+    await hydrate(fakeFetch({ [ME_URL]: new ApiError("Not logged in", 401) }).fetchJson);
+    expect(clears()).toEqual([0, null]);
+    // 未确认的 anon(idle 时 /me 瞬时失败):此前即便有残留也清掉
+    useAccountStore.setState({ ...createInitialAccountState(), unreadNotices: 4, lastNoticeId: "n-stale" }, true);
+    await hydrate(fakeFetch({ [ME_URL]: new ApiError("Failed to fetch", 0) }).fetchJson);
+    expect(useAccountStore.getState().unverified).not.toBeNull();
+    expect(clears()).toEqual([0, null]);
+  });
+
+  it("a slow /api/auth/me sent before a notice event or a mark-read does not overwrite the newer count (same user)", async () => {
+    await hydrate(loggedIn(withUnread(alice, 3)).fetchJson, "me");
+    // 1) /me 在途时来了一条 notice 事件(未读 4):/me 读在它之前(还是 3),回来不覆盖
+    let answer!: (me: Me) => void;
+    const slow = fakeFetch({ [ME_URL]: () => new Promise<Me>((resolve) => (answer = resolve)) });
+    const first = hydrate(slow.fetchJson, "me");
+    applyAccountEvents([noticeEvent(notice("n-1"), 4)]);
+    answer(withUnread(alice, 3));
+    await first;
+    expect(useAccountStore.getState().unreadNotices).toBe(4);
+    // 2) /me 在途时面板标已读写回 0:/me 读在标已读之前(还是 4),回来不覆盖;余额照常更新
+    const second = hydrate(slow.fetchJson, "me");
+    expect(accountActions.setUnreadNotices(0)).toBe(true);
+    answer({ ...withUnread(alice, 4), cashBalance: 1 });
+    await second;
+    expect(useAccountStore.getState().unreadNotices).toBe(0);
+    expect(useAccountStore.getState().balance?.cashBalance).toBe(1);
+    // 3) 期间什么都没写过:照常取 /me 的数
+    await hydrate(loggedIn(withUnread(alice, 2)).fetchJson, "me");
+    expect(useAccountStore.getState().unreadNotices).toBe(2);
+  });
+
+  it("setUnreadNotices advances the stamp: an earlier refresh that comes back afterwards is dropped", () => {
+    seedAlice();
+    const before = noticeStamp();
+    expect(accountActions.setUnreadNotices(1)).toBe(true);
+    expect(accountActions.setUnreadNotices(5, before)).toBe(false);
+    expect(useAccountStore.getState().unreadNotices).toBe(1);
+    expect(accountActions.setUnreadNotices(5, noticeStamp())).toBe(true);
+  });
+
+  it("a different user takes the answer's count even if the stamp moved (the old user's writes do not count)", async () => {
+    setMe(withUnread(alice, 2));
+    let answer!: (me: Me) => void;
+    const pending = hydrate(fakeFetch({ [ME_URL]: () => new Promise<Me>((resolve) => (answer = resolve)) }).fetchJson, "me");
+    applyAccountEvents([noticeEvent(notice("n-1"), 3)]);
+    answer(withUnread(bob, 7));
+    await pending;
+    expect(useAccountStore.getState().me?.id).toBe(bob.id);
+    expect(useAccountStore.getState().unreadNotices).toBe(7);
+  });
+
+  it("an /api/auth/me without unreadNotices (an older server after a rollback) reads as 0, never undefined", async () => {
+    const legacy: Record<string, unknown> = { ...alice };
+    delete legacy.unreadNotices;
+    await hydrate(fakeFetch({ [ME_URL]: legacy }).fetchJson, "me");
+    expect(useAccountStore.getState().unreadNotices).toBe(0);
+    expect(useAccountStore.getState().me?.unreadNotices).toBe(0);
+    for (const bad of [null, 1.5, "2", Number.NaN]) {
+      setMe({ ...alice, unreadNotices: bad as unknown as number });
+      expect(useAccountStore.getState().unreadNotices).toBe(0);
+    }
+  });
+
+  it("ignores notice events while nobody is logged in", () => {
+    expect(applyAccountEvents([noticeEvent(notice("n-1"), 1)])).toBe(0);
+    expect(useAccountStore.getState().unreadNotices).toBe(0);
+    expect(useAccountStore.getState().lastNoticeId).toBeNull();
+  });
+
+  it("reaches the store through the bridge, like the other account events", () => {
+    seedAlice();
+    expect(bridgeApplyAccountEvents([noticeEvent(notice("n-1"), 1)])).toBe(1);
+    expect(useAccountStore.getState().unreadNotices).toBe(1);
+  });
+});
+
+describe("subscribeNotices (every live notice, one by one: the toasts)", () => {
+  beforeEach(seedAlice);
+
+  it("calls the listener once per notice event in arrival order, after the batch has been applied, even when several arrive in one batch (lastNoticeId keeps only the last)", () => {
+    const seen: { id: string; stateLast: string | null; unread: number }[] = [];
+    const unsub = subscribeNotices((n) => {
+      const s = useAccountStore.getState();
+      seen.push({ id: n.id, stateLast: s.lastNoticeId, unread: s.unreadNotices });
+    });
+    applyAccountEvents([noticeEvent(notice("n-1"), 1), balanceEvent({ cashBalance: 9, lockedCash: 1 }), noticeEvent(notice("n-2"), 2), noticeEvent(notice("n-3"), 3)]);
+    unsub();
+    // 监听器被调用时,整批已落进 store(状态里是最后一条,计数是最新的)
+    expect(seen).toEqual([
+      { id: "n-1", stateLast: "n-3", unread: 3 },
+      { id: "n-2", stateLast: "n-3", unread: 3 },
+      { id: "n-3", stateLast: "n-3", unread: 3 },
+    ]);
+  });
+
+  it("does not call it for a duplicate delivery, for events while nobody is logged in, or after unsubscribing", () => {
+    const listener = vi.fn();
+    const unsub = subscribeNotices(listener);
+    applyAccountEvents([noticeEvent(notice("n-1"), 1)]);
+    applyAccountEvents([noticeEvent(notice("n-1"), 1)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+    // 同一条换了未读数:状态更新,但不是新通知,不再弹
+    applyAccountEvents([noticeEvent(notice("n-1"), 0)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+    setMe(null);
+    applyAccountEvents([noticeEvent(notice("n-2"), 1)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+    seedAlice();
+    unsub();
+    applyAccountEvents([noticeEvent(notice("n-3"), 1)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("reaches every subscriber, and a throwing listener neither breaks the store update nor the other listeners", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const bad = () => {
+      throw new Error("boom");
+    };
+    const good = vi.fn();
+    const unsubs = [subscribeNotices(bad), subscribeNotices(good)];
+    expect(applyAccountEvents([noticeEvent(notice("n-1"), 4)])).toBe(1);
+    for (const unsub of unsubs) unsub();
+    expect(good).toHaveBeenCalledTimes(1);
+    expect(useAccountStore.getState().unreadNotices).toBe(4);
+    expect(error).toHaveBeenCalledTimes(1);
+    error.mockRestore();
+  });
+});
+
+// ---- 未读数的写回戳(P3-08 复审修复;重读的调度在 notice-refresh.test.ts)----
+
+describe("setUnreadNotices with a stamp (a late answer must not overwrite what is newer)", () => {
+  beforeEach(seedAlice);
+
+  it("writes without a stamp, and with a stamp that still matches, and says so (true); a dropped write answers false", () => {
+    expect(accountActions.setUnreadNotices(4)).toBe(true);
+    expect(useAccountStore.getState().unreadNotices).toBe(4);
+    const stamp = noticeStamp();
+    expect(stamp).toEqual({ meId: "u-alice", seq: expect.any(Number) });
+    expect(accountActions.setUnreadNotices(2, stamp)).toBe(true);
+    expect(useAccountStore.getState().unreadNotices).toBe(2);
+    applyAccountEvents([noticeEvent(notice("n-1"), 9)]);
+    expect(accountActions.setUnreadNotices(0, stamp)).toBe(false);
+    expect(useAccountStore.getState().unreadNotices).toBe(9);
+    setMe(null);
+    expect(accountActions.setUnreadNotices(1)).toBe(false);
+  });
+
+  it("ignores the answer when a notice event arrived after the request was sent (the event's count is newer), including a count-only repeat", () => {
+    const stamp = noticeStamp();
+    applyAccountEvents([noticeEvent(notice("n-1"), 7)]);
+    accountActions.setUnreadNotices(0, stamp);
+    expect(useAccountStore.getState().unreadNotices).toBe(7);
+    const second = noticeStamp();
+    applyAccountEvents([noticeEvent(notice("n-1"), 6)]); // 同一条换了数:也是更新的数
+    accountActions.setUnreadNotices(0, second);
+    expect(useAccountStore.getState().unreadNotices).toBe(6);
+    // 之后没有新事件:新戳照常写
+    accountActions.setUnreadNotices(1, noticeStamp());
+    expect(useAccountStore.getState().unreadNotices).toBe(1);
+  });
+
+  it("events that change nothing (duplicates, anonymous) do not move the stamp", () => {
+    applyAccountEvents([noticeEvent(notice("n-1"), 3)]);
+    const stamp = noticeStamp();
+    applyAccountEvents([noticeEvent(notice("n-1"), 3)]);
+    expect(noticeStamp()).toEqual(stamp);
+    accountActions.setUnreadNotices(0, stamp);
+    expect(useAccountStore.getState().unreadNotices).toBe(0);
+  });
+
+  it("ignores the answer when the logged-in user changed or the user logged out in between", () => {
+    const stamp = noticeStamp();
+    setMe({ ...bob, unreadNotices: 5 });
+    accountActions.setUnreadNotices(0, stamp);
+    expect(useAccountStore.getState().unreadNotices).toBe(5);
+    const bobStamp = noticeStamp();
+    setMe(null);
+    accountActions.setUnreadNotices(9, bobStamp);
+    expect(useAccountStore.getState().unreadNotices).toBe(0);
   });
 });

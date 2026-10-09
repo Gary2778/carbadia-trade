@@ -5,14 +5,13 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { CostBasisStatus, Position } from "@/shared";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { isChinese } from "@/i18n/config";
 import { tCountry, tName, tProjectType, tRegistry } from "@/i18n/data";
 import { useLang, useT } from "@/i18n/LangProvider";
 import { getCreditProfile } from "@/lib/exchange/carbon";
 import { matchesHoldingQuery } from "@/lib/market/account-view";
 import { terminalHref } from "@/lib/market/navigation";
 import { groupPositions, lockSourcesOf, positionValue, reconcileRetireRequest, type PositionMeta, type RetireRequest } from "@/lib/market/position-groups";
-import { gainTone, localeOf, signedUsd, tonnes, usd } from "./format";
+import { creditName, gainTone, localeOf, signedUsd, tonnes, usd } from "./format";
 import { PANEL, PANEL_TITLE } from "./styles";
 
 // 数字的等宽由 [data-terminal] 的 font-variant-numeric 给;.tnum(等宽字体栈)只加在单独成格的数值上,带文字的说明行不加。
@@ -81,7 +80,7 @@ export const HoldingRow = memo(function HoldingRow(p: HoldingRowProps) {
   const value = positionValue(p, p.livePrice);
   const costMissing = p.costBasisStatus !== "complete";
   const profile = p.projectType != null ? getCreditProfile({ symbol: p.symbol, projectType: p.projectType }) : null;
-  const category = p.isScenario ? t.meta.scenario : profile ? (isChinese(lang) ? profile.categoryZh : profile.category) : null;
+  const category = p.isScenario ? t.meta.scenario : profile ? creditName(a.credit.categories, profile.category) : null;
   const origin = [p.country ? tCountry(p.country, lang) : null, category].map((part) => part ?? ui.notProvided).join(" · ");
   const registry = p.registry ? tRegistry(p.registry, lang) : null;
   const programme = [p.standard ?? ui.notProvided, registry && registry !== p.standard ? registry : null].filter(Boolean).join(" · ");

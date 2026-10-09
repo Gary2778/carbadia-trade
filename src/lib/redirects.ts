@@ -1,14 +1,13 @@
 // cbda.trade 的路由没有主站时代的 /exchange 前缀。带旧前缀的链接(书签、外站引用)整棵子树平移到根。
 // 旧资产页 /portfolio 与 /dashboard 由 /trade/account 取代(计划 §6.2.2 C8,P2-10),两条都跳到新页。
 // next.config.ts 与测试共用这张表。Next 16 无 301 / 302:permanent: true → 308(永久),false → 307(临时),都保留请求方法。
-// /portfolio 与 /dashboard 先用临时跳转(P2-13,终审 P2-OPS-1):Next 给配置里的跳转不带 Cache-Control,浏览器会把永久跳转
-// 长期缓存;一旦回滚到 Phase 1 的镜像(它没有 /trade/account,这个路径落到 /trade/[symbol] → 404),访问过这两个地址的浏览器
-// 不再问服务端、一直跳到 404,服务端收不回来。临时跳转每次都问服务端,回滚即恢复。Phase 2 稳定、不再考虑回滚到 Phase 1 之后
-// 再改成永久(计划 §6.2.2 C8)。/exchange/* 是 Phase 1 就有的永久跳转,不变。
+// /portfolio 与 /dashboard 在 Phase 2 是临时跳转(P2-13,终审 P2-OPS-1):Next 给配置里的跳转不带 Cache-Control,浏览器会把永久跳转
+// 长期缓存,回滚到没有 /trade/account 的 Phase 1 镜像后收不回来。Phase 3 随本次上线改成永久(计划 §9.1 第 50 条 ③,P3-11):
+// 可回滚的目标是 Phase 2(它有 /trade/account),不再回滚到 Phase 1。/exchange/* 是 Phase 1 就有的永久跳转,不变。
 export const LEGACY_REDIRECTS = [
   { source: "/exchange/:path*", destination: "/:path*", permanent: true },
-  { source: "/portfolio", destination: "/trade/account", permanent: false },
-  { source: "/dashboard", destination: "/trade/account", permanent: false },
+  { source: "/portfolio", destination: "/trade/account", permanent: true },
+  { source: "/dashboard", destination: "/trade/account", permanent: true },
 ];
 
 /** 回跳目标缺省或不安全时去这里 */

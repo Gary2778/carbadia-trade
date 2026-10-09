@@ -2,14 +2,17 @@
 // instrumentation、route handler 与 server.mjs 是三个独立的 bundle / realm,凡是要跨它们共享的状态只能挂在 globalThis 上,
 // 且只放 JSON 可序列化的纯数据:无 class、无 instanceof。唯一的 createBus() 实现在 server/bus.mjs(P1-04)。
 import type { InstrumentsResponse } from "./api-shapes";
-import type { Balance, CandleBar, CandleInterval, Fill, Order, OrderBookDelta, OrderBookSnapshot, Position, TapeEntry, TickerUpdate } from "./types";
+import type { Balance, CandleBar, CandleInterval, Fill, Notice, Order, OrderBookDelta, OrderBookSnapshot, Position, TapeEntry, TickerUpdate, Trigger } from "./types";
 import type { Topic } from "./ws-protocol";
 
 export type AccountEvent =
   | { t: "order"; order: Order }
   | { t: "fill"; fill: Fill }
   | { t: "balance"; balance: Balance }
-  | { t: "position"; position: Position };
+  | { t: "position"; position: Position }
+  // 条件单状态变化 / 新通知(unread = 本人最新未读数);账户 store 折叠这两种(openTriggers;unreadNotices 与 subscribeNotices)
+  | { t: "trigger"; trigger: Trigger }
+  | { t: "notice"; notice: Notice; unread: number };
 
 export type BusMessage =
   | { kind: "book"; symbol: string; snapshot: OrderBookSnapshot; delta: OrderBookDelta | null }

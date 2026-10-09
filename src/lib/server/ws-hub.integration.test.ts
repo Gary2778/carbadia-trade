@@ -13,7 +13,7 @@ import { DEV_SESSION_SECRET, resolveSessionSecret, signSession } from "../../../
 import { DEFAULT_MAX_UNTRUSTED, attachWsHub } from "../../../server/ws-hub.mjs";
 import { serverFrameSchema } from "../../../server/ws-schema.mjs";
 import type { BusMessage } from "@/shared/bus";
-import type { TapeEntry } from "@/shared/types";
+import type { Notice, TapeEntry, Trigger } from "@/shared/types";
 import type { ClientOp, ServerEvent } from "@/shared/ws-protocol";
 
 type AttachOpts = Parameters<typeof attachWsHub>[1];
@@ -184,6 +184,30 @@ describe("attachWsHub · 鉴权", () => {
     expect((await good.until("hello"))[0].userId).toBe("user_42");
     const forged = await connect(url, { headers: { cookie: `cx_session=${signSession("user_42", "wrong")}` } });
     expect((await forged.until("hello"))[0].userId).toBeNull();
+  });
+
+  it("登录连接订阅 account 后收到本人的 trigger / notice 事件(经真实 socket、过 serverFrameSchema),别人的收不到;seq 与其它账户事件同序", async () => {
+    const { url, bus } = await start({ secret: "s3cret" });
+    const cookie = (userId: string) => ({ headers: { cookie: `cx_session=${encodeURIComponent(signSession(userId, "s3cret"))}` } });
+    const mine = await connect(url, cookie("user_42"));
+    const other = await connect(url, cookie("user_43"));
+    for (const c of [mine, other]) {
+      c.send({ op: "subscribe", topics: ["account"] });
+      await c.until("subscribed");
+    }
+    const trigger: Trigger = {
+      id: "trg_1", kind: "ALERT", assetId: "a1", symbol: "VCS-FOR-2021", direction: "ABOVE", triggerPrice: 7_200, side: null, orderType: null, limitPrice: null, quantity: null,
+      ocoGroupId: null, status: "TRIGGERED", reason: null, orderId: null, firedPrice: 7_210, createdAt: 1_700_000_000_000, updatedAt: 1_700_000_001_000, firedAt: 1_700_000_001_000,
+    };
+    const notice: Notice = { id: "ntc_1", createdAt: 1_700_000_001_000, readAt: null, kind: "price_alert", triggerId: "trg_1", symbol: "VCS-FOR-2021", direction: "ABOVE", triggerPrice: 7_200, firedPrice: 7_210 };
+    bus.publish({ kind: "account", userId: "user_42", event: { t: "trigger", trigger } });
+    bus.publish({ kind: "account", userId: "user_42", event: { t: "notice", notice, unread: 4 } });
+    expect(await mine.until("trigger")).toEqual([{ t: "trigger", topic: "account", seq: 1, trigger }]);
+    expect(await mine.until("notice")).toEqual([{ t: "notice", topic: "account", seq: 2, notice, unread: 4 }]);
+    // 别人这边什么都没有:再发一条它自己的 notice,seq 从 1 起,说明前两条没有漏给它
+    bus.publish({ kind: "account", userId: "user_43", event: { t: "notice", notice: { ...notice, id: "ntc_2" }, unread: 1 } });
+    expect(await other.until("notice")).toEqual([{ t: "notice", topic: "account", seq: 1, notice: { ...notice, id: "ntc_2" }, unread: 1 }]);
+    expect(other.of("trigger")).toHaveLength(0);
   });
 
   it("生产环境的 SESSION_SECRET 是公开的开发默认值:与 auth.ts 一样拒用(fail closed)——hub 照常启动,但全部连接按匿名处理、account 回 unauthorized,并记一行错误(终审 P1-25a)", async () => {

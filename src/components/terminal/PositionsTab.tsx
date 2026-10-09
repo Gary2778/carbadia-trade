@@ -42,16 +42,19 @@ import {
 
 // 注销对话框第一次点「注销」才下载与挂载(计划 §6.2.2 C7:next/dynamic,不进终端首屏);它是模态对话框,加载那一瞬不占位。
 const RetireDialog = dynamic(() => import("@/components/account/RetireDialog").then((m) => m.RetireDialog), { ssr: false });
+// 止盈止损对话框同样第一次点开才下载与挂载(P3-07);关闭即卸载,没有要保留的半成品
+const TakeProfitStopLossDialog = dynamic(() => import("./TakeProfitStopLossDialog").then((m) => m.TakeProfitStopLossDialog), { ssr: false });
 
 /**
  * 年份 · 标的 / 可交易 / 已锁定 / 已注销 / 平均成本 / 最新价 / 市值 / 未实现盈亏 / 操作。
- * 最小宽度 46.25rem(740 px)放得进 1440 宽时底部页签的约 798 px:不横向滚动就看得到每行的「卖出 / 注销」(P2-12);
+ * 最小宽度 49.75rem(796 px)放得进 1440 宽时底部页签的约 798 px:不横向滚动就看得到每行的「卖出 / 注销 / 止盈止损」(P2-12;
+ * P3-07 加第三个按钮:操作列 5.5rem → 9.5rem,英文「Take-profit / stop-loss」在按钮里均衡折成两行、行高不变;平均成本与最新价两列下限 4rem → 3.75rem 让出宽度);
  * 多出的宽度大半给首列(年份 · 标的 · 情景标记)。更窄时表格横向滚动;从 48rem 起(1280 宽约 638 px、平板)首列与操作列贴边(pinEdges),
  * 分组标题贴左。48rem 以下(手机)不贴边,整张表一起横向滚:滚动区太窄,两头一贴中间几列读不全(见 terminal.css 的贴边列一节)。
  */
 const COLUMNS: Columns = {
-  template: "minmax(10.5rem,2.4fr) repeat(3,minmax(3.25rem,0.6fr)) repeat(2,minmax(4rem,0.8fr)) repeat(2,minmax(5rem,1fr)) 5.5rem",
-  minWidth: "46.25rem",
+  template: "minmax(10.5rem,2.4fr) repeat(3,minmax(3.25rem,0.6fr)) repeat(2,minmax(3.75rem,0.8fr)) repeat(2,minmax(5rem,1fr)) 9.5rem",
+  minWidth: "49.75rem",
 };
 
 /** 「已注销」分组里的行去哪看证书:旧 /retirement 页保留注销记录与证书(计划 §6.2.2 C8) */
@@ -167,6 +170,8 @@ export type PositionRowProps = {
   precision: number;
   onSell: (symbol: string) => void;
   onRetire: (assetId: string) => void;
+  /** 止盈止损(P3-07):数量 > 0 的行才有这个按钮 */
+  onProtect: (assetId: string) => void;
 };
 
 /**
@@ -175,7 +180,8 @@ export type PositionRowProps = {
  * 只有它变了才重渲染;服务端与水合首帧 store 为空,退回事件自带的价格。从未成交 → 市值「—」,不把缺的价格当 0。
  * 成本基础不完整(costBasisStatus ≠ complete)时均价与盈亏都不猜,显示「—」并以 title 说明(terminal.tabs.pnlUnavailable)。
  * 不显示 24 h 估值变化(§9.1 第 31 条:不用市场涨跌代替账户估值)。
- * Sell → 下单草稿种子 side = SELL + 换到该标的;Retire → 打开注销对话框(不跳页);情景标的不可注销:禁用按钮并说明原因。
+ * Sell → 下单草稿种子 side = SELL + 换到该标的;Retire → 打开注销对话框(不跳页);情景标的不可注销:禁用按钮并说明原因;
+ * 止盈止损 → 打开止盈止损对话框(数量 > 0 才有)。
  */
 export const PositionRow = memo(function PositionRow(p: PositionRowProps) {
   const t = useT("terminal");
@@ -237,6 +243,19 @@ export const PositionRow = memo(function PositionRow(p: PositionRowProps) {
             {t.tabs.retire}
           </button>
         )}
+        {p.quantity > 0 ? (
+          // 英文两行的字靠行高挤进一行高:行距规则在 terminal.css 的 [data-terminal] [data-tpsl](紧凑行高下也成立)
+          <button
+            type="button"
+            data-tpsl=""
+            onClick={() => p.onProtect(p.assetId)}
+            aria-label={`${t.triggers.tpsl} ${p.symbol}`}
+            aria-haspopup="dialog"
+            className="rounded-chip px-1 text-start text-t-xs font-medium whitespace-normal text-balance text-accent hover:underline focus-visible:outline-none focus-visible:shadow-focus"
+          >
+            {t.triggers.tpsl}
+          </button>
+        ) : null}
       </span>
     </div>
   );
@@ -317,6 +336,7 @@ export type PositionsViewProps = {
   meta: Readonly<Record<string, PositionMeta>>;
   onSell: (symbol: string) => void;
   onRetire: (assetId: string) => void;
+  onProtect: (assetId: string) => void;
   /** 「已注销」分组是否展开(调用方的本地状态,默认 false,不持久化) */
   retiredOpen: boolean;
   onToggleRetired: () => void;
@@ -327,7 +347,7 @@ export type PositionsViewProps = {
  * 收在页签底部的「已注销」分组,默认折叠,组头带合计吨数。分组头、锁定来源、折叠按钮都是虚拟列表里的行(固定行高)。
  * 一行持仓都没有(连注销过的也没有)→ EmptyState。
  */
-export function PositionsView({ positions, meta, onSell, onRetire, retiredOpen, onToggleRetired }: PositionsViewProps) {
+export function PositionsView({ positions, meta, onSell, onRetire, onProtect, retiredOpen, onToggleRetired }: PositionsViewProps) {
   const t = useT("terminal");
   const rows = useMemo(() => positionRows(groupPositions(positions, meta), retiredOpen), [positions, meta, retiredOpen]);
   return (
@@ -383,6 +403,7 @@ export function PositionsView({ positions, meta, onSell, onRetire, retiredOpen, 
                 precision={meta[p.symbol]?.pricePrecision ?? 2}
                 onSell={onSell}
                 onRetire={onRetire}
+                onProtect={onProtect}
               />
             );
           }
@@ -418,8 +439,10 @@ export function PositionsTab() {
   const meta = useMarketStore((s) => positionMetaOf(s.instruments));
   const [retiredOpen, setRetiredOpen] = useState(false);
   const [retire, setRetire] = useState<RetireRequest | null>(null);
-  /** 对话框开着时它的持仓消失了几次(每次都要给焦点找个着落) */
-  const [retireOrphaned, setRetireOrphaned] = useState(0);
+  /** 止盈止损对话框对着的持仓(assetId);null = 关着 */
+  const [protect, setProtect] = useState<string | null>(null);
+  /** 对话框(注销 / 止盈止损)开着时它的持仓消失了几次(每次都要给焦点找个着落) */
+  const [dialogOrphaned, setDialogOrphaned] = useState(0);
   const hostRef = useRef<HTMLDivElement>(null);
   /** 本面板里最后拿到焦点的元素;正常失焦即清掉,所以它还在而节点已不在文档里 = 焦点随那一行一起没了 */
   const focusedRef = useRef<Element | null>(null);
@@ -428,9 +451,15 @@ export function PositionsTab() {
   const reconciled = reconcileRetireRequest(retire, positions);
   if (reconciled.dropped) {
     setRetire(null);
-    if (reconciled.wasOpen) setRetireOrphaned((n) => n + 1);
+    if (reconciled.wasOpen) setDialogOrphaned((n) => n + 1);
   }
   const target = retire ? positions.find((p) => p.assetId === retire.assetId) : undefined;
+  // 止盈止损对着的持仓卖光了(数量 0 或整行没了):对话框就此卸载(渲染期调整 state,同上),焦点与注销对话框同一套兜底
+  const protectTarget = protect ? positions.find((p) => p.assetId === protect && p.quantity > 0) : undefined;
+  if (protect && !protectTarget) {
+    setProtect(null);
+    setDialogOrphaned((n) => n + 1);
+  }
 
   const handleFocus = useCallback((event: FocusEvent<HTMLDivElement>) => {
     focusedRef.current = event.target;
@@ -449,15 +478,20 @@ export function PositionsTab() {
     focusedRef.current = null;
     focusPositionsRegion(hostRef.current, document.activeElement, document.body);
   }, [positions, retiredOpen]);
-  // 对话框随持仓消失而卸载(没有经过 onClose):打开它的「注销」按钮也不在了,Dialog 还不回焦点 —— 与正常关闭同样兜一次底
+  // 对话框随持仓消失而卸载(没有经过 onClose):打开它的「注销」/「止盈止损」按钮也不在了,Dialog 还不回焦点 —— 与正常关闭同样兜一次底
   useEffect(() => {
-    if (retireOrphaned === 0) return;
+    if (dialogOrphaned === 0) return;
     const frame = requestAnimationFrame(() => focusPositionsRegion(hostRef.current, document.activeElement, document.body));
     return () => cancelAnimationFrame(frame);
-  }, [retireOrphaned]);
+  }, [dialogOrphaned]);
 
   const handleToggleRetired = useCallback(() => setRetiredOpen((open) => !open), []);
   const handleRetire = useCallback((assetId: string) => setRetire({ assetId, open: true }), []);
+  const handleProtect = useCallback((assetId: string) => setProtect(assetId), []);
+  const handleProtectClose = useCallback(() => {
+    setProtect(null);
+    requestAnimationFrame(() => focusPositionsRegion(hostRef.current, document.activeElement, document.body));
+  }, []);
   const handleRetireClose = useCallback(() => {
     setRetire((current) => (current ? { ...current, open: false } : current));
     // Dialog 卸载时把焦点还给打开它的按钮;等这一帧过去再看焦点有没有着落
@@ -466,8 +500,9 @@ export function PositionsTab() {
 
   return (
     <div ref={hostRef} onFocus={handleFocus} onBlur={handleBlur} className="flex min-h-0 flex-1 flex-col">
-      <PositionsView positions={positions} meta={meta} onSell={handlePositionSell} onRetire={handleRetire} retiredOpen={retiredOpen} onToggleRetired={handleToggleRetired} />
+      <PositionsView positions={positions} meta={meta} onSell={handlePositionSell} onRetire={handleRetire} onProtect={handleProtect} retiredOpen={retiredOpen} onToggleRetired={handleToggleRetired} />
       {retire && target ? <RetireDialog position={target} instrument={meta[target.symbol]} open={retire.open} onClose={handleRetireClose} /> : null}
+      {protectTarget ? <TakeProfitStopLossDialog position={protectTarget} onClose={handleProtectClose} /> : null}
     </div>
   );
 }

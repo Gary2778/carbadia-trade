@@ -1,9 +1,11 @@
 // Prisma 行 → 共享 Order / Fill / Position 的映射(计划 §3.5、§9.1 第 1/24/25/41 条):cancelReason 派生(含自成交防护撤单)、updatedAt 回退、role 由 takerSideOf 决定、
-// 持仓三态与成本状态、账本视图、按成交重算均价。
+// 持仓三态与成本状态、账本视图、按成交重算均价;条件单与通知(P3-02):枚举列的收窄与回退、payload 的解析与逐字段核对。
 import { describe, expect, it } from "vitest";
+import type { Notification as NotificationRow, Trigger as TriggerRow } from "@/generated/prisma";
+import type { NoticePayload } from "@/shared/types";
 import type { OrderRow, TradeRow } from "../exchange/matching";
 import type { CostBasisLedgerLine } from "../exchange/portfolio-analysis";
-import { avgFillPricesByOrder, ledgerIdsByTrade, selfTradeCancelledIds, toFill, toLedgerLineView, toOrder, toPosition, type HoldingRow } from "./account-mappers";
+import { avgFillPricesByOrder, ledgerIdsByTrade, selfTradeCancelledIds, toFill, toLedgerLineView, toNotice, toOrder, toPosition, toTrigger, type HoldingRow } from "./account-mappers";
 
 const T0 = new Date("2026-09-26T00:00:00.000Z");
 const T1 = new Date("2026-09-26T00:00:05.000Z");
@@ -250,5 +252,147 @@ describe("avgFillPricesByOrder", () => {
     expect(avg.get("o000")).toBe(7_000);
     expect(avg.get("o400")).toBe(7_000);
     expect(avg.get("o123")).toBe(5_000);
+  });
+});
+
+function triggerRow(over: Partial<TriggerRow> = {}): TriggerRow {
+  return {
+    id: "trg_1", userId: "u_alice", assetId: "a_1", kind: "ORDER", direction: "ABOVE", triggerPrice: 11_000, side: "SELL", orderType: "LIMIT", limitPrice: 10_900,
+    quantity: 5, ocoGroupId: null, status: "PENDING", reason: null, orderId: null, firedPrice: null, clientKey: "key-1", createdAt: T0, updatedAt: T0, firedAt: null, ...over,
+  };
+}
+
+describe("toTrigger", () => {
+  it("symbol 由调用方给,时间转 unix ms,不外露 userId / clientKey", () => {
+    const trigger = toTrigger(triggerRow(), "VCS-FOR-2021");
+    expect(trigger).toEqual({
+      id: "trg_1", kind: "ORDER", assetId: "a_1", symbol: "VCS-FOR-2021", direction: "ABOVE", triggerPrice: 11_000, side: "SELL", orderType: "LIMIT", limitPrice: 10_900,
+      quantity: 5, ocoGroupId: null, status: "PENDING", reason: null, orderId: null, firedPrice: null, createdAt: T0.getTime(), updatedAt: T0.getTime(), firedAt: null,
+    });
+    expect("userId" in trigger).toBe(false);
+    expect("clientKey" in trigger).toBe(false);
+  });
+
+  it("已触发的 ORDER:orderId、firedPrice、firedAt 原样带出;被撤的 OCO 成员带 reason", () => {
+    const fired = toTrigger(triggerRow({ status: "TRIGGERED", orderId: "ord_1", firedPrice: 11_020, firedAt: T1, updatedAt: T1, ocoGroupId: "oco_1" }), "VCS-FOR-2021");
+    expect(fired).toMatchObject({ status: "TRIGGERED", orderId: "ord_1", firedPrice: 11_020, firedAt: T1.getTime(), updatedAt: T1.getTime(), ocoGroupId: "oco_1" });
+    const cancelled = toTrigger(triggerRow({ status: "CANCELLED", reason: "OCO", ocoGroupId: "oco_1" }), "VCS-FOR-2021");
+    expect(cancelled).toMatchObject({ status: "CANCELLED", reason: "OCO" });
+    expect(toTrigger(triggerRow({ status: "REJECTED", reason: "INSUFFICIENT_QTY" }), "S").reason).toBe("INSUFFICIENT_QTY");
+  });
+
+  it("ALERT:下单字段全为 null", () => {
+    const alert = toTrigger(triggerRow({ kind: "ALERT", direction: "BELOW", side: null, orderType: null, limitPrice: null, quantity: null }), "VCS-FOR-2021");
+    expect(alert).toMatchObject({ kind: "ALERT", direction: "BELOW", side: null, orderType: null, limitPrice: null, quantity: null });
+  });
+
+  it("五种状态、两种类型、两个方向、五种原因都原样通过", () => {
+    for (const status of ["PENDING", "TRIGGERING", "TRIGGERED", "REJECTED", "CANCELLED"]) expect(toTrigger(triggerRow({ status }), "S").status).toBe(status);
+    for (const kind of ["ORDER", "ALERT"]) expect(toTrigger(triggerRow({ kind }), "S").kind).toBe(kind);
+    for (const direction of ["ABOVE", "BELOW"]) expect(toTrigger(triggerRow({ direction }), "S").direction).toBe(direction);
+    for (const reason of ["USER", "OCO", "INSUFFICIENT_CASH", "INSUFFICIENT_QTY", "NO_FILL", "INVALID"]) expect(toTrigger(triggerRow({ reason }), "S").reason).toBe(reason);
+  });
+
+  it("未知状态当 CANCELLED(界面不会出现永远等不到触发的幻影条件单);未知类型当 ALERT;未知方向当 ABOVE", () => {
+    expect(toTrigger(triggerRow({ status: "WAITING" }), "S").status).toBe("CANCELLED");
+    expect(toTrigger(triggerRow({ status: "pending" }), "S").status).toBe("CANCELLED"); // 大小写敏感
+    expect(toTrigger(triggerRow({ status: "" }), "S").status).toBe("CANCELLED");
+    expect(toTrigger(triggerRow({ kind: "STOP" }), "S").kind).toBe("ALERT");
+    expect(toTrigger(triggerRow({ direction: "UP" }), "S").direction).toBe("ABOVE");
+  });
+
+  it("可空的枚举列(side / orderType / reason)遇到未知值回 null", () => {
+    const t = toTrigger(triggerRow({ side: "HOLD", orderType: "STOP", reason: "BROKE" }), "S");
+    expect(t).toMatchObject({ side: null, orderType: null, reason: null });
+  });
+});
+
+function notificationRow(payload: unknown, over: Partial<NotificationRow> = {}): NotificationRow {
+  return {
+    id: "ntc_1", userId: "u_alice", kind: typeof payload === "object" && payload !== null && "kind" in payload ? String(payload.kind) : "fill",
+    payload: typeof payload === "string" ? payload : JSON.stringify(payload), dedupeKey: "fill:ord_1:5", createdAt: T0, readAt: null, ...over,
+  };
+}
+
+const fillPayload: NoticePayload = { kind: "fill", orderId: "ord_1", symbol: "VCS-FOR-2021", side: "BUY", role: "TAKER", quantity: 5, price: 9_800, orderStatus: "FILLED" };
+const triggerPayload: NoticePayload = {
+  kind: "trigger", triggerId: "trg_1", symbol: "VCS-FOR-2021", outcome: "REJECTED", reason: "INSUFFICIENT_CASH", side: "BUY", quantity: 5, triggerPrice: 11_000, orderId: null,
+};
+const alertPayload: NoticePayload = { kind: "price_alert", triggerId: "trg_2", symbol: "VCS-FOR-2021", direction: "BELOW", triggerPrice: 9_000, firedPrice: 8_990 };
+
+describe("toNotice", () => {
+  it("三种载荷各自解析成 Notice:id / createdAt(毫秒)/ readAt 加上载荷字段,不外露 userId / dedupeKey", () => {
+    for (const payload of [fillPayload, triggerPayload, alertPayload]) {
+      const notice = toNotice(notificationRow(payload));
+      expect(notice).toEqual({ id: "ntc_1", createdAt: T0.getTime(), readAt: null, ...payload });
+      expect(notice && "userId" in notice).toBe(false);
+      expect(notice && "dedupeKey" in notice).toBe(false);
+    }
+  });
+
+  it("已读:readAt 转毫秒", () => {
+    expect(toNotice(notificationRow(fillPayload, { readAt: T1 }))?.readAt).toBe(T1.getTime());
+  });
+
+  it("trigger 载荷的可空字段(reason / side / quantity / orderId)给 null 或给值都行;已触发的带 orderId", () => {
+    const triggered: NoticePayload = { kind: "trigger", triggerId: "trg_1", symbol: "S", outcome: "TRIGGERED", reason: null, side: "SELL", quantity: 5, triggerPrice: 11_000, orderId: "ord_9" };
+    expect(toNotice(notificationRow(triggered))).toMatchObject({ outcome: "TRIGGERED", reason: null, orderId: "ord_9" });
+    const alertCancelled: NoticePayload = { kind: "trigger", triggerId: "trg_3", symbol: "S", outcome: "CANCELLED", reason: "OCO", side: null, quantity: null, triggerPrice: 9_500, orderId: null };
+    expect(toNotice(notificationRow(alertCancelled))).toMatchObject({ outcome: "CANCELLED", reason: "OCO", side: null, quantity: null });
+  });
+
+  it("payload 解析不了(不是 JSON、空串、截断)→ null", () => {
+    for (const payload of ["not json", "", '{"kind":"fill"', "{'kind':'fill'}"]) expect(toNotice(notificationRow(payload))).toBeNull();
+  });
+
+  it("payload 是 JSON 但不是对象(null、数字、字符串、数组)→ null", () => {
+    for (const payload of ["null", "42", '"fill"', "[]", `[${JSON.stringify(fillPayload)}]`, "true"]) expect(toNotice(notificationRow(payload))).toBeNull();
+  });
+
+  it("kind 缺失或未知 → null(以载荷里的 kind 为准,不看 Notification.kind 列)", () => {
+    expect(toNotice(notificationRow({ ...fillPayload, kind: "promo" }))).toBeNull();
+    expect(toNotice(notificationRow({ ...fillPayload, kind: undefined }))).toBeNull();
+    expect(toNotice(notificationRow({ ...fillPayload, kind: 7 }))).toBeNull();
+  });
+
+  it("缺字段 → null:每个载荷的每个字段单独去掉都不通过", () => {
+    for (const payload of [fillPayload, triggerPayload, alertPayload]) {
+      for (const key of Object.keys(payload).filter((k) => k !== "kind")) {
+        const without = Object.fromEntries(Object.entries(payload).filter(([k]) => k !== key));
+        expect(toNotice(notificationRow(without)), `${payload.kind} without ${key}`).toBeNull();
+      }
+    }
+  });
+
+  it("字段类型或取值不对 → null:数量带小数 / 为负、价格是字符串、side / role / orderStatus / outcome / reason / direction 未知、symbol 为空", () => {
+    const bad: unknown[] = [
+      { ...fillPayload, quantity: 0.5 },
+      { ...fillPayload, quantity: -1 },
+      { ...fillPayload, price: "9800" },
+      { ...fillPayload, price: Number.NaN },
+      { ...fillPayload, side: "HOLD" },
+      { ...fillPayload, role: "BOTH" },
+      { ...fillPayload, orderStatus: "NEW" },
+      { ...fillPayload, orderId: "" },
+      { ...fillPayload, symbol: 12 },
+      { ...triggerPayload, outcome: "PENDING" },
+      { ...triggerPayload, reason: "BROKE" },
+      { ...triggerPayload, reason: undefined },
+      { ...triggerPayload, side: "HOLD" },
+      { ...triggerPayload, quantity: 1.5 },
+      { ...triggerPayload, orderId: 5 },
+      { ...triggerPayload, triggerPrice: null },
+      { ...alertPayload, direction: "UP" },
+      { ...alertPayload, firedPrice: 1.5 },
+      { ...alertPayload, triggerId: "" },
+    ];
+    for (const payload of bad) expect(toNotice(notificationRow(payload)), JSON.stringify(payload)).toBeNull();
+  });
+
+  it("JSON 里多出来的键不进响应(按字段重建);大数字与 0 都合法", () => {
+    const notice = toNotice(notificationRow({ ...fillPayload, userId: "u_alice", secret: "x", quantity: 0, price: 123_456_789 }));
+    expect(notice).toEqual({ id: "ntc_1", createdAt: T0.getTime(), readAt: null, ...fillPayload, quantity: 0, price: 123_456_789 });
+    expect(notice && "secret" in notice).toBe(false);
+    expect(notice && "userId" in notice).toBe(false);
   });
 });

@@ -105,15 +105,19 @@ describe("appearance storage with an in-memory fallback (theme and up/down choic
 
 describe("appearance-storage module boundary", () => {
   const src = readFileSync(fileURLToPath(new URL("./appearance-storage.ts", import.meta.url)), "utf8");
+  const keySrc = readFileSync(fileURLToPath(new URL("./appearance-key-storage.ts", import.meta.url)), "utf8");
 
   it("is a plain module (no \"use client\"), so importing it never makes a Fast Refresh boundary or a client reference", () => {
     expect(src).not.toMatch(/^\s*["']use client["']/m);
+    expect(keySrc).not.toMatch(/^\s*["']use client["']/m);
   });
 
   it("every storage read and write goes through readAppearanceKey / writeAppearanceKey (no bare localStorage outside them)", () => {
-    const body = src.slice(src.indexOf("export function readAppearanceKey"));
-    const helpers = body.slice(0, body.indexOf("/** 读存储并按 pathname 派生"));
-    expect(helpers).toMatch(/localStorage\./);
-    expect(src.replace(helpers, "")).not.toMatch(/localStorage\./);
+    // 两个存取函数在 appearance-key-storage.ts(P3-09 拆出,时区偏好共用);appearance-storage.ts 只导出它们,自己不碰 localStorage
+    const body = keySrc.slice(keySrc.indexOf("export function readAppearanceKey"));
+    expect(body).toMatch(/localStorage\./);
+    expect(keySrc.slice(0, keySrc.indexOf("export function readAppearanceKey"))).not.toMatch(/localStorage\./);
+    expect(src).not.toMatch(/localStorage\./);
+    expect(src).toMatch(/export \{ readAppearanceKey, writeAppearanceKey \};/);
   });
 });

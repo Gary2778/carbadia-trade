@@ -300,7 +300,7 @@ describe("retire flow store: sign-out", () => {
     vi.resetModules();
     const account = await import("./account-store");
     const store = await import("./retire-flow-store");
-    const ME = { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 100_000, lockedCash: 0 };
+    const ME = { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 100_000, lockedCash: 0, unreadNotices: 0 };
     const makeUncertain = async () => {
       const unwatch = store.watchRetireFlow(A);
       for (const action of FILL) store.dispatchRetireFlow(A, action);

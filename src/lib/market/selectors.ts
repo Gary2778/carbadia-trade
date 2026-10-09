@@ -8,8 +8,7 @@ import { getBookView, minePricesOf, type BookView } from "./book-view";
 import { filterInstruments, type InstrumentFilters, type InstrumentListRow } from "./instrument-filter";
 import { readOpenOrders, readServerOpenOrders, subscribeOpenOrders } from "./open-orders-source";
 import { bookTopOf, type DraftBookTop } from "./order-draft";
-import { candleKey, useMarketStore, type BookState, type DraftSeed, type MarketState } from "./store";
-import type { TransportMode } from "./transport";
+import { candleKey, useMarketStore, type BookState, type DraftSeed } from "./store";
 
 export type { InstrumentFilters, InstrumentListRow, InstrumentSort } from "./instrument-filter";
 export type { BookView, BookViewRow } from "./book-view";
@@ -39,34 +38,8 @@ export function useConnection(): ConnectionState {
   return useMarketStore(useShallow((s) => s.connection));
 }
 
-export type ConnectionBadgeKind = "live" | "polling" | "offline" | "reconnecting";
-
-/**
- * 纯函数:connection 切片 → 连接状态的种类(连接徽标的显示与面板的「行情源已断」同一条规则,都从这里来)。
- * pending = 传输层还没启动(SSR、水合首帧、MarketProvider 的 effect 之前:store 仍是创建时的 { transport: "none",
- * state: "offline" },且从未收过消息):这时按构建期模式 mode 给预期的种类(ws → live,poll → polling)作占位,
- * 不在首屏喊「离线」;一旦传输层报了状态就照实给。ConnectionBadge 以构建期内联的模式调用它。
- */
-export function connectionKind(conn: ConnectionState, mode: TransportMode): { kind: ConnectionBadgeKind; pending: boolean } {
-  if (conn.transport === "poll") return { kind: "polling", pending: false };
-  if (conn.state === "open") return { kind: "live", pending: false };
-  if (conn.state === "connecting" || conn.state === "degraded") return { kind: "reconnecting", pending: false };
-  if (conn.transport === "none" && conn.lastMessageAt === null && conn.rttMs === null) {
-    return { kind: mode === "poll" ? "polling" : "live", pending: true };
-  }
-  return { kind: "offline", pending: false };
-}
-
-/**
- * store selector(返回布尔原始值,只在它翻转时重渲染):行情源真的断了 —— 与 ConnectionBadge 显示「离线」同一口径。
- * 传输层还没启动的初始 store(SSR、水合首帧,徽标显示弱化的占位)不算:那时面板照常是骨架,不在首屏报错。
- * 盘口与成交面板在「还没有任何数据」时据此把骨架换成 ErrorState(§4.5 三态);已有数据时照常显示最后的数据。
- * 构建期模式只影响占位(pending)时的标签,不影响「离线」这个判断,所以这里传哪个模式都一样。
- */
-export const selectFeedOffline = (s: MarketState): boolean => {
-  const { kind, pending } = connectionKind(s.connection, "ws");
-  return kind === "offline" && !pending;
-};
+// 连接状态的种类与「行情源已断」的判断在 connection-kind.ts(零运行时依赖,P3-05 从这里挪出);这里原样再导出
+export { connectionKind, selectFeedOffline, type ConnectionBadgeKind } from "./connection-kind";
 
 export function useDraft(): DraftSeed {
   return useMarketStore(useShallow((s) => s.draft));

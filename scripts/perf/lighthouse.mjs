@@ -2,7 +2,7 @@
 // @ts-check
 // Lighthouse 首屏度量(计划 §7.1「首屏 LCP」、§7.2;P1-24,P1-26 改移动门禁口径)。对着已经在跑的生产构建(`node server.mjs`,bot 开)运行:
 //
-//   npm run perf:lh -- http://localhost:3940                  # 默认三页 × 移动真实节流 5 次 + 移动模拟节流 3 次 + 桌面 3 次
+//   npm run perf:lh -- http://localhost:3940                  # 默认四页 × 移动真实节流 5 次 + 移动模拟节流 3 次 + 桌面 3 次
 //   npm run perf:lh -- http://localhost:3940 --runs 3 --sim-runs 0 --desktop-runs 1 --paths /trade/VCS-FOR-2021,/ [--json]
 //   npm run perf:lh -- http://localhost:3940 --paths /trade/account --cookie-file <文件>   # 已登录态(P2-11,只报告用)
 //   npm run perf:lh -- --help
@@ -25,7 +25,8 @@
 // 预算(计划 §7.1,移动与桌面同一套):LCP < 2.0 s、TBT < 200 ms、CLS < 0.1;门禁形态的任一中位数超出 exit 1(模拟节流超出只打印 INFO)。
 // Lighthouse 自身失败(非零退出、runtimeError、缺指标、节流口径不符)exit 2;临时目录在任何情况下都会删掉(先抛错、finally 清理、再退出)。
 // 本地没有 Cloudflare 边缘与 brotli,数字偏保守;部署后对线上地址再跑一遍记入 docs/perf-report.md。
-// 默认页面(P2-11 加资产页):终端 /trade/VCS-FOR-2021、首页 /、资产页 /trade/account(未登录态,即 AccountGate 与演示账号入口)。
+// 默认页面(P2-11 加资产页、P3-05 加市场总览页):终端 /trade/VCS-FOR-2021、首页 /、资产页 /trade/account(未登录态,即 AccountGate 与演示账号入口)、
+// 市场总览页 /trade/markets(公开页面,指数卡与三张榜服务端渲染)。
 // 已登录态(P2-11):--cookie-file 指向一个只含 Cookie 请求头值的文件(如 `cx_session=…`),经 Lighthouse 的
 // --extra-headers 带给页面的每个请求(文档、脚本、fetch);头写进临时目录里的 JSON 文件再传路径,cookie 不出现在命令行与进程列表里。
 // 带 --cookie-file 时整次运行只报告(计划 §7.2、§6.2 P2-11:已登录的数字只报告):所有形态都不作门禁,预算三项照常算、
@@ -37,7 +38,7 @@ import path from "node:path";
 import process from "node:process";
 
 const DEFAULT_BASE = "http://localhost:3940";
-const DEFAULT_PATHS = ["/trade/VCS-FOR-2021", "/", "/trade/account"];
+const DEFAULT_PATHS = ["/trade/VCS-FOR-2021", "/", "/trade/account", "/trade/markets"];
 const BUDGET = { lcpMs: 2000, tbtMs: 200, cls: 0.1 };
 const LIGHTHOUSE = "lighthouse@12";
 

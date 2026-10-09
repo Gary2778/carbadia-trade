@@ -2,13 +2,14 @@
 
 import { useMemo, useState } from "react";
 import type { Position } from "@/shared";
-import { isChinese, type Lang } from "@/i18n/config";
+import type { Messages } from "@/i18n";
+import type { Lang } from "@/i18n/config";
 import { tCountry } from "@/i18n/data";
 import { useLang, useT } from "@/i18n/LangProvider";
 import { getCreditProfile } from "@/lib/exchange/carbon";
 import { allocationOf, type Allocation } from "@/lib/market/account-view";
 import type { PositionMeta } from "@/lib/market/position-groups";
-import { localeOf, share, tonnes, usd } from "./format";
+import { creditName, localeOf, share, tonnes, usd } from "./format";
 import { PANEL, PANEL_TITLE } from "./styles";
 
 /** 三种分组:项目类型(碳信用的大类,如林业、蓝碳、太阳能)/ 地域 / 类别(移除 / 避免排放) */
@@ -68,7 +69,7 @@ export function AllocationView({ allocation, by, onBy }: AllocationViewProps) {
         <p className="text-t-sm text-muted">{a.allocation.empty}</p>
       ) : (
         <>
-          <div aria-hidden="true" className="flex h-3 w-full overflow-hidden rounded-pill bg-(--terminal-panel-2)">
+          <div aria-hidden="true" className="flex h-3 w-full overflow-hidden rounded-chip bg-(--terminal-panel-2)">
             {allocation.slices.map((slice, i) => (
               <span key={slice.label} className="h-full" style={{ width: `${slice.share * 100}%`, background: allocationTone(i) }} />
             ))}
@@ -92,16 +93,16 @@ export function AllocationView({ allocation, by, onBy }: AllocationViewProps) {
 }
 
 /** 分组名:项目类型取碳信用的大类(与旧 /portfolio 同一个 getCreditProfile),地域取国家,类别取移除 / 避免排放;都按界面语言 */
-export function allocationLabel(by: AllocationBy, position: Pick<Position, "symbol">, meta: PositionMeta | undefined, lang: Lang, notProvided: string): string {
+export function allocationLabel(by: AllocationBy, position: Pick<Position, "symbol">, meta: PositionMeta | undefined, lang: Lang, credit: Messages["account"]["credit"], notProvided: string): string {
   if (!meta) return notProvided;
   if (by === "country") return tCountry(meta.country, lang);
   const profile = getCreditProfile({ symbol: position.symbol, projectType: meta.projectType });
-  const zh = isChinese(lang);
-  return by === "type" ? (zh ? profile.categoryZh : profile.category) : zh ? profile.approachZh : profile.approach;
+  return by === "type" ? creditName(credit.categories, profile.category) : creditName(credit.approaches, profile.approach);
 }
 
 /** 分布(容器):分组方式是本地状态(默认项目类型,不持久化);价格与各行同一组(prices,缺的退回持仓行自带的) */
 export function AllocationSection({ positions, meta, prices }: { positions: readonly Position[]; meta: Readonly<Record<string, PositionMeta>>; prices: Readonly<Record<string, number | null>> }) {
+  const a = useT("account");
   const ui = useT("ui");
   const { lang } = useLang();
   const [by, setBy] = useState<AllocationBy>("type");
@@ -109,10 +110,10 @@ export function AllocationSection({ positions, meta, prices }: { positions: read
     () =>
       allocationOf(
         positions,
-        (position) => allocationLabel(by, position, meta[position.symbol], lang, ui.notProvided),
+        (position) => allocationLabel(by, position, meta[position.symbol], lang, a.credit, ui.notProvided),
         (position) => prices[position.symbol] ?? position.lastPrice,
       ),
-    [positions, meta, prices, by, lang, ui.notProvided],
+    [positions, meta, prices, by, lang, a.credit, ui.notProvided],
   );
   return <AllocationView allocation={allocation} by={by} onBy={setBy} />;
 }

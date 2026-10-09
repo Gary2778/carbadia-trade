@@ -3,14 +3,17 @@
 import { useId, useRef, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useT } from "@/i18n/LangProvider";
+import { useDensity } from "@/lib/market/prefs";
 import { EmptyState } from "./EmptyState";
 
 /**
- * 默认行高估值(像素)= --spacing-row(1.375rem,根字号 16 时为 22)。react-virtual 只认像素,这个值只用来算
- * 渲染哪几行;行由 h-row 定高、位置与总高都按 --spacing-row 写成 CSS(见下),估值与真实行高不一致时也不会错位,
- * 挂载后 measureElement 按真实高度校正可视范围。
+ * 默认行高估值(像素)= --spacing-row(1.375rem,根字号 16 时为 22);偏好 density = compact(P3-10)时用 DENSE_ROW_HEIGHT = --spacing-row-dense(1.25rem)的 20。
+ * react-virtual 只认像素,这个值只用来算渲染哪几行;行由 h-row 定高、位置与总高都按 --spacing-row 写成 CSS(见下),
+ * 估值与真实行高不一致时也不会错位,挂载后 measureElement 按真实高度校正可视范围。
+ * 不传 rowHeight 的列表(盘口 tape、各页签)按密度取估值;传了就用传入的(触屏与条件单历史的 44)。
  */
 export const DEFAULT_ROW_HEIGHT = 22;
+export const DENSE_ROW_HEIGHT = 20;
 export const DEFAULT_OVERSCAN = 8;
 
 export type VirtualListProps<T> = {
@@ -45,7 +48,7 @@ export type VirtualListProps<T> = {
  */
 export function VirtualList<T>({
   items,
-  rowHeight = DEFAULT_ROW_HEIGHT,
+  rowHeight: rowHeightProp,
   overscan = DEFAULT_OVERSCAN,
   label,
   renderRow,
@@ -58,6 +61,8 @@ export function VirtualList<T>({
   const scrollRef = useRef<HTMLDivElement>(null);
   const hintId = useId();
   const ui = useT("ui");
+  const density = useDensity();
+  const rowHeight = rowHeightProp ?? (density === "compact" ? DENSE_ROW_HEIGHT : DEFAULT_ROW_HEIGHT);
   // eslint-disable-next-line react-hooks/incompatible-library -- React Compiler 对 useVirtualizer 的返回值跳过自动记忆化(TanStack 官方说明),本组件不把它传给任何记忆化的子组件
   const virtualizer = useVirtualizer({
     count: items.length,

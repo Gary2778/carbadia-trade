@@ -194,7 +194,7 @@ export const InstrumentFilters = memo(function InstrumentFilters({ filters, face
           className={`${SEGMENT} h-7 gap-1 border border-(--terminal-border) ${extra > 0 ? "text-foreground" : "text-muted hover:text-foreground"}`}
         >
           <span>{t.instruments.filters}</span>
-          {extra > 0 ? <span className="tnum rounded-pill bg-(--terminal-selected) px-1.5 text-t-2xs">{extra}</span> : null}
+          {extra > 0 ? <span className="tnum rounded-chip bg-(--terminal-selected) px-1.5 text-t-2xs">{extra}</span> : null}
           <svg aria-hidden="true" viewBox="0 0 16 16" className={`size-3 transition-transform duration-(--motion-fast) ${open ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M4 6l4 4 4-4" />
           </svg>

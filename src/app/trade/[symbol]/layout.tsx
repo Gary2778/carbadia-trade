@@ -16,6 +16,7 @@ export async function generateMetadata({ params }: { params: Promise<{ symbol: s
   return {
     title: terminalMetaTitle(symbol),
     description: `Simulated order book, candles and orders for ${symbol} on Carbadia Trade.`,
+    alternates: { canonical: `/trade/${symbol}` },
   };
 }
 

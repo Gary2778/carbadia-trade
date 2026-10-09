@@ -13,6 +13,7 @@
 // 单位:价格与金额整数分,数量整数吨。
 import type { DraftError, FeeSchedule, Fill, Order, OrderStatus, PlaceOrderResponse, ServerEvent } from "@/shared";
 import { toReview, type Draft, type DraftCtx, type OrderReview } from "./order-draft";
+import { rememberOwnOrder } from "./own-orders";
 
 export const ORDERS_URL = "/api/orders";
 /** 委托记录页(全部状态):结果未确认时先去这里核对,避免重复下单 */
@@ -71,8 +72,11 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 
 export type PostOutcome =
   | { kind: "ok"; status: number; data: unknown }
-  /** 结果未确认:断网(status 0)、5xx、2xx 但信封不是 { ok: true }。请求可能已经生效 */
-  | { kind: "uncertain"; status: number }
+  /**
+   * 结果未确认:断网(status 0)、5xx、2xx 但信封不是 { ok: true }。请求可能已经生效。
+   * message:5xx 且信封里有 error 时的原文(条件单接口靠它认出 503 triggersDisabled —— 那是明确的拒绝,不是忙),其余没有
+   */
+  | { kind: "uncertain"; status: number; message?: string }
   /**
    * 服务端明确拒绝(4xx):没有生效。message 是信封里的 error 原文(英文,不走 i18n,只供排查,界面不直接显示;
    * 界面按状态码取文案,见 rejectionReason);429 带 Retry-After 秒数。
@@ -86,18 +90,14 @@ export function retryAfterSeconds(header: string | null): number | null {
 }
 
 /**
- * POST 一个 JSON(或空)请求体,按 {ok,data}/{ok,error} 信封分三类结果;从不抛错。
+ * 发一个请求并按 {ok,data}/{ok,error} 信封分三类结果;从不抛错。
  * 不经 @/lib/http/client 的 api():要读 429 的 Retry-After 头,还要把断网 / 5xx 与 4xx 分开。fetchImpl 可注入(测试)。
  */
-export async function postEnvelope(url: string, body: unknown, fetchImpl: typeof fetch = fetch): Promise<PostOutcome> {
+async function requestEnvelope(url: string, makeInit: () => RequestInit, fetchImpl: typeof fetch): Promise<PostOutcome> {
   let res: Response;
   try {
-    res = await fetchImpl(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store",
-    });
+    // 请求体的序列化也在这一道防护里(循环引用、BigInt 之类会抛):与断网同样按「结果未确认」处理,不抛出去
+    res = await fetchImpl(url, makeInit());
   } catch {
     return { kind: "uncertain", status: 0 };
   }
@@ -109,9 +109,29 @@ export async function postEnvelope(url: string, body: unknown, fetchImpl: typeof
   }
   const envelope = isRecord(parsed) ? parsed : null;
   if (res.ok) return envelope?.ok === true ? { kind: "ok", status: res.status, data: envelope.data } : { kind: "uncertain", status: res.status };
-  if (res.status < 400 || res.status >= 500) return { kind: "uncertain", status: res.status };
   const message = typeof envelope?.error === "string" && envelope.error ? envelope.error : null;
+  if (res.status >= 500) return message === null ? { kind: "uncertain", status: res.status } : { kind: "uncertain", status: res.status, message };
+  if (res.status < 400) return { kind: "uncertain", status: res.status };
   return { kind: "rejected", status: res.status, message, retryAfter: retryAfterSeconds(res.headers.get("Retry-After")) };
+}
+
+/** POST 一个 JSON(或空)请求体,信封分类见 requestEnvelope */
+export async function postEnvelope(url: string, body: unknown, fetchImpl: typeof fetch = fetch): Promise<PostOutcome> {
+  return requestEnvelope(
+    url,
+    () => ({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store",
+    }),
+    fetchImpl,
+  );
+}
+
+/** DELETE(无请求体),信封分类见 requestEnvelope;撤条件单用(P3-06) */
+export async function deleteEnvelope(url: string, fetchImpl: typeof fetch = fetch): Promise<PostOutcome> {
+  return requestEnvelope(url, () => ({ method: "DELETE", cache: "no-store" }), fetchImpl);
 }
 
 /** 明确被拒时界面取哪条文案:429 → toast.rateLimited(秒数);401 → toast.loginRequired + 登录入口;400 → 按最新可用资源重新校验(order.errors),校验通过则 ui.error;其余 → ui.error */
@@ -172,7 +192,9 @@ export async function submitOrder(review: OrderReview, fetchImpl: typeof fetch =
   const outcome = await postEnvelope(ORDERS_URL, review.request, fetchImpl);
   if (outcome.kind !== "ok") return outcome;
   const data = verifyOrderResponse(review, outcome.data);
-  return data ? { kind: "ok", data } : { kind: "uncertain", status: outcome.status };
+  if (!data) return { kind: "uncertain", status: outcome.status };
+  rememberOwnOrder(data.order.id); // 通知 Toast 跳过这张单的 taker 成交(own-orders.ts)
+  return { kind: "ok", data };
 }
 
 /**

@@ -61,6 +61,26 @@ const account: AccountMessages = {
     unpriced: (count: number) => `有 ${count} 个持仓没有最新价，未计入。`,
   },
 
+  credit: {
+    categories: {
+      "Blue carbon": "蓝碳",
+      "Clean cookstoves": "清洁炉灶",
+      "Methane capture": "甲烷回收",
+      "Direct air capture": "直接空气捕集",
+      Biochar: "生物炭",
+      Forestry: "林业碳汇",
+      "Wind energy": "风力发电",
+      "Solar energy": "太阳能",
+      Other: "其他",
+    },
+    approaches: {
+      Removal: "移除",
+      Avoidance: "避免排放",
+      "Mixed / project-specific": "混合／依项目而定",
+      "Not specified": "未提供",
+    },
+  },
+
   otc: {
     title: "我的 OTC 挂牌",
     market: "OTC 市场",

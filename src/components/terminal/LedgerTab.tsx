@@ -11,6 +11,9 @@ import { api } from "@/lib/http/client";
 import { useAccountStore } from "@/lib/market/account-store";
 import { onSignOut, useRefreshOnAccountChange } from "@/lib/market/account-refresh";
 import { createUserQueryCache, usePagedSnapshot, type Page, type PagedQuery, type PagedSnapshot, type UserQueryCache } from "@/lib/market/paged-query";
+import { startOfDayMs, type ZoneId } from "@/lib/time-format";
+import type { TimeZonePref } from "@/providers/timeZoneState";
+import { useTimeZone } from "@/providers/useTimeZone";
 import { ExportCsvLink } from "./ExportCsvLink";
 import { CELL_END, CELL_START, fmtLedgerDelta, fmtTs, isCashAccount, ledgerTone, numberLocale, ROW_CLASS, TabTable, type Columns } from "./TabTable";
 
@@ -38,34 +41,35 @@ export const DEFAULT_LEDGER_FILTERS: LedgerFilterState = Object.freeze({ account
 
 export const isDefaultLedgerFilters = (f: LedgerFilterState): boolean => f.account === null && f.type === null && f.scope === "all" && f.range === "all";
 
-/** 筛选状态落到具体标的之后的样子。时间段还是名字:换算成 from 要有「此刻」(rangeFrom),查询的身份见 ledgerRequestKey */
-export type LedgerRequest = { account: LedgerAccount | null; type: ActivityType | null; symbol: string | null; range: LedgerRange };
+/**
+ * 筛选状态落到具体标的之后的样子。时间段还是名字:换算成 from 要有「此刻」与日界所在的时区(rangeFrom;tz = 用户的时区偏好,
+ * 流水的「今天」按它算,与时间列同一个时区),查询的身份见 ledgerRequestKey
+ */
+export type LedgerRequest = { account: LedgerAccount | null; type: ActivityType | null; symbol: string | null; range: LedgerRange; tz: TimeZonePref };
 
-export function ledgerRequest(filters: LedgerFilterState, symbol: string): LedgerRequest {
-  return { account: filters.account, type: filters.type, symbol: filters.scope === "current" ? symbol : null, range: filters.range };
+export function ledgerRequest(filters: LedgerFilterState, symbol: string, tz: TimeZonePref): LedgerRequest {
+  return { account: filters.account, type: filters.type, symbol: filters.scope === "current" ? symbol : null, range: filters.range, tz };
 }
 
 /**
- * 时间段 → from(毫秒,含);"all" 为 null。按用户本地的日历日起算:today = 今天 0 点,7d / 30d = 今天连同之前的 6 / 29 天。
- * 取整到本地 0 点而不是「此刻往前 N 个 24 小时」:一天之内边界不动,所以它能进缓存键(见 ledgerRequestKey)。
+ * 时间段 → from(毫秒,含);"all" 为 null。按所选时区(偏好:浏览器时区 / 北京 / UTC)的日历日起算:today = 今天 0 点,7d / 30d = 今天连同之前的 6 / 29 天。
+ * 取整到 0 点而不是「此刻往前 N 个 24 小时」:一天之内边界不动,所以它能进缓存键(见 ledgerRequestKey)。
+ * 往前数天(夏令时切换日是 23 或 25 小时)由 startOfDayMs 的 daysBack 处理。
  */
-export function rangeFrom(range: LedgerRange, now: number): number | null {
+export function rangeFrom(range: LedgerRange, now: number, tz: ZoneId): number | null {
   if (range === "all") return null;
-  const start = new Date(now);
-  start.setHours(0, 0, 0, 0);
-  if (range !== "today") start.setDate(start.getDate() - (range === "7d" ? 6 : 29));
-  return start.getTime();
+  return startOfDayMs(tz, now, range === "today" ? 0 : range === "7d" ? 6 : 29);
 }
 
 /**
  * 查询缓存键里的筛选部分:四项各占一段,不限写 *。有下界的时间段带上当天算出的 from(`7d@<from>`)——
- * 模块级缓存在切页签之后还在,键里只有时间段的名字的话,过了本地午夜取回的还是昨天那份,里面留着已经掉出窗口的行。
+ * 模块级缓存在切页签之后还在,键里只有时间段的名字的话,过了午夜(所选时区的)取回的还是昨天那份,里面留着已经掉出窗口的行。
  * from 一天之内不变(rangeFrom),所以当天是同一个键、同一份查询;换了一天就是新键、新查询,旧的那份按最近使用淘汰。
  * 一份查询建好之后 from 不再变:翻页与刷新用的都是键里的那个 from(见 createLedgerQueries)。
  * 页签开着跨过午夜时,组件手里还是原来那份查询(窗口仍是前一天的);换筛选、换标的或重新进页签时才按新的一天取。
  */
 export function ledgerRequestKey(request: LedgerRequest, now: number): string {
-  const from = rangeFrom(request.range, now);
+  const from = rangeFrom(request.range, now, request.tz);
   return [request.account ?? "*", request.type ?? "*", request.symbol ?? "*", from === null ? request.range : `${request.range}@${from}`].join("|");
 }
 
@@ -78,7 +82,7 @@ export function ledgerQueryParams(request: LedgerRequest, now: number): URLSearc
   if (request.account) params.set("account", request.account);
   if (request.type) params.set("type", request.type);
   if (request.symbol) params.set("symbol", request.symbol);
-  const from = rangeFrom(request.range, now);
+  const from = rangeFrom(request.range, now, request.tz);
   if (from !== null) params.set("from", String(from));
   return params;
 }
@@ -92,7 +96,7 @@ export function ledgerPageUrl(request: LedgerRequest, cursor: string | null, now
 
 /**
  * CSV 导出的地址(计划 §6.2.2 C5):/api/transactions.csv + 与列表同一组筛选参数(ledgerQueryParams,不带 limit / cursor)。
- * now 与列表的查询取同一天:时间段的 from 按本地日历日起算,一天之内不变(rangeFrom)。
+ * now 与列表的查询取同一天:时间段的 from 按所选时区的日历日起算,一天之内不变(rangeFrom);CSV 的内容仍是 UTC(shared/csv.ts),只是起点按这个时区的 0 点。
  */
 export function ledgerCsvHref(request: LedgerRequest, now: number = Date.now()): string {
   const query = ledgerQueryParams(request, now).toString();
@@ -115,7 +119,7 @@ export const LEDGER_CACHE_MAX = 6;
 /**
  * 模块级缓存:每个筛选组合一份 createUserQueryCache(每位用户一份分页查询,写法同 OrderHistoryTab / FillsTab),
  * 键 = `ledger:<筛选>:<用户>`(筛选部分见 ledgerRequestKey,有下界的时间段带当天的 from)。forUser 幂等,可在渲染期(useMemo)调用:
- * 同一用户、同一筛选在同一个本地日历日里永远是同一实例;过了午夜再取是一份新查询。now 只有测试才传。
+ * 同一用户、同一筛选在同一个日历日(所选时区的)里永远是同一实例;过了午夜再取是一份新查询。now 只有测试才传。
  * 最多留 LEDGER_CACHE_MAX 个组合,按最近使用淘汰——每次取用都把它挪到最新,所以被淘汰的不会是页面正订阅着的那一份
  * (淘汰时 clear 会通知订阅者,渲染期不能让它落到挂着的组件上)。
  * 账本行只增不改,不需要 markStale;新行靠 refresh 读到顶上。
@@ -250,11 +254,12 @@ export const LedgerRow = memo(function LedgerRow(p: LedgerRowProps) {
   const t = useT("terminal");
   const { lang } = useLang();
   const locale = numberLocale(lang);
+  const tz = useTimeZone();
   const direction = p.delta > 0 ? "in" : p.delta < 0 ? "out" : "none";
   const typeLabel = t.ledger.types[p.type];
   return (
     <div data-ledger-id={p.id} className={`${ROW_CLASS} hover:bg-(--terminal-row-hover)`} style={{ gridTemplateColumns: COLUMNS.template }}>
-      <span className={`${CELL_START} tnum text-muted`}>{fmtTs(p.ts, locale)}</span>
+      <span className={`${CELL_START} tnum text-muted`}>{fmtTs(p.ts, locale, tz)}</span>
       <span className={CELL_START} title={typeLabel}>
         {typeLabel}
       </span>
@@ -415,8 +420,10 @@ export function LedgerView({ symbol, filters, onFilters, items, pager, onOpenFil
  */
 export function LedgerTab({ symbol }: { symbol: string }) {
   const meId = useAccountStore((s) => s.me?.id ?? null);
+  const tz = useTimeZone();
   const [filters, setFilters] = useState<LedgerFilterState>(DEFAULT_LEDGER_FILTERS);
-  const request = useMemo(() => ledgerRequest(filters, symbol), [filters, symbol]);
+  // 时区偏好一变,「今天 / 7 天 / 30 天」的 from 跟着变:换一份查询、CSV 链接也换(时间列已经按新时区显示)
+  const request = useMemo(() => ledgerRequest(filters, symbol, tz), [filters, symbol, tz]);
   const query = useMemo(() => ledgerQueries.forUser(meId, request), [meId, request]);
   // 与查询同时算:两者的 from 取同一天(页签开着跨过午夜时两者都还是前一天的窗口,见 ledgerRequestKey)
   const exportHref = useMemo(() => ledgerCsvHref(request), [request]);

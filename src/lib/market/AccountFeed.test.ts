@@ -183,6 +183,12 @@ describe("startAccountFeed (signed-in only)", () => {
     // startFeed 只经 startAccountFeed 调用(组件里没有别的地方直接开)
     expect(code.match(/startFeed\(/g)).toHaveLength(1);
   });
+
+  it("the account page polls its account without triggers (it never shows them; source check)", () => {
+    const code = readFileSync(fileURLToPath(new URL("./AccountFeed.tsx", import.meta.url)), "utf8").replace(/\/\/.*$/gm, "");
+    expect(code).toContain("return pollAccount(meId, rt, { includeTriggers: false });");
+    expect(code.match(/pollAccount\(/g)).toHaveLength(1);
+  });
 });
 
 describe("pollTickers", () => {

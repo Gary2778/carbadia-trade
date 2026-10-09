@@ -30,6 +30,8 @@ function formatBps(bps: number, locale: string): string {
  * 盘口中缝(计划 §3.1):左边最新价(FlashCell 涨跌闪烁),右边价差的绝对值与基点。
  * 基点的单位写 terminal.book.bps(en「bps」/ zh「基点」,§9.2 D20)。
  * 任一侧缺失时价差显示「—」,不出基点;最新价为空也显示「—」。
+ * 行距取 leading-t-tight:继承的 1.45 让内容(含上下边线)高到 20.85 px,紧凑行高(20 px,P3-10)里中缝会比一行高出不到 1 px;
+ * 内容不再撑过 min-h-row,两种密度下中缝都正好是一行高。
  */
 export const SpreadBar = memo(function SpreadBar({ bestBid, bestAsk, lastPrice, precision }: SpreadBarProps) {
   const t = useT("terminal");
@@ -37,7 +39,7 @@ export const SpreadBar = memo(function SpreadBar({ bestBid, bestAsk, lastPrice, 
   const locale = lang === "zh-CN" ? "zh-CN" : "en-US";
   const gap = spread(bestBid, bestAsk);
   return (
-    <div data-spread-bar="" className="flex min-h-row items-center justify-between gap-gap border-y border-(--terminal-border) px-gap">
+    <div data-spread-bar="" className="flex min-h-row items-center justify-between gap-gap border-y border-(--terminal-border) px-gap leading-t-tight">
       <span className="flex min-w-0 items-baseline">
         <span className="sr-only">{t.header.lastPrice}</span>
         <FlashCell value={lastPrice} className="px-1">

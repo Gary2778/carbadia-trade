@@ -12,7 +12,7 @@
 //   __carbadiaTopicSeq = Map<Topic, number>(hub 独占写,REST 路由读;进程启动从 1 起,每次发布 +1,快照不增)
 // account topic 的 seq 按用户各自单调(内部 Map<userId, seq>),不写进 __carbadiaTopicSeq:该 topic 的事件流本来就是按用户切分的,
 // 若共用一个计数器,任何用户的成交都会让其他用户的客户端看到「缺口」而反复重订阅。
-// account 订阅时的快照(balance + 挂单 + 持仓)来自 globalThis.__carbadiaAccountSnapshot(函数型全局,发布器挂上;lead 裁决的例外):
+// account 订阅时的快照(balance + 挂单 + 持仓 + 未完结的条件单)来自 globalThis.__carbadiaAccountSnapshot(函数型全局,发布器挂上;lead 裁决的例外):
 // hub 零 DB、不能 import src/**,缺省时不发快照,客户端仍经 REST 水合。同一用户的快照查询在跑时并进去,查完冷却 2 s,冷却里的订阅并成一次。
 // 快照缓存(盘口 / ticker)只在有人订阅、发布器还在喂它时保留(无人订阅期间发布器不派生,门控 ②):订阅数归零后,等退订那条连接的
 // 合帧窗口结束仍无人订才淘汰(期间 presence 仍计 1、发布器照常喂;客户端回应 resync 的 unsubscribe + subscribe 因此不清缓存,见 held),
@@ -184,7 +184,8 @@ const RESYNC_ANSWER_HEADROOM_BYTES = 64 * 1024;
 // (ws-hub.test.ts 的 approxBytes 用例):id 与 auditRef 里是 25 字符的 cuid,symbol 最长 14 字符(CCER-SCEN-2026),价格按 7 位分、数量按 6 位吨取上沿——
 // 成交带条目约 180 字节(TAPE_ENTRY_BYTES 192),档位 {"price":1234567,"quantity":100000,"orders":12} 约 48 字节(BOOK_LEVEL_BYTES 48);
 // 满 64 条的 trades 事件约 11.6 KB、50 档 book.snapshot 约 4.9 KB;全字段 ticker 在 `ticker:*` 上约 275 字节、按标的订阅(topic 带 14 字符 symbol,change24h 取 23 字符的小幅浮点、成交量 11 位)约 292 字节(TICKER_EVENT_BYTES 320),
-// candle 约 200 字节,account 行至多约 450 字节(fill 带 4 个 ledgerRef),其余控制事件 ≤ 121 字节
+// candle 约 200 字节,account 行至多约 450 字节(fill 带 4 个 ledgerRef),满字段的 trigger 约 515 字节(单列一个常数)、notice 至多约 380 字节(与 account 行同档),
+// 其余控制事件 ≤ 121 字节
 const EVENT_BASE_BYTES = 128;
 const BOOK_EVENT_BASE_BYTES = 160;
 const BOOK_LEVEL_BYTES = 48;
@@ -192,6 +193,7 @@ const TAPE_ENTRY_BYTES = 192;
 const TICKER_EVENT_BYTES = 320;
 const CANDLE_EVENT_BYTES = 224;
 const ACCOUNT_ROW_EVENT_BYTES = 512;
+const TRIGGER_EVENT_BYTES = 576;
 
 /**
  * 一条待发事件在帧里大约占多少字节(上沿);订阅快照的限流按它累计本窗口的待发字节。导出供测试核对常数不低于真实尺寸。
@@ -212,7 +214,10 @@ export function approxBytes(event) {
     case "order":
     case "fill":
     case "position":
+    case "notice":
       return ACCOUNT_ROW_EVENT_BYTES;
+    case "trigger":
+      return TRIGGER_EVENT_BYTES;
     default:
       return EVENT_BASE_BYTES;
   }
@@ -323,9 +328,11 @@ function parseTopic(topic) {
  */
 
 /**
- * 快照来源可以直接给事件数组,也可以给 { balance, orders, positions }(发布器钩子的形状),hub 展开成 balance → 逐条 order → 逐条 position
- * (与 §3.3 的 account 段、poll-frames.framesFromAccount 同序)。
- * @typedef {AccountEvent[] | { balance: import("../src/shared/types").Balance; orders: import("../src/shared/types").Order[]; positions: import("../src/shared/types").Position[] }} AccountSnapshotResult
+ * 快照来源可以直接给事件数组,也可以给 { balance, orders, positions, triggers }(发布器钩子的形状),hub 展开成
+ * balance → 逐条 order → 逐条 position(与 §3.3 的 account 段、poll-frames.framesFromAccount 同序)→ 逐条 trigger(未完结的条件单,
+ * 计划 §6.3.2 C2;与 order / position 同 seq,属于这份快照:客户端的快照窗口把它们收进 account-snapshot 事件的 triggerIds,
+ * 收口时按 id 只保留这些,断线期间触发 / 撤销 / 被拒的条件单就此从本地移除,见 src/lib/market/ws-client.ts 与 MarketProvider 的 reconcileAccountSnapshot)。
+ * @typedef {AccountEvent[] | { balance: import("../src/shared/types").Balance; orders: import("../src/shared/types").Order[]; positions: import("../src/shared/types").Position[]; triggers: import("../src/shared/types").Trigger[] }} AccountSnapshotResult
  */
 
 /**
@@ -338,6 +345,7 @@ function toAccountEvents(result) {
     { t: "balance", balance: result.balance },
     ...result.orders.map((order) => /** @type {AccountEvent} */ ({ t: "order", order })),
     ...result.positions.map((position) => /** @type {AccountEvent} */ ({ t: "position", position })),
+    ...result.triggers.map((trigger) => /** @type {AccountEvent} */ ({ t: "trigger", trigger })),
   ];
 }
 

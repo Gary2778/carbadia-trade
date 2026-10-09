@@ -7,7 +7,7 @@ import { createInitialState, marketActions, useMarketStore } from "./store";
 // 底部 Tab 的「账户变了 → 重读第一页」信号(P1-21 修复轮):node 环境,假定时器;账户事件走真实的 applyAccountEvents,
 // 与 MarketProvider 的 batcher 转来的是同一条路。
 
-const ME = { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 100_000, lockedCash: 0 };
+const ME = { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 100_000, lockedCash: 0, unreadNotices: 0 };
 
 function order(id: string, patch: Partial<Order> = {}): Order {
   return {

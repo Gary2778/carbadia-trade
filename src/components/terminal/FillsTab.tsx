@@ -10,6 +10,7 @@ import { api } from "@/lib/http/client";
 import { useAccountStore } from "@/lib/market/account-store";
 import { onSignOut, useRefreshOnAccountChange } from "@/lib/market/account-refresh";
 import { createUserQueryCache, mergeNewest, usePagedSnapshot, type Page } from "@/lib/market/paged-query";
+import { useTimeZone } from "@/providers/useTimeZone";
 import { ExportCsvBar, FILLS_CSV_HREF } from "./ExportCsvLink";
 import { CELL_END, CELL_START, fmtCents, fmtQuantity, fmtRowPrice, fmtTs, numberLocale, ROW_CLASS, sideTone, TabTable, usePricePrecisions, type Columns } from "./TabTable";
 
@@ -75,6 +76,7 @@ export const FillRow = memo(function FillRow(p: FillRowProps) {
   const t = useT("terminal");
   const { lang } = useLang();
   const locale = numberLocale(lang);
+  const tz = useTimeZone();
   return (
     <div
       data-fill-id={p.id}
@@ -82,7 +84,7 @@ export const FillRow = memo(function FillRow(p: FillRowProps) {
       className={`${ROW_CLASS} cursor-pointer hover:bg-(--terminal-row-hover)`}
       style={{ gridTemplateColumns: COLUMNS.template }}
     >
-      <span className={`${CELL_START} tnum text-muted`}>{fmtTs(p.ts, locale)}</span>
+      <span className={`${CELL_START} tnum text-muted`}>{fmtTs(p.ts, locale, tz)}</span>
       <span className={`${CELL_START} font-medium`}>{p.symbol}</span>
       <span className={`${CELL_START} ${sideTone(p.side)}`}>{p.side === "BUY" ? t.order.buy : t.order.sell}</span>
       <span className={`${CELL_START} text-muted`}>{p.role === "MAKER" ? t.tabs.maker : t.tabs.taker}</span>

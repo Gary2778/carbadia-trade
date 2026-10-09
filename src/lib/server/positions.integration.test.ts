@@ -97,6 +97,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await (await import("@/lib/server/order-hooks")).drainOrderHooks(); // 真人成交的通知由提交后钩子写:等它写完再关库
   await hub?.close(1001, "test over");
   if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   publisher?._internal.reset();
@@ -221,7 +222,7 @@ async function quiesce() {
 /** 把一条连接收到的全部账户事件喂给客户端账户 store(真正的折叠),再按快照收口;返回 store 里的持仓(按 symbol) */
 function foldIntoStore(userId: string, client: AccountClient): Position[] {
   store.useAccountStore.setState(store.createInitialAccountState(), true);
-  store.setMe({ id: userId, email: "fold@positions.test", name: "Fold", cashBalance: 0, lockedCash: 0 });
+  store.setMe({ id: userId, email: "fold@positions.test", name: "Fold", cashBalance: 0, lockedCash: 0, unreadNotices: 0 });
   store.applyAccountEvents(client.all());
   return store.positionsOf(store.useAccountStore.getState().positions);
 }

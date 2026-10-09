@@ -136,8 +136,8 @@ export type Position = {
   isScenario: boolean;
 };
 export type Balance = { cashBalance: number; lockedCash: number };
-/** = 现有 GET /api/auth/me 的 data 形状 */
-export type Me = { id: string; email: string; name: string; cashBalance: number; lockedCash: number } | null;
+/** = 现有 GET /api/auth/me 的 data 形状;unreadNotices = 本人未读的站内通知条数(P3-04) */
+export type Me = { id: string; email: string; name: string; cashBalance: number; lockedCash: number; unreadNotices: number } | null;
 /** Phase 1 全零(计划 §9.1 第 1 条);demo 恒 true */
 export type FeeSchedule = { makerBps: number; takerBps: number; minFeeCents: number; demo: true };
 export type ConnectionState = {
@@ -158,3 +158,70 @@ export type DraftError =
   | "noLiquidity"
   | "overMaxNotional"
   | "overMaxPrice"; // 价格超过 MAX_PRICE_CENTS 演示上限(§4.8/§4.10 的 order.errors.overMaxPrice)
+
+// ---- 条件单与通知(计划 §6.3.2 C2;Prisma 的 Trigger / Notification 行经 account-mappers 的 toTrigger / toNotice 映射)----
+export type TriggerKind = "ORDER" | "ALERT";
+/** ABOVE:成交价 ≥ 触发价;BELOW:成交价 ≤ 触发价 */
+export type TriggerDirection = "ABOVE" | "BELOW";
+export type TriggerStatus = "PENDING" | "TRIGGERING" | "TRIGGERED" | "REJECTED" | "CANCELLED";
+/** CANCELLED:USER(本人撤)| OCO(同组另一个已触发);REJECTED:触发时下单被拒的原因(NO_FILL = 市价单一吨也没成交:没钱或没有对手盘) */
+export type TriggerReason = "USER" | "OCO" | "INSUFFICIENT_CASH" | "INSUFFICIENT_QTY" | "NO_FILL" | "INVALID";
+/**
+ * 一条条件单或价格提醒。side / orderType / limitPrice / quantity 只有 ORDER 才有(ALERT 全为 null;limitPrice 只在 LIMIT 时非 null)。
+ * triggerPrice / limitPrice / firedPrice 整数分,quantity 整数吨,时间 unix 毫秒。orderId = 触发后生成的委托(未触发或被拒为 null)。
+ */
+export type Trigger = {
+  id: string;
+  kind: TriggerKind;
+  assetId: string;
+  symbol: string;
+  direction: TriggerDirection;
+  triggerPrice: number;
+  side: Side | null;
+  orderType: OrderType | null;
+  limitPrice: number | null;
+  quantity: number | null;
+  ocoGroupId: string | null;
+  status: TriggerStatus;
+  reason: TriggerReason | null;
+  orderId: string | null;
+  firedPrice: number | null;
+  createdAt: number;
+  updatedAt: number;
+  firedAt: number | null;
+};
+/**
+ * 条件单 / 止盈止损草稿校验失败的原因(order-math 的 validateTriggerDraft、trigger-drafts 的 validateOcoDraft / validateAlertDraft 返回,P3-07 以此为键渲染文案):
+ * invalidTrigger = 触发价空 / 非整数 / ≤ 0;invalidPrice = 限价或止盈止损价同样的问题(哪个框见返回的 field);
+ * wouldTriggerNow = 触发价与最新价相等(或 ABOVE / BELOW 已被穿过),创建就会触发,服务端同样拒;directionNeeded = 最新价未知又没选方向;
+ * overMaxPrice / offTick / invalidQty / belowMinQty / offStep / overMaxNotional 与 DraftError 同一组规则
+ *(价格与数量的上限、限价单的名义额上限服务端创建时同样查;offTick / belowMinQty / offStep 服务端不查,和普通下单一样只是客户端的规则);
+ * ocoNeedsOne = 止盈止损一个价都没给;takeProfitTooLow = 止盈价不高于最新价(最新价未知时:不高于止损价);stopLossTooHigh = 止损价不低于最新价;overPosition = 数量超过持仓。
+ * 不含现金 / 持仓不足(创建时不锁资金、不锁持仓,触发时才检查);overPosition 只用于止盈止损(它要求数量 ≤ 持仓,服务端同样)。
+ */
+export type TriggerDraftError =
+  | "invalidTrigger"
+  | "wouldTriggerNow"
+  | "directionNeeded"
+  | "invalidPrice"
+  | "overMaxPrice"
+  | "offTick"
+  | "invalidQty"
+  | "belowMinQty"
+  | "offStep"
+  | "overMaxNotional"
+  | "ocoNeedsOne"
+  | "takeProfitTooLow"
+  | "stopLossTooHigh"
+  | "overPosition";
+/** 通知载荷(Notification.payload 的 JSON);kind 与 Notification.kind 列同值:fill | trigger | price_alert */
+export type NoticePayload =
+  | { kind: "fill"; orderId: string; symbol: string; side: Side; role: "MAKER" | "TAKER"; quantity: number; price: number; orderStatus: OrderStatus }
+  | { kind: "trigger"; triggerId: string; symbol: string; outcome: "TRIGGERED" | "REJECTED" | "CANCELLED"; reason: TriggerReason | null; side: Side | null; quantity: number | null; triggerPrice: number; orderId: string | null }
+  | { kind: "price_alert"; triggerId: string; symbol: string; direction: TriggerDirection; triggerPrice: number; firedPrice: number };
+/** 共享类型叫 Notice,不叫 Notification(与浏览器全局类型撞名) */
+export type Notice = { id: string; createdAt: number; readAt: number | null } & NoticePayload;
+
+/** 一组等权指数:level = 100 × (1 + change24h / 100),即「24 小时前 = 100」;change24h 是百分数(同 Ticker.change24h) */
+export type IndexRow = { key: string; members: number; counted: number; change24h: number | null; level: number | null; volume24h: number; advancers: number; decliners: number };
+export type MarketIndices = { ts: number; all: IndexRow; byRegistry: IndexRow[]; byProjectType: IndexRow[] };

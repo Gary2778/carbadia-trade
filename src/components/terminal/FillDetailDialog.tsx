@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { useLang, useT } from "@/i18n/LangProvider";
 import { api } from "@/lib/http/client";
 import { useMarketStore, type MarketState } from "@/lib/market/store";
+import { useTimeZone } from "@/providers/useTimeZone";
 import { fmtCents, fmtLedgerDelta, fmtQuantity, fmtRowPrice, fmtTs, ledgerTone, numberLocale, sideTone } from "./TabTable";
 
 export const fillDetailUrl = (fillId: string): string => `/api/account/fills/${encodeURIComponent(fillId)}`;
@@ -33,10 +34,11 @@ export function FillDetailView({ detail, precision }: { detail: FillDetailRespon
   const t = useT("terminal");
   const { lang } = useLang();
   const locale = numberLocale(lang);
+  const tz = useTimeZone();
   const ledgerId = useId();
   const { fill, ledger } = detail;
   const fields: { label: string; value: string; tone?: string }[] = [
-    { label: t.tabs.colTime, value: fmtTs(fill.ts, locale) },
+    { label: t.tabs.colTime, value: fmtTs(fill.ts, locale, tz) },
     { label: t.tabs.colSymbol, value: fill.symbol },
     { label: t.tabs.colSide, value: fill.side === "BUY" ? t.order.buy : t.order.sell, tone: sideTone(fill.side) },
     { label: t.tabs.colRole, value: fill.role === "MAKER" ? t.tabs.maker : t.tabs.taker },
@@ -101,7 +103,7 @@ export function FillDetailView({ detail, precision }: { detail: FillDetailRespon
                     {fmtLedgerDelta(line.account, line.delta, locale)}
                   </td>
                   <td className={`${LEDGER_CELL} font-mono text-muted`}>{line.reason}</td>
-                  <td className={`${LEDGER_CELL} tnum text-end text-muted`}>{fmtTs(line.createdAt, locale)}</td>
+                  <td className={`${LEDGER_CELL} tnum text-end text-muted`}>{fmtTs(line.createdAt, locale, tz)}</td>
                 </tr>
               ))}
             </tbody>

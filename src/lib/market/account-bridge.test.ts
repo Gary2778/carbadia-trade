@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AccountOrdersResponse, Me, Order, ServerEvent } from "@/shared";
+import type { AccountOrdersResponse, AccountTriggersResponse, Me, Order, ServerEvent, Trigger } from "@/shared";
 import {
   OPEN_ORDERS_MAX_PAGES,
   OPEN_ORDERS_PAGE_LIMIT,
   OPEN_ORDERS_URL,
+  OPEN_TRIGGERS_PAGE_LIMIT,
+  OPEN_TRIGGERS_URL,
   applyAccountEvents,
   fetchOpenOrders,
+  fetchOpenTriggers,
   isAccountEvent,
   readMeId,
   readServerMeId,
@@ -14,6 +17,7 @@ import {
   requestTransportReconnect,
   retainOpenOrders,
   retainPositions,
+  retainTriggers,
   subscribeAccount,
   type AccountEvent,
 } from "./account-bridge";
@@ -44,9 +48,20 @@ function fakeSource(me: Me = null) {
     size: () => listeners.size,
   };
 }
-const me: Me = { id: "u1", email: "e", name: "n", cashBalance: 0, lockedCash: 0 };
+const me: Me = { id: "u1", email: "e", name: "n", cashBalance: 0, lockedCash: 0, unreadNotices: 0 };
 const balance: ServerEvent = { t: "balance", topic: "account", seq: 0, balance: { cashBalance: 1, lockedCash: 0 } };
 const tick: ServerEvent = { t: "ticker", topic: "ticker:*", seq: 0, symbol: "S", ticker: { symbol: "S", ts: 1 } };
+const trigger: ServerEvent = {
+  t: "trigger", topic: "account", seq: 2,
+  trigger: {
+    id: "t1", kind: "ALERT", assetId: "a1", symbol: "S", direction: "ABOVE", triggerPrice: 100, side: null, orderType: null, limitPrice: null, quantity: null,
+    ocoGroupId: null, status: "PENDING", reason: null, orderId: null, firedPrice: null, createdAt: 1, updatedAt: 1, firedAt: null,
+  },
+};
+const notice: ServerEvent = {
+  t: "notice", topic: "account", seq: 3, unread: 1,
+  notice: { id: "n1", createdAt: 1, readAt: null, kind: "price_alert", triggerId: "t1", symbol: "S", direction: "ABOVE", triggerPrice: 100, firedPrice: 101 },
+};
 
 afterEach(() => {
   registerAccountSource(null);
@@ -72,6 +87,15 @@ describe("account bridge", () => {
     expect([...f.retained[0]]).toEqual(["o1"]);
     expect(isAccountEvent(tick)).toBe(false);
     expect(isAccountEvent(balance)).toBe(true);
+  });
+
+  it("trigger / notice 也是账户事件:isAccountEvent 放行,按原序与 order / balance 一起转交", () => {
+    expect(isAccountEvent(trigger)).toBe(true);
+    expect(isAccountEvent(notice)).toBe(true);
+    const f = fakeSource(me);
+    registerAccountSource(f.source);
+    expect(applyAccountEvents([tick, trigger, balance, notice])).toBe(3);
+    expect(f.applied).toEqual([trigger, balance, notice]);
   });
 
   it("订阅者:源变化通知;先订阅后注册也被通知并改读新源;注销通知并回 null", () => {
@@ -127,6 +151,53 @@ describe("account bridge", () => {
     registerAccountSource({ ...f.source, retainPositions: (ids: ReadonlySet<string>) => void kept.push(ids) });
     retainPositions(new Set(["a-vcs"]));
     expect(kept.map((s) => [...s])).toEqual([["a-vcs"]]);
+  });
+});
+
+describe("retainTriggers", () => {
+  it("透传给源;源没提供或未注册时空操作", () => {
+    expect(() => retainTriggers(new Set(["t"]))).not.toThrow();
+    const f = fakeSource(me);
+    registerAccountSource(f.source);
+    expect(() => retainTriggers(new Set(["t"]))).not.toThrow();
+    const kept: ReadonlySet<string>[] = [];
+    registerAccountSource({ ...f.source, retainTriggers: (ids: ReadonlySet<string>) => void kept.push(ids) });
+    retainTriggers(new Set(["t-1", "t-2"]));
+    expect(kept.map((s) => [...s])).toEqual([["t-1", "t-2"]]);
+  });
+});
+
+describe("fetchOpenTriggers(未完结条件单,只有轮询用)", () => {
+  const openTrigger = (id: string): Trigger => ({
+    id, kind: "ALERT", assetId: "a", symbol: "S", direction: "ABOVE", triggerPrice: 100, side: null, orderType: null, limitPrice: null, quantity: null,
+    ocoGroupId: null, status: "PENDING", reason: null, orderId: null, firedPrice: null, createdAt: 1, updatedAt: 1, firedAt: null,
+  });
+  const fetchOf = (body: AccountTriggersResponse) => {
+    const calls: string[] = [];
+    const fetchJson = async <T,>(u: string): Promise<T> => {
+      calls.push(u);
+      return body as T;
+    };
+    return { fetchJson, calls };
+  };
+
+  it("一个请求(?status=open&limit=100);没有下一页 → complete = true", async () => {
+    const { fetchJson, calls } = fetchOf({ triggers: [openTrigger("t1"), openTrigger("t2")], nextCursor: null });
+    expect(await fetchOpenTriggers(fetchJson)).toEqual({ triggers: [openTrigger("t1"), openTrigger("t2")], complete: true });
+    expect(calls).toEqual([`${OPEN_TRIGGERS_URL}&limit=${OPEN_TRIGGERS_PAGE_LIMIT}`]);
+    expect(calls[0]).toBe("/api/account/triggers?status=open&limit=100");
+  });
+
+  it("服务端说还有下一页(50 条上限被改了、游标出错):complete = false,调用方据此不 retain", async () => {
+    const { fetchJson } = fetchOf({ triggers: [openTrigger("t1")], nextCursor: "c1" });
+    expect(await fetchOpenTriggers(fetchJson)).toEqual({ triggers: [openTrigger("t1")], complete: false });
+  });
+
+  it("请求失败:整体 reject", async () => {
+    const fetchJson = async <T,>(): Promise<T> => {
+      throw new Error("Service unavailable");
+    };
+    await expect(fetchOpenTriggers(fetchJson)).rejects.toThrow("Service unavailable");
   });
 });
 

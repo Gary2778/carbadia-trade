@@ -2,7 +2,9 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/http/client";
-import { fmtMoney, fmtTime, fmtQty } from "@/lib/format";
+import { fmtMoney, fmtQty } from "@/lib/format";
+import { formatTime } from "@/lib/time-format";
+import { useTimeZone } from "@/providers/useTimeZone";
 import { useExchangeText } from "./useExchange";
 import { AccountGate } from "./AccountData";
 import { ExchangeIcon } from "./ExchangeIcon";
@@ -24,6 +26,7 @@ const ACCOUNT_LABELS: Record<LedgerAccount, string> = {
 const isCash = (e: LedgerActivity) => !e.account.startsWith("HOLDING");
 export function ActivityWorkspace() {
   const c = useExchangeText();
+  const tz = useTimeZone();
   const [data, setData] = useState<LedgerActivityResponse | null>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(true),
@@ -237,7 +240,7 @@ export function ActivityWorkspace() {
                         <td>
                           <strong className="font-medium">{e.label}</strong>
                           <span className="ex-subline">
-                            {fmtTime(new Date(e.ts))}
+                            {formatTime(e.ts, "en", tz, "datetime")}
                           </span>
                         </td>
                         <td>

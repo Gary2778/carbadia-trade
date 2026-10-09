@@ -1,13 +1,14 @@
 // 经真实路由(临时 SQLite + migrate deploy)验证四个公开行情端点(计划 §3.4 路由表、§3.5 api-shapes、§9.1 第 22/25 条):
 // data 用 zod 逐字段校验(strict:多一个键都不行,anchorPrice 永不外露);depth 上限 50;takerSide 与下单方一致;
 // candles interval 非法 → 400、limit 钳到 1..1500 且 1m 能取到 >240 根;无 hub 时 seq === 0;seq 在查库之前读;Cache-Control 与路由表逐字相等。
+// 第五个端点 /api/market/indices(P3-05):形状、头、手算钉死的数(Date 冻在夹具时刻之后 1 s)、情景标的不计入。
 // K 线的根数断言一律带 to=seededAt:窗口终点钉在夹具时刻,不随请求时的分钟边界漂移(否则最新一桶可能是空的,少一根)。
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CANDLE_INTERVALS, DEFAULT_FEE_SCHEDULE, MAX_BARS } from "@/shared/constants";
 import { toCandleBar } from "@/shared/candle-live";
@@ -40,6 +41,7 @@ let instruments: typeof import("./instruments/route");
 let book: typeof import("./[symbol]/book/route");
 let trades: typeof import("./[symbol]/trades/route");
 let candles: typeof import("./[symbol]/candles/route");
+let indices: typeof import("./indices/route");
 let legacyCandles: typeof import("../assets/[symbol]/candles/route");
 let snapshots: typeof import("@/lib/server/market-snapshots");
 
@@ -53,6 +55,7 @@ const CACHE = {
   book: "public, max-age=1, s-maxage=1, stale-while-revalidate=2",
   trades: "public, max-age=1, s-maxage=1, stale-while-revalidate=2",
   candles: "public, max-age=1, s-maxage=5, stale-while-revalidate=10",
+  indices: "public, max-age=1, s-maxage=5, stale-while-revalidate=10",
 };
 
 let firstTradeId = "";
@@ -74,6 +77,7 @@ beforeAll(async () => {
   book = await import("./[symbol]/book/route");
   trades = await import("./[symbol]/trades/route");
   candles = await import("./[symbol]/candles/route");
+  indices = await import("./indices/route");
   legacyCandles = await import("../assets/[symbol]/candles/route");
   snapshots = await import("@/lib/server/market-snapshots");
   const { placeOrder } = await import("@/lib/exchange/matching");
@@ -121,6 +125,7 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
+  await (await import("@/lib/server/order-hooks")).drainOrderHooks(); // 真人成交的通知由提交后钩子写:等它写完再关库
   vi.unstubAllEnvs();
   delete globalThis.__carbadiaTopicSeq;
   delete globalThis.__carbadiaInstrumentsCache;
@@ -155,6 +160,11 @@ const tapeSchema = z.object({
 const tradesSchema = z.object({ trades: z.array(tapeSchema), seq: int.nonnegative() }).strict();
 const barSchema = z.object({ t: int, o: int, h: int, l: int, c: int, v: int }).strict();
 const candlesSchema = z.object({ interval: z.enum(CANDLE_INTERVALS), candles: z.array(barSchema) }).strict();
+const indexRowSchema = z.object({
+  key: z.string(), members: int.nonnegative(), counted: int.nonnegative(), change24h: z.number().nullable(), level: z.number().nullable(),
+  volume24h: int.nonnegative(), advancers: int.nonnegative(), decliners: int.nonnegative(),
+}).strict();
+const indicesSchema = z.object({ ts: int, all: indexRowSchema, byRegistry: z.array(indexRowSchema), byProjectType: z.array(indexRowSchema) }).strict();
 
 const params = (symbol: string) => ({ params: Promise.resolve({ symbol }) });
 const getBook = (symbol: string, query = "") => book.GET(new Request(`http://localhost/api/market/${symbol}/book${query}`), params(symbol));
@@ -194,6 +204,65 @@ describe("GET /api/market/instruments", () => {
     const b = await okData(await instruments.GET(), instrumentsSchema, CACHE.instruments);
     expect(b.serverTime).toBe(a.serverTime);
     expect(globalThis.__carbadiaInstrumentsCache?.value.serverTime).toBe(a.serverTime);
+  });
+});
+
+describe("GET /api/market/indices", () => {
+  // 钉死数:把 Date 冻在夹具时刻之后 1 s(同 getBars 的用例),24 h 窗口就是确定的 ——
+  //   SYMBOL:首笔 10000、现价 9900,3 吨 → 涨跌 −1;
+  //   DENSE:每分钟一笔 1 吨、价 1000 + (k % 50),k = 0 是夹具时刻;窗口 = 夹具时刻 + 1 s − 24 h,收进 k = 0..1439 共 1440 笔,
+  //     窗口内最早的是 k = 1439(价 1000 + 39 = 1039),现价 1000 → 涨跌 (1000 − 1039)× 100 / 1039 = −3.7536…,1440 吨;
+  //   QUIET:没有成交,涨跌 null、0 吨。
+  //   三个同属 registry「Demo registry」与项目类型「Forestry」。全部 = (−1 − 3.7536…)/ 2 = −2.3768… → −2.38,点位 97.62,成交量 3 + 1440 + 0 = 1443。
+  const FROZEN_AT = () => seededAt + 1_000;
+  const EXPECTED_ROW = { members: 3, counted: 2, change24h: -2.38, level: 97.62, volume24h: 1_443, advancers: 0, decliners: 2 };
+
+  beforeEach(() => {
+    delete globalThis.__carbadiaInstrumentsCache;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(FROZEN_AT());
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    delete globalThis.__carbadiaInstrumentsCache;
+  });
+
+  it("MarketIndices 形状(strict)、头逐字相等,数逐个钉死:全部 −2.38 / 97.62 / 1443 吨,两个分组各只有一个 key(原始串)", async () => {
+    const data = await okData(await indices.GET(), indicesSchema, CACHE.indices);
+    expect(data).toEqual({
+      ts: FROZEN_AT(),
+      all: { key: "all", ...EXPECTED_ROW },
+      byRegistry: [{ key: "Demo registry", ...EXPECTED_ROW }],
+      byProjectType: [{ key: "Forestry", ...EXPECTED_ROW }],
+    });
+  });
+
+  it("成员的逐个涨跌与成交量就是上面手算的那几个(指数的输入);QUIET 没有成交不进平均", async () => {
+    const list = await okData(await instruments.GET(), instrumentsSchema, CACHE.instruments);
+    const ticker = (symbol: string) => list.instruments.find((item) => item.instrument.symbol === symbol)!.ticker;
+    expect(ticker(SYMBOL)).toMatchObject({ change24h: -1, volume24h: 3 });
+    expect(ticker(DENSE).volume24h).toBe(1_440);
+    expect(ticker(DENSE).change24h).toBeCloseTo(-3.7536, 4);
+    expect(ticker(QUIET)).toMatchObject({ change24h: null, volume24h: 0 });
+  });
+
+  it("情景标的不计入任何一组(members 仍是 3、数不变),响应里也没有它的 symbol", async () => {
+    const scenario = await prisma.asset.create({
+      data: { symbol: "SCEN-TEST-2026", name: "Scenario", standard: "CEA", projectType: "Allowance scenario", vintage: 2026, country: "Example", registry: "Scenario registry", isScenario: true },
+    });
+    snapshots.invalidateInstrumentsCache();
+    try {
+      const list = await okData(await instruments.GET(), instrumentsSchema, CACHE.instruments);
+      expect(list.instruments.map((item) => item.instrument.symbol)).toContain(scenario.symbol);
+      const data = await okData(await indices.GET(), indicesSchema, CACHE.indices);
+      expect(data.all).toEqual({ key: "all", ...EXPECTED_ROW });
+      expect(data.byRegistry.map((r) => r.key)).toEqual(["Demo registry"]);
+      expect(data.byProjectType.map((r) => r.key)).toEqual(["Forestry"]);
+      expect(JSON.stringify(data)).not.toContain(scenario.symbol);
+    } finally {
+      await prisma.asset.delete({ where: { id: scenario.id } });
+      snapshots.invalidateInstrumentsCache();
+    }
   });
 });
 

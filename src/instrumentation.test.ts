@@ -1,5 +1,5 @@
 // instrumentation.register() 的启动顺序(P1-25e):ensureInstruments 之后先预读一次 listInstruments() 填满标的缓存,
-// 再起机器人与影子同步 —— hub 据此核实 symbol。生产下 listen 不等 register(见 instrumentation.ts 的注释),
+// 再起机器人、条件单触发引擎(P3-03,与 BOT_DISABLED 无关)与影子同步 —— hub 据此核实 symbol。生产下 listen 不等 register(见 instrumentation.ts 的注释),
 // 但 HTTP 请求(含健康检查)会等,所以流量切过来时列表已在缓存里。预读失败只告警,不挡启动。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -22,6 +22,7 @@ vi.mock("./lib/server/market-snapshots", () => ({
 }));
 vi.mock("./lib/exchange/bot", () => ({ startMarketBot: () => void calls.push("startMarketBot") }));
 vi.mock("./lib/real-sync", () => ({ startRealSync: () => void calls.push("startRealSync") }));
+vi.mock("./lib/server/trigger-engine", () => ({ startTriggerEngine: () => void calls.push("startTriggerEngine") }));
 
 import { register } from "./instrumentation";
 
@@ -40,23 +41,23 @@ afterEach(() => {
 });
 
 describe("register()", () => {
-  it("ensureInstruments → listInstruments(预读,awaited)→ 机器人;预读完成打一行 [instruments] listed=<n>", async () => {
+  it("ensureInstruments → listInstruments(预读,awaited)→ 机器人 → 触发引擎;预读完成打一行 [instruments] listed=<n>", async () => {
     await register();
-    expect(calls).toEqual(["ensureInstruments", "listInstruments", "startMarketBot"]);
+    expect(calls).toEqual(["ensureInstruments", "listInstruments", "startMarketBot", "startTriggerEngine"]);
     expect(console.log).toHaveBeenCalledWith("[instruments] listed=0");
   });
 
-  it("BOT_DISABLED=1 时照样预读(与机器人无关)", async () => {
+  it("BOT_DISABLED=1 时照样预读、照样起触发引擎(都与机器人无关)", async () => {
     vi.stubEnv("BOT_DISABLED", "1");
     await register();
-    expect(calls).toEqual(["ensureInstruments", "listInstruments"]);
+    expect(calls).toEqual(["ensureInstruments", "listInstruments", "startTriggerEngine"]);
   });
 
   it("预读失败只告警,机器人照常启动", async () => {
     fail.list = true;
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     await register();
-    expect(calls).toEqual(["ensureInstruments", "startMarketBot"]);
+    expect(calls).toEqual(["ensureInstruments", "startMarketBot", "startTriggerEngine"]);
     expect(errors).toHaveBeenCalledWith("[instruments] 预读标的列表失败", expect.any(Error));
   });
 

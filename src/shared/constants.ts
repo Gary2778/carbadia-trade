@@ -16,3 +16,9 @@ export const MAX_TAPE = 200;
 /** 也是 /api/market/[symbol]/candles 的 limit 上限;分时(1m × 24 h)= 1440 */
 export const MAX_BARS = 1500;
 export const DEFAULT_FEE_SCHEDULE: FeeSchedule = { makerBps: 0, takerBps: 0, minFeeCents: 0, demo: true };
+/**
+ * 条件单接口失败信封里的 error 码:服务端(src/lib/server/triggers.ts、trigger-routes.ts)抛,客户端(src/lib/market/trigger-submit.ts)按它选文案;
+ * 两边共用这一份,改了措辞也不会悄悄变成通用错误。400:wouldTriggerNow = 方向与最新价不一致(一创建就会触发),tooManyTriggers = 未完结的已有 50 条,
+ * overPosition = 止盈止损的数量超过持仓;503:triggersDisabled = TRIGGERS_DISABLED=1,不收新的条件单与提醒
+ */
+export const TRIGGER_ERROR = { wouldTriggerNow: "wouldTriggerNow", tooManyTriggers: "tooManyTriggers", overPosition: "overPosition", triggersDisabled: "triggersDisabled" } as const;

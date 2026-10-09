@@ -44,7 +44,7 @@
 }
 .ex-section-nav a {
   padding: 6px 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   color: var(--muted);
 }
 .ex-section-nav a:hover {
@@ -87,7 +87,7 @@
   min-height: 36px;
   padding: 8px 14px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   background: var(--surface);
   font-size: 12px;
   font-weight: 500;
@@ -114,7 +114,7 @@
   justify-content: center;
   width: 30px;
   height: 30px;
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   color: var(--muted);
 }
 .ex-icon-button:hover {
@@ -135,7 +135,7 @@
 }
 .ex-stat {
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-panel);
   padding: 16px;
   box-shadow: var(--shadow-card);
   background: var(--surface);
@@ -183,7 +183,7 @@
 .ex-market-body {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-panel);
   box-shadow: var(--shadow-card);
   overflow: hidden;
 }
@@ -223,7 +223,7 @@
   align-items: center;
   gap: 8px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   padding: 8px 10px;
   color: var(--muted);
   min-width: 220px;
@@ -239,7 +239,7 @@
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--foreground);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   font-size: 11px;
   padding: 8px 26px 8px 10px;
   max-width: 185px;
@@ -284,7 +284,7 @@
   height: 38px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   flex-shrink: 0;
   background: color-mix(in srgb, var(--project-color) 9%, transparent);
   color: var(--project-color);
@@ -293,7 +293,7 @@
   font-size: 9px;
   padding: 3px 6px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-chip);
   color: var(--muted);
 }
 .ex-subline {
@@ -325,7 +325,7 @@
   padding: 17px 20px;
   border: 1px solid var(--border);
   background: var(--surface);
-  border-radius: 8px;
+  border-radius: var(--radius-panel);
   margin-top: 18px;
   font-size: 11px;
 }
@@ -366,7 +366,7 @@
   background: color-mix(in srgb, var(--danger) 6%, var(--surface));
   color: var(--danger);
   border: 1px solid color-mix(in srgb, var(--danger) 22%, var(--border));
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   font-size: 12px;
   margin-bottom: 16px;
   display: flex;
@@ -381,7 +381,7 @@
 .ex-skeleton {
   height: 45px;
   background: var(--surface-2);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   margin: 12px 20px;
   animation: ex-pulse 1.5s ease-in-out infinite;
 }
@@ -411,7 +411,7 @@
 }
 .ex-panel {
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-panel);
   box-shadow: var(--shadow-card);
   padding: 20px;
   background: var(--surface);
@@ -439,7 +439,7 @@
 }
 .ex-project-card {
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-panel);
   box-shadow: var(--shadow-card);
   background: var(--surface);
   overflow: hidden;
@@ -475,7 +475,7 @@
   bottom: 12px;
   font-size: 9px;
   background: var(--surface);
-  border-radius: 4px;
+  border-radius: var(--radius-chip);
   padding: 3px 6px;
   color: var(--muted);
 }
@@ -539,7 +539,7 @@
   font-size: 10px;
   padding: 3px 7px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-chip);
   background: var(--surface-2);
   color: var(--muted);
 }
@@ -558,7 +558,7 @@
 }
 .ex-glossary details {
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-panel);
   background: var(--surface);
   padding: 17px 19px;
   scroll-margin-top: 20px;
@@ -624,13 +624,13 @@
 .ex-research-track {
   height: 7px;
   background: var(--surface-2);
-  border-radius: 5px;
+  border-radius: var(--radius-chip);
   overflow: hidden;
 }
 .ex-research-track div {
   height: 100%;
   background: var(--accent);
-  border-radius: 5px;
+  border-radius: var(--radius-chip);
 }
 
 @media (max-width: 1023px) {
@@ -765,7 +765,7 @@
   font-size: 12px;
   line-height: 1.65;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-panel);
   box-shadow: 0 7px 30px #0003;
   z-index: 90;
 }

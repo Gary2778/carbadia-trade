@@ -21,10 +21,12 @@ import type {
   DraftError,
   Fill,
   Instrument,
+  Notice,
   Order,
   OrderBookLevel,
   Position,
   TapeEntry,
+  Trigger,
 } from "./types";
 import {
   WS_HEARTBEAT_MS,
@@ -58,6 +60,20 @@ const position: Position = {
   averagePurchasePrice: 6500, unrealisedPnl: 9_000, costBasisStatus: "complete", isScenario: false,
 };
 
+const trigger: Trigger = {
+  id: "trg_1", kind: "ORDER", assetId: "ast_1", symbol: SYMBOL, direction: "ABOVE", triggerPrice: 7200, side: "SELL", orderType: "MARKET", limitPrice: null, quantity: 10,
+  ocoGroupId: "oco_1", status: "PENDING", reason: null, orderId: null, firedPrice: null, createdAt: NOW - 1000, updatedAt: NOW - 1000, firedAt: null,
+};
+/** 三种通知载荷各一条(NoticePayload 的全部变体);serverEvents.notice 用第一条 */
+const notices: { [K in Notice["kind"]]: Extract<Notice, { kind: K }> } = {
+  fill: { id: "ntc_1", createdAt: NOW, readAt: null, kind: "fill", orderId: "ord_1", symbol: SYMBOL, side: "BUY", role: "TAKER", quantity: 4, price: 6800, orderStatus: "PARTIAL" },
+  trigger: {
+    id: "ntc_2", createdAt: NOW, readAt: NOW + 5, kind: "trigger", triggerId: "trg_1", symbol: SYMBOL, outcome: "REJECTED", reason: "INSUFFICIENT_CASH", side: "BUY",
+    quantity: 10, triggerPrice: 7200, orderId: null,
+  },
+  price_alert: { id: "ntc_3", createdAt: NOW, readAt: null, kind: "price_alert", triggerId: "trg_2", symbol: SYMBOL, direction: "BELOW", triggerPrice: 6500, firedPrice: 6490 },
+};
+
 const clientOps: { [K in ClientOp["op"]]: Extract<ClientOp, { op: K }> } = {
   subscribe: {
     op: "subscribe",
@@ -68,7 +84,7 @@ const clientOps: { [K in ClientOp["op"]]: Extract<ClientOp, { op: K }> } = {
   ping: { op: "ping", t0: NOW },
 };
 
-// 键集 = ServerEvent["t"] 全部 15 个变体:漏一个 tsc 就报错
+// 键集 = ServerEvent["t"] 全部 17 个变体:漏一个 tsc 就报错
 const serverEvents: { [K in ServerEvent["t"]]: Extract<ServerEvent, { t: K }> } = {
   hello: { t: "hello", v: 1, serverTime: NOW, heartbeatMs: 25000, userId: null, maxTopics: 64 },
   subscribed: { t: "subscribed", topic: `book:${SYMBOL}`, seq: 7 },
@@ -84,6 +100,8 @@ const serverEvents: { [K in ServerEvent["t"]]: Extract<ServerEvent, { t: K }> } 
   fill: { t: "fill", topic: "account", seq: 12, fill },
   balance: { t: "balance", topic: "account", seq: 13, balance },
   position: { t: "position", topic: "account", seq: 14, position },
+  trigger: { t: "trigger", topic: "account", seq: 15, trigger },
+  notice: { t: "notice", topic: "account", seq: 16, notice: notices.fill, unread: 3 },
   resync: { t: "resync", topic: `trades:${SYMBOL}`, reason: "backpressure" },
 };
 
@@ -155,6 +173,27 @@ describe("ServerEvent ↔ serverEventSchema", () => {
     expect(r.data).toEqual(value);
   });
 
+  it.each(Object.entries(notices))("notice 事件的 %s 载荷通过 schema 且往返不变", (_kind, notice) => {
+    const event: ServerEvent = { t: "notice", topic: "account", seq: 17, notice, unread: 0 };
+    const r = serverEventSchema.safeParse(event);
+    expect(r.success).toBe(true);
+    expect(r.data).toEqual(event);
+  });
+
+  it("trigger 事件:ALERT 行(下单字段全为 null)、已触发 / 被撤的 LIMIT 单行、0 成交被拒的市价单行(NO_FILL,带 orderId)都通过且往返不变", () => {
+    const alert: Trigger = {
+      ...trigger, id: "trg_2", kind: "ALERT", side: null, orderType: null, quantity: null, ocoGroupId: null, status: "TRIGGERED", firedPrice: 7210, firedAt: NOW,
+    };
+    const limit: Trigger = { ...trigger, id: "trg_3", orderType: "LIMIT", limitPrice: 7190, status: "CANCELLED", reason: "OCO", orderId: "ord_9" };
+    const noFill: Trigger = { ...trigger, id: "trg_4", status: "REJECTED", reason: "NO_FILL", orderId: "ord_10", firedPrice: 7200, firedAt: NOW };
+    for (const t of [alert, limit, noFill]) {
+      const event: ServerEvent = { t: "trigger", topic: "account", seq: 18, trigger: t };
+      const r = serverEventSchema.safeParse(event);
+      expect(r.success).toBe(true);
+      expect(r.data).toEqual(event);
+    }
+  });
+
   it("一个服务端帧 = ServerEvent[] 数组;非数组拒绝", () => {
     const frame: ServerFrame = Object.values(serverEvents);
     const r = serverFrameSchema.safeParse(frame);
@@ -185,6 +224,23 @@ describe("ServerEvent ↔ serverEventSchema", () => {
     ["position 的 lockedBy.orders 不是整数吨", { ...serverEvents.position, position: { ...position, lockedBy: { orders: 1.5, otc: 0 } } }],
     ["position 的 lockedBy.otc 为负", { ...serverEvents.position, position: { ...position, lockedBy: { orders: 0, otc: -1 } } }],
     ["order 的 status 未知", { ...serverEvents.order, order: { ...order, status: "NEW" } }],
+    ["trigger 的 topic 不是 account", { ...serverEvents.trigger, topic: `book:${SYMBOL}` }],
+    ["trigger 的 status 未知", { ...serverEvents.trigger, trigger: { ...trigger, status: "NEW" } }],
+    ["trigger 的 kind 未知", { ...serverEvents.trigger, trigger: { ...trigger, kind: "STOP" } }],
+    ["trigger 的 direction 未知", { ...serverEvents.trigger, trigger: { ...trigger, direction: "UP" } }],
+    ["trigger 的 reason 未知", { ...serverEvents.trigger, trigger: { ...trigger, reason: "BROKE" } }],
+    ["trigger 的触发价不是整数分", { ...serverEvents.trigger, trigger: { ...trigger, triggerPrice: 72.5 } }],
+    ["trigger 缺 symbol", { ...serverEvents.trigger, trigger: { ...trigger, symbol: undefined } }],
+    ["trigger 的 firedAt 不是 null 或毫秒整数", { ...serverEvents.trigger, trigger: { ...trigger, firedAt: "now" } }],
+    ["notice 的 topic 不是 account", { ...serverEvents.notice, topic: "ticker:*" }],
+    ["notice 的 unread 为负", { ...serverEvents.notice, unread: -1 }],
+    ["notice 缺 unread", { t: "notice", topic: "account", seq: 16, notice: notices.fill }],
+    ["notice 的载荷 kind 未知", { ...serverEvents.notice, notice: { ...notices.fill, kind: "promo" } }],
+    ["notice 缺 readAt", { ...serverEvents.notice, notice: { ...notices.fill, readAt: undefined } }],
+    ["fill 通知的数量不是整数吨", { ...serverEvents.notice, notice: { ...notices.fill, quantity: 0.5 } }],
+    ["fill 通知的 orderStatus 未知", { ...serverEvents.notice, notice: { ...notices.fill, orderStatus: "NEW" } }],
+    ["trigger 通知的 outcome 未知", { ...serverEvents.notice, notice: { ...notices.trigger, outcome: "PENDING" } }],
+    ["price_alert 通知缺 firedPrice", { ...serverEvents.notice, notice: { ...notices.price_alert, firedPrice: undefined } }],
   ])("拒绝 %s", (_label, bad) => {
     expect(serverEventSchema.safeParse(bad).success).toBe(false);
   });
@@ -213,6 +269,17 @@ describe("类型层断言(由 tsc --noEmit 检查)", () => {
       | "id" | "symbol" | "name" | "standard" | "projectType" | "vintage" | "country" | "registry" | "isScenario"
       | "projectId" | "methodology" | "verificationStatus" | "tickSize" | "pricePrecision" | "qtyStep" | "minQty" | "currency" | "lastPrice"
     >();
+  });
+  it("Trigger 无 userId / clientKey,键集恰为 18 个;Notice 无 userId / dedupeKey", () => {
+    expectTypeOf<Trigger>().not.toHaveProperty("userId");
+    expectTypeOf<Trigger>().not.toHaveProperty("clientKey");
+    expectTypeOf<keyof Trigger>().toEqualTypeOf<
+      | "id" | "kind" | "assetId" | "symbol" | "direction" | "triggerPrice" | "side" | "orderType" | "limitPrice" | "quantity"
+      | "ocoGroupId" | "status" | "reason" | "orderId" | "firedPrice" | "createdAt" | "updatedAt" | "firedAt"
+    >();
+    expectTypeOf<Notice>().not.toHaveProperty("userId");
+    expectTypeOf<Notice>().not.toHaveProperty("dedupeKey");
+    expectTypeOf<Notice["kind"]>().toEqualTypeOf<"fill" | "trigger" | "price_alert">();
   });
   it("DraftError 恰为十个字面量", () => {
     expectTypeOf<DraftError>().toEqualTypeOf<

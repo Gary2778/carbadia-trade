@@ -1,5 +1,5 @@
 // 撤单遇到写锁争用 / 超时(P1-25b):与下单一样回 503 + Retry-After: 1(BusyError),不再是 500 + [API ERROR] 日志。
-// 争用错误按 Prisma 已知错误的 code 字段识别(跨 bundle 不认类,见 matching.ts prismaErrorCode):P1008 忙等超时、P2028 事务超时、P2034 写冲突;
+// 争用错误按 Prisma 已知错误的 code 字段识别(跨 bundle 不认类,见 src/lib/server/prisma-errors.ts):P1008 忙等超时、P2028 事务超时、P2034 写冲突;
 // 下单的争用集合里还有 P2002(幂等键并发),撤单没有幂等键,不认它。
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,7 +12,8 @@ vi.mock("@/lib/server/auth", () => ({
   AuthError: class AuthError extends Error {},
 }));
 
-import { BusyError, cancelOrderTx, prismaErrorCode } from "@/lib/exchange/matching";
+import { BusyError, cancelOrderTx } from "@/lib/exchange/matching";
+import { prismaErrorCode } from "@/lib/server/prisma-errors";
 import { DELETE } from "./route";
 
 /** 形状同 Prisma 的 PrismaClientKnownRequestError:Error + 字符串 code */

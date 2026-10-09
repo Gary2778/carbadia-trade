@@ -386,8 +386,19 @@ describe("first-visit dark and the up/down axis are mirrored in the inline scrip
     expect(TEMPLATE).toMatch(/startsWith\("\/trade"\)/);
   });
 
-  it("/privacy lists the three storage keys", () => {
-    for (const key of ["carbadia-theme", "carbadia-updown", "carbadia-terminal-prefs"]) expect(PRIVACY).toContain(key);
+  it("/privacy lists the four storage keys and says what the time-zone key stores", () => {
+    for (const key of ["carbadia-theme", "carbadia-updown", "carbadia-terminal-prefs", "carbadia-tz"]) expect(PRIVACY).toContain(key);
+    // P3-09:carbadia-tz 存的是显示时间用的时区(浏览器的 / 北京 / UTC);键名与说明在同一句
+    const sentence = PRIVACY.slice(PRIVACY.indexOf("carbadia-tz ("), PRIVACY.indexOf(")", PRIVACY.indexOf("carbadia-tz (")));
+    for (const phrase of ["time zone", "this browser's", "Beijing", "UTC"]) expect(sentence, phrase).toContain(phrase);
+  });
+
+  it("/privacy names the data Phase 3 stores (conditional orders, price alerts, in-app notifications) and that notifications are deleted after 30 days", () => {
+    const section = (n: number) => PRIVACY.slice(PRIVACY.indexOf(`"${n}. `), PRIVACY.indexOf(`"${n + 1}. `));
+    for (const phrase of ["Conditional orders", "price alerts", "in-app notifications"]) expect(section(1), phrase).toContain(phrase);
+    expect(section(5)).toContain("In-app notifications are deleted after 30 days.");
+    // 清理每几个小时跑一次,不是到点即删:不写「创建 30 天后」(P3-11)
+    expect(section(5)).not.toContain("30 days after they are created");
   });
 
   it("/privacy names every field stored under carbadia-terminal-prefs", () => {
@@ -399,6 +410,7 @@ describe("first-visit dark and the up/down axis are mirrored in the inline scrip
       bottomTab: "bottom tab",
       indicators: "indicators",
       lastSymbol: "last symbol",
+      density: "row density", // P3-10
     };
     const sentence = PRIVACY.slice(PRIVACY.indexOf("carbadia-terminal-prefs ("), PRIVACY.indexOf(");", PRIVACY.indexOf("carbadia-terminal-prefs (")));
     for (const [field, phrase] of Object.entries(disclosed)) expect(sentence, field).toContain(phrase);

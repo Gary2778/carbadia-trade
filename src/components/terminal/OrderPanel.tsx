@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
 import type { DraftError, Order, OrderType, Side } from "@/shared";
 import { DEFAULT_FEE_SCHEDULE } from "@/shared";
 import { ComplianceNote } from "@/components/ComplianceNote";
@@ -46,9 +46,13 @@ import {
 import { useDraft, useInstrument } from "@/lib/market/selectors";
 import { useMarketStore } from "@/lib/market/store";
 import { formatPrice, formatQty } from "@/shared/precision";
+import { ConditionalFields } from "./ConditionalFields";
 import { FeeLine } from "./FeeLine";
+import { Field } from "./Field";
 import { LoginGate, loginHrefFor } from "./LoginGate";
 import { PositionSlider } from "./PositionSlider";
+import { submitFailure, triggerErrorText } from "./trigger-ticket";
+import { preloadConditional, showTriggersTab, submitConditional, useConditionalTicket } from "./useConditionalTicket";
 
 // 二次确认对话框只在打开时挂载,懒加载(计划 §3.6「渲染纪律」:四个 next/dynamic({ ssr: false }) 之一);
 // 指针移到 / 焦点落到「核对订单」按钮时预取同一个 chunk,点下去时多半已经到了
@@ -102,8 +106,22 @@ function draftErrorText(errors: TerminalText["order"]["errors"], error: DraftErr
   }
 }
 
-/** 提交没成功时要给用户看的:已本地化的说明;uncertain → 去委托记录核对的链接(且确认按钮变重试);loginHref → 401 的登录入口 */
-type Failure = { message: string; uncertain: boolean; loginHref: string | null };
+/**
+ * 提交没成功时要给用户看的:已本地化的说明;uncertain → 去委托记录核对的链接(且确认按钮变重试);loginHref → 401 的登录入口;
+ * triggers = 条件单的提交:结果未确认时核对的去处是本页的「条件单」页签,不是委托记录
+ */
+export type Failure = { message: string; uncertain: boolean; loginHref: string | null; triggers?: boolean };
+
+
+/**
+ * 没成功之后给用户的去处(纯函数;面板里的按钮 / 链接与表单卸载后 toast 上的动作共用,order.ssr.test.ts 直接测):
+ * 结果未确认 → 条件单页签(条件单)或全部委托(普通委托);401 → 登录入口;其余没有
+ */
+export type FailureLink = { kind: "triggersTab" } | { kind: "orders" } | { kind: "login"; href: string } | null;
+export function failureLink(f: Failure): FailureLink {
+  if (f.uncertain) return f.triggers ? { kind: "triggersTab" } : { kind: "orders" };
+  return f.loginHref ? { kind: "login", href: f.loginHref } : null;
+}
 
 /** 下单成功后的一条 toast;ordersAction = 带「去委托记录」动作 */
 export type PlacedToast = { type: "ok" | "warning" | "info"; text: string; ordersAction: boolean };
@@ -128,19 +146,41 @@ export function placedToasts(order: Pick<Order, "side" | "quantity" | "symbol">,
   return toasts;
 }
 
+/** 票据页签(限价 / 市价 / 条件单):下划线式,选中项前景色 */
+const TICKET_TAB =
+  "-mb-px min-h-touch border-b-2 px-1 text-t-sm font-medium transition-colors duration-(--motion-fast) focus-visible:outline-none focus-visible:shadow-focus lg:min-h-0 lg:py-1";
+const TICKET_ON = "border-foreground text-foreground";
+const TICKET_OFF = "border-transparent text-muted hover:text-foreground";
+
 const LINK_BUTTON =
   "inline-flex min-h-touch items-center justify-center rounded-control border px-3 text-t-sm font-medium focus-visible:outline-none focus-visible:shadow-focus lg:min-h-0 lg:py-2";
 
 const INPUT =
   "tnum min-h-touch w-full rounded-control border border-(--terminal-border) bg-(--terminal-panel-2) px-2 text-t-base text-foreground placeholder:text-muted-2 focus-visible:outline-none focus-visible:shadow-focus disabled:opacity-60 aria-invalid:border-danger lg:min-h-0 lg:py-1.5";
 
-function Field({ id, label, children }: { id: string; label: string; children: ReactNode }) {
+/**
+ * 提交没成功、确认框已关之后留在面板里的说明(order.ssr.test.ts 直接渲染):ErrorState + 去处(failureLink)——
+ * 结果未确认:普通委托给「查看全部委托」的链接,条件单给「打开条件单页签」的按钮;401 给登录入口。
+ */
+export function OrderFailureNotice({ failure }: { failure: Failure }) {
+  const t = useT("terminal");
+  const link = failureLink(failure);
   return (
-    <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-t-xs text-muted">
-        {label}
-      </label>
-      {children}
+    <div data-order-failure="" className="flex flex-col gap-gap">
+      <ErrorState message={failure.message} />
+      {link?.kind === "triggersTab" ? (
+        <button type="button" onClick={showTriggersTab} className={`${LINK_BUTTON} border-warning/40 text-warning`}>
+          {t.triggers.checkTab}
+        </button>
+      ) : link?.kind === "orders" ? (
+        <Link href={ORDERS_HISTORY_HREF} className={`${LINK_BUTTON} border-warning/40 text-warning`}>
+          {t.order.uncertainAction}
+        </Link>
+      ) : link?.kind === "login" ? (
+        <Link href={link.href} className={`${LINK_BUTTON} border-(--terminal-border) text-foreground`}>
+          {t.order.login}
+        </Link>
+      ) : null}
     </div>
   );
 }
@@ -162,7 +202,7 @@ export function keepsFormHeight(status: AccountStatus, formSeen: boolean): boole
 }
 
 /**
- * 下单面板(计划 §3.1、§3.6):限价 / 市价、买卖切换、数量 ↔ 金额互算、仓位滑杆、手续费行(0.00 · 演示)、二次确认、幂等提交。
+ * 下单面板(计划 §3.1、§3.6、§6.3.3 P3-07):限价 / 市价 / 条件单、买卖切换、数量 ↔ 金额互算、仓位滑杆、手续费行(0.00 · 演示)、二次确认、幂等提交。
  * - 未登录(status anon)渲染 LoginGate 替换表单;idle / loading 时表单照画(SSR 与水合首帧就是这一态),核对按钮禁用;
  *   画过表单之后才变成未登录的,手机上面板保持表单的高度(keepsFormHeight),不让下面的面板上跳;
  * - 草稿是本地 reducer state(order-draft.ts 的 reduceDraft,纯函数);按 symbol 作 key 重挂载 = 换标的时草稿按
@@ -184,6 +224,10 @@ export function keepsFormHeight(status: AccountStatus, formSeen: boolean): boole
  *   对话框里对「结果未确认」的重试被重放是预期的完成(ok、清空草稿),关掉对话框后重新核对却被重放则 warning、不清空草稿(placedNotice);
  *   自成交防护撤掉了本人挂单时另弹一条 info(toast.selfTradeCancelled);余额 / 持仓由 account 推送或轮询补上;
  * - 可用现金 / 持仓 / 顶档 / 标的精度变了:金额 / 滑杆 / 预估合计按 lastEdited 重算(syncDraft;不必等用户再动一下输入框);
+ * - 第三种票据「条件单」(P3-07):触发价 + 触发后下的单(市价 / 限价)+ 数量,方向按触发价与最新成交价现推。
+ *   输入行在 ConditionalFields,状态 / 校验 / 盘口点价切回限价在 useConditionalTicket(纯 reducer 在 trigger-ticket.ts);
+ *   确认框同一个(条件单摘要),确认后 submitOrderTrigger(按需加载),提交在途与失败显示走本面板与下单共用的那一套;
+ *   l / m 快捷键与限价 / 市价按钮把票据切回去;
  * - ComplianceNote 固定在提交按钮正上方。
  */
 export function OrderPanel({ symbol, initialSide }: OrderPanelProps) {
@@ -270,7 +314,6 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
     consumedSeedNonce = seed.nonce;
     send({ kind: "applySeed", seed });
   }, [seed, symbol, send]);
-
   // 上下文变了,派生的金额 / 数量 / 滑杆 / 预估合计按 lastEdited 重算(syncDraft:会变才派发)。两个来源:
   //   1. 本面板渲染过(账户就绪 / 余额与持仓变动、标的精度到了、草稿刚被某个动作改过):提交之后对一遍 —— 动作用的是事件那一刻的盘口,
   //      若它与这次提交之间顶档又动过(非用户事件的派发不是同步提交),这里补上;
@@ -286,13 +329,31 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
     });
   }, [symbol, syncDraft]);
 
+  // 第三种票据「条件单」(P3-07):状态、校验与盘口点价切回限价都在 useConditionalTicket;买卖方向与本面板的草稿共用
+  const ticket = useConditionalTicket({ symbol, side: draft.side, info, avail: { cashCents: cash, qty: held }, seed });
+  const conditional = ticket.state.active;
+  const triggerReview = ticket.state.review;
+
   const handleSide = (side: Side) => send({ kind: "setSide", side });
-  const handleType = (orderType: OrderType) => send({ kind: "setType", orderType });
+  /** 限价 / 市价按钮(l / m 快捷键点的也是它们):在条件单票据上就切回来 */
+  const handleType = (orderType: OrderType) => {
+    ticket.leave();
+    send({ kind: "setType", orderType });
+  };
   const handlePct = useCallback((pct: number) => send({ kind: "setPct", pct }), [send]);
+  const preloadReview = () => {
+    preloadConfirmDialog();
+    if (conditional) preloadConditional();
+  };
 
   const handleReview = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!ready || !instrument || review) return;
+    if (!ready || !instrument || review || triggerReview) return;
+    if (conditional) {
+      // 方向按此刻的最新成交价定(validateTriggerDraft);确认框显示的也是这一刻的价
+      if (ticket.openReview(instrument)) setFailure(null);
+      return;
+    }
     setAttempted(true);
     // 登记簿里有同样参数、结果未确认的确认单 → 沿用它的 clientOrderId(表单重挂载过也一样)
     const next = openReview(draft, buildCtx(), DEFAULT_FEE_SCHEDULE);
@@ -302,6 +363,7 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
     setReview(next);
   };
 
+  const closeTicketReview = ticket.close;
   const handleCancel = useCallback(() => {
     if (submitting.current) {
       closeRequested.current = true;
@@ -309,15 +371,18 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
     }
     uncertainInDialog.current = false;
     setReview(null);
-    // 结果未确认的提示(去委托记录核对)留在面板里,直到下一次核对或成功;被拒的说明随对话框清掉
+    closeTicketReview();
+    // 结果未确认的提示(去委托记录 / 条件单页签核对)留在面板里,直到下一次核对或成功;被拒的说明随对话框清掉
     setFailure(failureAfterClose);
-  }, []);
+  }, [closeTicketReview]);
 
-  /** toast 上的动作:结果未确认 → 去委托记录核对;401 → 登录(客户端导航,不清模块级登记簿) */
+  /** toast 上的动作(failureLink):结果未确认 → 条件单页签 / 全部委托;401 → 登录(客户端导航,不清模块级登记簿) */
   const failureAction = (f: Failure): ToastAction | undefined => {
-    if (f.uncertain) return { label: t.order.uncertainAction, onClick: () => router.push(ORDERS_HISTORY_HREF) };
-    const loginHref = f.loginHref;
-    return loginHref ? { label: t.order.login, onClick: () => router.push(loginHref) } : undefined;
+    const link = failureLink(f);
+    if (!link) return undefined;
+    if (link.kind === "triggersTab") return { label: t.triggers.checkTab, onClick: showTriggersTab };
+    if (link.kind === "orders") return { label: t.order.uncertainAction, onClick: () => router.push(ORDERS_HISTORY_HREF) };
+    return { label: t.order.login, onClick: () => router.push(link.href) };
   };
 
   /** 明确被拒(4xx):按状态码取文案,服务端的英文原文不上界面;400 按最新可用资源重新校验,映射回 order.errors */
@@ -373,6 +438,11 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
     // 结果未确认:确认单留在登记簿,同一 clientOrderId 重试是安全的;明确被拒(4xx):没有下单,登记也留着
     if (outcome.kind === "uncertain") uncertainInDialog.current = true;
     const failed: Failure = outcome.kind === "uncertain" ? { message: t.order.uncertain, uncertain: true, loginHref: null } : rejectionFailure(outcome, current.request);
+    showFailure(failed, dismissed);
+  };
+
+  /** 没成功的结果显示在哪(failureSurface):对话框里、面板里(在途时用户要关对话框),或表单已卸载时用 toast */
+  const showFailure = (failed: Failure, dismissed: boolean) => {
     switch (failureSurface({ mounted: mounted.current, dismissed })) {
       case "toast": {
         // 表单在途中卸载了(换标的 / 手机切页签):面板 state 没人看了,改用 toast
@@ -384,6 +454,7 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
         // 提交在途时用户要关对话框(Chromium 连按 Esc 可能已经把原生 <dialog> 关掉了):现在关,结果在面板里显示
         setFailure(failed);
         setReview(null);
+        ticket.close();
         return;
       case "dialog":
         setFailure(failed);
@@ -391,15 +462,45 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
     }
   };
 
+  /**
+   * 条件单的确认(P3-07):submitOrderTrigger(按需加载)。幂等键由 trigger-submit 管 —— 结果未确认后用同样的参数重试沿用同一个键,
+   * 服务端不会建出第二条。成功:toast ok、数量与滑杆清空(触发价、触发后的单、委托价与方向留着,同 reset);行已由提交函数写进账户 store。
+   */
+  const handleConfirmTrigger = async () => {
+    const current = triggerReview;
+    if (!current || submitting.current) return;
+    submitting.current = true;
+    closeRequested.current = false;
+    setBusy(true);
+    setFailure(null);
+    // 提交函数按需加载;chunk 取不到(离线)= 请求没发出去(null)
+    const res = await submitConditional(current);
+    submitting.current = false;
+    setBusy(false);
+    const dismissed = closeRequested.current;
+    closeRequested.current = false;
+    if (res?.ok) {
+      push("ok", t.triggers.placed({ type: t.triggers.types.conditional, symbol }), { action: { label: t.triggers.checkTab, onClick: showTriggersTab } });
+      ticket.placed();
+      return;
+    }
+    showFailure(res ? { ...submitFailure(res, t, loginHrefFor(symbol)), triggers: true } : { message: ui.error, uncertain: false, loginHref: null, triggers: true }, dismissed);
+  };
+
   // 校验要用顶档(市价单:对手盘空了 → noLiquidity,现金买不起卖一 → insufficientCash):selector 只返回校验结果,
   // 顶档怎么动,结果(一个字符串或 null)不变就不重渲染;还没点过「核对订单」时恒为 null(errorSelector,order-draft.test.ts 直接测)
-  const error = useMarketStore(errorSelector(draft, info, { cashCents: cash, qty: held }, symbol, attempted));
+  const error = useMarketStore(errorSelector(draft, info, { cashCents: cash, qty: held }, symbol, attempted && !conditional));
+  const condFailure = ticket.failure;
   const errorField = error ? ERROR_FIELD[error] : null;
   const errorId = `${ids}-error`;
+  const errorText = conditional
+    ? condFailure && triggerErrorText(t.triggers.errors, condFailure.reason, info, fmtPrice(info.tickSize, info, lang))
+    : error && draftErrorText(t.order.errors, error, info, lang);
   const isBuy = draft.side === "BUY";
   const isLimit = draft.type === "LIMIT";
-  // 预估合计:reducer 派生(限价 = 价 × 量;市价 = 当前数量沿对手盘走档的金额 —— 按预算输入时也不是金额框里的预算),与确认框同一口径
-  const notional = draft.estNotional ?? 0;
+  // 预估合计:reducer 派生(限价 = 价 × 量;市价 = 当前数量沿对手盘走档的金额 —— 按预算输入时也不是金额框里的预算),与确认框同一口径;
+  // 条件单 = 参考价 × 数量(限价单的委托价,市价单按触发价粗估,标签另写)
+  const notional = (conditional ? ticket.view.estNotional : draft.estNotional) ?? 0;
   const safeNotional = Number.isFinite(notional) ? notional : 0;
   const invalid = (field: "price" | "qty" | "amount") => (errorField === field ? { "aria-invalid": true, "aria-describedby": errorId } : {});
 
@@ -410,6 +511,7 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
         `[data-area="order"][data-keep-height] { min-height: 42.625rem }` = 这张表单在 ≤ 30rem 宽时的面板高度(682 px)。
         在这里增减一行(输入框、说明、按钮)或改行高 / 间距之后,必须重新量面板高度并改那个常数,
         否则未登录的 `?side=` 深链在手机上会按差值出现布局偏移(量法见 docs/perf-report.md「Phase 2 · P2-08」§2)。
+        条件单票据(P3-07)与限价 / 市价票据逐行等高(见 ConditionalFields),换票据不改变表单高度,这个常数对三种票据都成立。
       */}
       <form onSubmit={handleReview} noValidate className="flex flex-col gap-panel">
         <div role="group" aria-label={t.tabs.colSide} className="grid grid-cols-2 gap-1 rounded-control bg-(--terminal-panel-2) p-1">
@@ -435,58 +537,76 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
               key={type}
               type="button"
               data-order-type={type}
-              aria-pressed={draft.type === type}
+              aria-pressed={!conditional && draft.type === type}
               onClick={() => handleType(type)}
-              className={`-mb-px min-h-touch border-b-2 px-1 text-t-sm font-medium transition-colors duration-(--motion-fast) focus-visible:outline-none focus-visible:shadow-focus lg:min-h-0 lg:py-1 ${
-                draft.type === type ? "border-foreground text-foreground" : "border-transparent text-muted hover:text-foreground"
-              }`}
+              className={`${TICKET_TAB} ${!conditional && draft.type === type ? TICKET_ON : TICKET_OFF}`}
             >
               {type === "LIMIT" ? t.order.limit : t.order.market}
             </button>
           ))}
+          {/* 条件单不是一种 OrderType,不带 data-order-type(l / m 快捷键只认限价 / 市价;按下即切回那种票据) */}
+          <button type="button" data-ticket="CONDITIONAL" aria-pressed={conditional} onClick={ticket.enter} className={`${TICKET_TAB} ${conditional ? TICKET_ON : TICKET_OFF}`}>
+            {t.order.conditional}
+          </button>
         </div>
 
-        <Field id={`${ids}-price`} label={t.order.price}>
-          <input
-            id={`${ids}-price`}
-            data-price-field=""
-            type="text"
-            inputMode="decimal"
-            autoComplete="off"
-            disabled={!isLimit}
-            placeholder={isLimit ? undefined : t.order.market}
-            value={isLimit ? draft.priceText : ""}
-            onChange={(e) => send({ kind: "setPrice", text: e.currentTarget.value })}
-            className={INPUT}
-            {...invalid("price")}
+        {conditional ? (
+          <ConditionalFields
+            ids={ids}
+            symbol={symbol}
+            precision={info.pricePrecision}
+            cond={ticket.state.draft}
+            qtyText={ticket.view.qtyText}
+            invalidField={condFailure?.field ?? null}
+            errorId={errorId}
+            inputClass={INPUT}
+            onChange={ticket.onChange}
           />
-        </Field>
-        <Field id={`${ids}-qty`} label={t.order.qty}>
-          <input
-            id={`${ids}-qty`}
-            type="text"
-            inputMode="numeric"
-            autoComplete="off"
-            value={draft.qtyText}
-            onChange={(e) => send({ kind: "setQty", text: e.currentTarget.value })}
-            className={INPUT}
-            {...invalid("qty")}
-          />
-        </Field>
-        <Field id={`${ids}-amount`} label={t.order.amount}>
-          <input
-            id={`${ids}-amount`}
-            type="text"
-            inputMode="decimal"
-            autoComplete="off"
-            value={draft.amountText}
-            onChange={(e) => send({ kind: "setAmount", text: e.currentTarget.value })}
-            className={INPUT}
-            {...invalid("amount")}
-          />
-        </Field>
+        ) : (
+          <>
+            <Field id={`${ids}-price`} label={t.order.price}>
+              <input
+                id={`${ids}-price`}
+                data-price-field=""
+                type="text"
+                inputMode="decimal"
+                autoComplete="off"
+                disabled={!isLimit}
+                placeholder={isLimit ? undefined : t.order.market}
+                value={isLimit ? draft.priceText : ""}
+                onChange={(e) => send({ kind: "setPrice", text: e.currentTarget.value })}
+                className={INPUT}
+                {...invalid("price")}
+              />
+            </Field>
+            <Field id={`${ids}-qty`} label={t.order.qty}>
+              <input
+                id={`${ids}-qty`}
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                value={draft.qtyText}
+                onChange={(e) => send({ kind: "setQty", text: e.currentTarget.value })}
+                className={INPUT}
+                {...invalid("qty")}
+              />
+            </Field>
+            <Field id={`${ids}-amount`} label={t.order.amount}>
+              <input
+                id={`${ids}-amount`}
+                type="text"
+                inputMode="decimal"
+                autoComplete="off"
+                value={draft.amountText}
+                onChange={(e) => send({ kind: "setAmount", text: e.currentTarget.value })}
+                className={INPUT}
+                {...invalid("amount")}
+              />
+            </Field>
+          </>
+        )}
 
-        <PositionSlider value={draft.pct} onChange={handlePct} marks={PCT_MARKS} side={draft.side} disabled={!ready} />
+        <PositionSlider value={conditional ? ticket.view.pct : draft.pct} onChange={conditional ? ticket.onPct : handlePct} marks={PCT_MARKS} side={draft.side} disabled={!ready} />
 
         <dl className="flex flex-col gap-1 text-t-xs">
           <div className="flex items-baseline justify-between gap-gap">
@@ -494,40 +614,26 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
             <dd className="tnum text-foreground">{!ready || !balance ? "—" : isBuy ? formatPrice(cash, 2, locale) : formatQty(held, info.qtyStep, locale)}</dd>
           </div>
           <div className="flex items-baseline justify-between gap-gap">
-            <dt className="text-muted">{t.order.estTotal}</dt>
+            <dt className="text-muted">{conditional && ticket.state.draft.then === "MARKET" ? t.order.estTotalAtTrigger : t.order.estTotal}</dt>
             <dd className="tnum text-foreground">{formatPrice(safeNotional, 2, locale)}</dd>
           </div>
           <FeeLine notionalCents={safeNotional} fees={DEFAULT_FEE_SCHEDULE} />
         </dl>
 
-        {error ? (
+        {errorText ? (
           <p id={errorId} role="alert" className="text-t-xs text-danger">
-            {draftErrorText(t.order.errors, error, info, lang)}
+            {errorText}
           </p>
         ) : null}
 
-        {!review && failure ? (
-          <div data-order-failure="" className="flex flex-col gap-gap">
-            <ErrorState message={failure.message} />
-            {failure.uncertain ? (
-              <Link href={ORDERS_HISTORY_HREF} className={`${LINK_BUTTON} border-warning/40 text-warning`}>
-                {t.order.uncertainAction}
-              </Link>
-            ) : null}
-            {failure.loginHref ? (
-              <Link href={failure.loginHref} className={`${LINK_BUTTON} border-(--terminal-border) text-foreground`}>
-                {t.order.login}
-              </Link>
-            ) : null}
-          </div>
-        ) : null}
+        {!review && !triggerReview && failure ? <OrderFailureNotice failure={failure} /> : null}
 
         <ComplianceNote />
         <button
           type="submit"
           disabled={!ready || !instrument}
-          onPointerEnter={preloadConfirmDialog}
-          onFocus={preloadConfirmDialog}
+          onPointerEnter={preloadReview}
+          onFocus={preloadReview}
           className={`min-h-touch rounded-control text-t-md font-semibold text-background transition-opacity duration-(--motion-fast) focus-visible:outline-none focus-visible:shadow-focus disabled:cursor-not-allowed disabled:opacity-50 lg:min-h-0 lg:py-2 ${
             isBuy ? "bg-(--terminal-up)" : "bg-(--terminal-down)"
           }`}
@@ -541,6 +647,17 @@ function OrderForm({ symbol, initialSide, ready }: { symbol: string; initialSide
           review={review}
           instrument={info}
           onConfirm={() => void handleConfirm()}
+          onCancel={handleCancel}
+          busy={busy}
+          error={failure?.message ?? null}
+          uncertain={failure?.uncertain ?? false}
+          loginHref={failure?.loginHref ?? null}
+        />
+      ) : triggerReview ? (
+        <OrderConfirmDialog
+          trigger={triggerReview}
+          instrument={info}
+          onConfirm={() => void handleConfirmTrigger()}
           onCancel={handleCancel}
           busy={busy}
           error={failure?.message ?? null}

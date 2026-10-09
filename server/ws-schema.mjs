@@ -39,6 +39,8 @@ const seq = int.nonnegative(); // topic 序号,进程启动从 1 起,快照不�
 const sideSchema = z.enum(["BUY", "SELL"]);
 const orderTypeSchema = z.enum(["LIMIT", "MARKET"]);
 const orderStatusSchema = z.enum(["OPEN", "PARTIAL", "FILLED", "CANCELLED"]);
+const triggerDirectionSchema = z.enum(["ABOVE", "BELOW"]);
+const triggerReasonSchema = z.enum(["USER", "OCO", "INSUFFICIENT_CASH", "INSUFFICIENT_QTY", "NO_FILL", "INVALID"]);
 export const candleIntervalSchema = z.enum(CANDLE_INTERVALS);
 /** SIM-TRD-<tradeId>:模拟成交引用,不是登记机构记录 */
 const auditRefSchema = z.string().startsWith("SIM-TRD-");
@@ -98,6 +100,63 @@ export const fillSchema = z.object({
   ledgerRefs: z.array(z.string()),
 });
 export const balanceSchema = z.object({ cashBalance: cents, lockedCash: cents });
+/** 条件单 / 价格提醒(计划 §6.3.2 C2);side / orderType / limitPrice / quantity 只有 ORDER 才非 null */
+export const triggerSchema = z.object({
+  id: z.string().min(1),
+  kind: z.enum(["ORDER", "ALERT"]),
+  assetId: z.string().min(1),
+  symbol: z.string().min(1),
+  direction: triggerDirectionSchema,
+  triggerPrice: cents,
+  side: sideSchema.nullable(),
+  orderType: orderTypeSchema.nullable(),
+  limitPrice: cents.nullable(),
+  quantity: tonnes.nullable(),
+  ocoGroupId: z.string().min(1).nullable(),
+  status: z.enum(["PENDING", "TRIGGERING", "TRIGGERED", "REJECTED", "CANCELLED"]),
+  reason: triggerReasonSchema.nullable(),
+  orderId: z.string().min(1).nullable(),
+  firedPrice: cents.nullable(),
+  createdAt: unixMs,
+  updatedAt: unixMs,
+  firedAt: unixMs.nullable(),
+});
+/** 通知 = 公共头 + 按 kind 区分的载荷(NoticePayload) */
+const noticeHead = { id: z.string().min(1), createdAt: unixMs, readAt: unixMs.nullable() };
+export const noticeSchema = z.discriminatedUnion("kind", [
+  z.object({
+    ...noticeHead,
+    kind: z.literal("fill"),
+    orderId: z.string().min(1),
+    symbol: z.string().min(1),
+    side: sideSchema,
+    role: z.enum(["MAKER", "TAKER"]),
+    quantity: tonnes,
+    price: cents,
+    orderStatus: orderStatusSchema,
+  }),
+  z.object({
+    ...noticeHead,
+    kind: z.literal("trigger"),
+    triggerId: z.string().min(1),
+    symbol: z.string().min(1),
+    outcome: z.enum(["TRIGGERED", "REJECTED", "CANCELLED"]),
+    reason: triggerReasonSchema.nullable(),
+    side: sideSchema.nullable(),
+    quantity: tonnes.nullable(),
+    triggerPrice: cents,
+    orderId: z.string().min(1).nullable(),
+  }),
+  z.object({
+    ...noticeHead,
+    kind: z.literal("price_alert"),
+    triggerId: z.string().min(1),
+    symbol: z.string().min(1),
+    direction: triggerDirectionSchema,
+    triggerPrice: cents,
+    firedPrice: cents,
+  }),
+]);
 export const positionSchema = z.object({
   assetId: z.string().min(1),
   symbol: z.string().min(1),
@@ -159,6 +218,8 @@ export const serverEventSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("fill"), topic: accountTopicSchema, seq, fill: fillSchema }),
   z.object({ t: z.literal("balance"), topic: accountTopicSchema, seq, balance: balanceSchema }),
   z.object({ t: z.literal("position"), topic: accountTopicSchema, seq, position: positionSchema }),
+  z.object({ t: z.literal("trigger"), topic: accountTopicSchema, seq, trigger: triggerSchema }),
+  z.object({ t: z.literal("notice"), topic: accountTopicSchema, seq, notice: noticeSchema, unread: int.nonnegative() }),
   z.object({ t: z.literal("resync"), topic: topicSchema, reason: z.enum(["backpressure", "restart"]) }),
 ]);
 export const serverFrameSchema = z.array(serverEventSchema);

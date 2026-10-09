@@ -33,8 +33,8 @@ const TRADE_ONLY = [...MERGED, ...TERMINAL_COPY, PROVIDER, TEST_SUPPORT, ...ACCO
 const ACCOUNT_ONLY = [...ACCOUNT_COPY, ACCOUNT_PROVIDER];
 
 // ------------------------------------------------------------------ 引入关系
-/** 源码里的运行时引入(模块说明符,按出现顺序,不去重) */
-function runtimeImports(source: string): string[] {
+/** 源码里的运行时引入(模块说明符,按出现顺序,不去重);dynamic = false 时不算 import() / require()(只剩静态引入:进同一个 chunk 的那部分) */
+function runtimeImports(source: string, dynamic = true): string[] {
   const out: Array<[index: number, spec: string]> = [];
   // import x from "y" / import { a, b } from "y" / import * as n from "y" / import "y";`import type …` 整条跳过
   const importRe = /(?<![\w$.])import\s+(type\s+(?=[\w${*]))?(?:[\w$*{][^'"`;()]*?\bfrom\s*)?["']([^"'\n]+)["']/g;
@@ -44,7 +44,7 @@ function runtimeImports(source: string): string[] {
   for (let m = exportRe.exec(source); m; m = exportRe.exec(source)) if (!m[1]) out.push([m.index, m[2]]);
   // import("y") / require("y");`typeof import("y")` 是类型查询,跳过
   const callRe = /(?<![\w$.])(?<!typeof\s)(?:import|require)\(\s*["']([^"'\n]+)["']\s*\)/g;
-  for (let m = callRe.exec(source); m; m = callRe.exec(source)) out.push([m.index, m[1]]);
+  if (dynamic) for (let m = callRe.exec(source); m; m = callRe.exec(source)) out.push([m.index, m[1]]);
   return out.sort((a, b) => a[0] - b[0]).map(([, spec]) => spec);
 }
 
@@ -67,20 +67,22 @@ function resolveImport(fromAbs: string, spec: string): string | null {
 }
 
 const importCache = new Map<string, string[]>();
-/** 一个源文件直接引入(运行时)的 src 内文件,绝对路径 */
-function directImports(abs: string): string[] {
-  let found = importCache.get(abs);
+const staticImportCache = new Map<string, string[]>();
+/** 一个源文件直接引入(运行时)的 src 内文件,绝对路径;dynamic = false 时只算静态引入 */
+function directImports(abs: string, dynamic = true): string[] {
+  const cache = dynamic ? importCache : staticImportCache;
+  let found = cache.get(abs);
   if (!found) {
     found = SOURCE.test(abs)
-      ? [...new Set(runtimeImports(readFileSync(abs, "utf8")).map((spec) => resolveImport(abs, spec)).filter((f): f is string => f !== null && f !== abs))]
+      ? [...new Set(runtimeImports(readFileSync(abs, "utf8"), dynamic).map((spec) => resolveImport(abs, spec)).filter((f): f is string => f !== null && f !== abs))]
       : [];
-    importCache.set(abs, found);
+    cache.set(abs, found);
   }
   return found;
 }
 
-/** 从一组入口出发可达的全部文件(相对 src 的路径 → 引入它的那个文件,入口自己是 null) */
-function reachable(entries: string[]): Map<string, string | null> {
+/** 从一组入口出发可达的全部文件(相对 src 的路径 → 引入它的那个文件,入口自己是 null);dynamic = false 时只跟静态引入 */
+function reachable(entries: string[], dynamic = true): Map<string, string | null> {
   const via = new Map<string, string | null>();
   const queue: string[] = [];
   for (const e of entries) {
@@ -90,7 +92,7 @@ function reachable(entries: string[]): Map<string, string | null> {
     queue.push(abs);
   }
   for (let abs = queue.pop(); abs; abs = queue.pop()) {
-    for (const next of directImports(abs)) {
+    for (const next of directImports(abs, dynamic)) {
       if (via.has(rel(next))) continue;
       via.set(rel(next), rel(abs));
       queue.push(next);
@@ -174,11 +176,22 @@ describe("terminal copy stays out of everything outside /trade (§6.2.2 C9)", ()
   it("is not reachable from the root layout or the root template, which only pull the core namespaces", () => {
     const via = reachable(ROOT_ENTRIES);
     // 扫描确实走进了根布局的依赖:LangProvider、核心文案、Nav 与它渲染的 Demo 徽标都在
-    for (const expected of ["i18n/LangProvider.tsx", "i18n/index.ts", "i18n/messages/core/en.ts", "i18n/messages/core/zh-CN.ts", "components/Nav.tsx", "components/terminal/DemoBadge.tsx"]) {
+    // (P3-08:通知铃铛在 Nav 里;面板经 import() 懒加载,扫描器把动态引入也算进可达集合,所以面板与它引的东西 —— 通知句子的文案模块也在 —— 也在这里;
+    // 「句子不进 floor 包」的静态依赖由 components/notices/notices.ssr.test.ts 守,产物一侧由 scripts/perf/chunk-report.mjs 的 noticeCopy 标记守)
+    for (const expected of ["i18n/LangProvider.tsx", "i18n/index.ts", "i18n/messages/core/en.ts", "i18n/messages/core/zh-CN.ts", "components/Nav.tsx", "components/terminal/DemoBadge.tsx", "components/notices/NoticeBell.tsx", "components/notices/NoticePanel.tsx", "components/notices/notice-copy.ts", "i18n/messages/notices/en.ts", "i18n/messages/notices/zh-CN.ts"]) {
       expect(via.has(expected), expected).toBe(true);
     }
     expect(via.size).toBeGreaterThan(30);
     expect(TRADE_ONLY.filter((f) => via.has(f)).map((f) => chain(via, f))).toEqual([]);
+  });
+
+  // P3-08:铃铛与它的面板在每个页面的 floor 包里(面板是懒加载的另一个 chunk,但仍从根可达):市场 store、行情传输层与终端的外壳一个都不许跟进来;
+  // Toast 触发器只由终端与资产页挂,不在根可达集合里
+  it("keeps the market store, the market transport and the terminal shell out of the root layout's reach (the notification bell lives there)", () => {
+    const via = reachable(ROOT_ENTRIES);
+    const heavy = ["lib/market/store.ts", "lib/market/selectors.ts", "lib/market/MarketProvider.tsx", "lib/market/ws-client.ts", "lib/market/transport.ts", "components/terminal/TerminalShell.tsx", "components/notices/NoticeToaster.tsx"];
+    expect(heavy.filter((f) => via.has(f)).map((f) => chain(via, f))).toEqual([]);
+    for (const f of heavy) expect(existsSync(join(SRC, f)), `${f} exists (otherwise the check above proves nothing)`).toBe(true);
   });
 
   it("is not reachable from any route file outside /trade, and nothing reachable from there calls useT(\"terminal\")", () => {
@@ -237,5 +250,33 @@ describe("portfolio page copy (account namespace) stays inside /trade/account", 
     expect([...page.keys()].filter((f) => SOURCE.test(f) && callsAccountT(join(SRC, f))).length).toBeGreaterThanOrEqual(4);
     // 合并对象与测试辅助照样不进资产页
     expect([...MERGED, TEST_SUPPORT].filter((f) => page.has(f)).map((f) => chain(page, f))).toEqual([]);
+  });
+});
+
+// ------------------------------------------------------------------ 时间显示与时区偏好(P3-09)
+describe("time formatting and the time-zone preference stay out of the floor bundle", () => {
+  const TIME_MODULES = ["lib/time-format.ts", "providers/timeZoneState.ts", "providers/useTimeZone.ts", "components/terminal/TimeZoneSelect.tsx"];
+
+  // floor 包 = 从根布局出发的静态引入。通知面板用得到格式化模块,但它是 import() 加载的另一个 chunk,不算
+  it("none of it is statically reachable from the root layout or template (Nav imports lib/format.ts, which therefore never imports lib/time-format.ts)", () => {
+    const via = reachable(ROOT_ENTRIES, false);
+    // 扫描确实走进了 floor 包:Nav、它的格式化模块、主题 Provider 与外观存储都在;懒加载的通知面板不在
+    for (const expected of ["components/Nav.tsx", "lib/format.ts", "providers/ThemeProvider.tsx", "providers/appearance-storage.ts", "components/notices/NoticeBell.tsx"]) {
+      expect(via.has(expected), expected).toBe(true);
+    }
+    expect(via.has("components/notices/NoticePanel.tsx")).toBe(false);
+    expect(TIME_MODULES.filter((f) => via.has(f)).map((f) => chain(via, f))).toEqual([]);
+  });
+
+  it("positive control: following import() as well, the lazy notification panel reaches the time modules it uses", () => {
+    const via = reachable(ROOT_ENTRIES);
+    expect(via.has("lib/time-format.ts")).toBe(true);
+    expect(via.has("providers/useTimeZone.ts")).toBe(true);
+    expect(chain(via, "lib/time-format.ts")).toContain("components/notices/NoticePanel.tsx");
+  });
+
+  it("the static scan itself skips import() but follows plain, re-export and side-effect imports", () => {
+    const src = ['import a from "./a";', 'export * from "./h";', 'import "./g.css";', 'const k = await import("./k");', 'const m = require("./m");'].join("\n");
+    expect(runtimeImports(src, false)).toEqual(["./a", "./h", "./g.css"]);
   });
 });

@@ -37,7 +37,7 @@ export function LanguageToggle() {
         aria-label={t.language}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="glass-control flex items-center gap-1.5 rounded-full bg-surface-2 border border-border px-3 py-2 md:px-2.5 md:py-1 text-xs font-medium text-muted hover:text-foreground hover:border-accent/60 transition-colors"
+        className="glass-control flex items-center gap-1.5 rounded-control bg-surface-2 border border-border px-3 py-2 md:px-2.5 md:py-1 text-xs font-medium text-muted hover:text-foreground hover:border-accent/60 transition-colors"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden>
           <circle cx="12" cy="12" r="9" />
@@ -59,7 +59,7 @@ export function LanguageToggle() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.97 }}
             transition={{ duration: 0.16, ease: [0.21, 0.7, 0.3, 1] }}
-            className="glass-overlay absolute end-0 top-full mt-2 z-(--z-menu) w-44 rounded-2xl border border-border bg-surface shadow-card p-1.5"
+            className="glass-overlay absolute end-0 top-full mt-2 z-(--z-menu) w-44 rounded-panel border border-border bg-surface shadow-card p-1.5"
           >
             {LANGS.map((code) => {
               const active = code === lang;
@@ -72,7 +72,7 @@ export function LanguageToggle() {
                       setOpen(false);
                     }}
                     lang={LANG_META[code].htmlLang}
-                    className={`flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-sm text-start transition-colors min-h-[38px] ${
+                    className={`flex w-full items-center justify-between gap-3 rounded-control px-3 py-2 text-sm text-start transition-colors min-h-[38px] ${
                       active ? "bg-surface-2 text-foreground font-medium" : "text-muted hover:text-foreground hover:bg-surface-2/60"
                     }`}
                   >

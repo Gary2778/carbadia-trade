@@ -23,7 +23,8 @@ import en from "./messages/en";
 const SRC_DIR = fileURLToPath(new URL("../", import.meta.url));
 // §4.8 列出前三处;任务记录另加 src/lib/market(hooks / toast 文案也可能在这里取)
 // Phase 2:资产页与注销对话框(components/account、app/trade)也读 terminal.*;资产页另读 account(P2-10);目录还不存在时 listSourceFiles 返回空
-const SCAN_ROOTS = ["components/terminal", "components/ui", "components/Nav.tsx", "lib/market", "components/account", "app/trade"];
+// Phase 3:市场总览页 /trade/markets 的组件(components/markets)读 terminal.markets.*;通知(P3-08,components/notices)读核心命名空间 notices
+const SCAN_ROOTS = ["components/terminal", "components/ui", "components/Nav.tsx", "lib/market", "components/account", "components/markets", "components/notices", "app/trade"];
 const SOURCE_EXT = /\.(ts|tsx)$/;
 const TEST_FILE = /\.(test|spec)\.(ts|tsx)$/;
 
@@ -451,5 +452,38 @@ describe("terminal i18n keys used in src resolve in en", () => {
     // 同一批文件里复用的终端文案(与终端持仓页签同义的列名、按钮)也被扫到并解析
     const reused = new Set(refs.filter((r) => r.file.startsWith("components/account/") && r.path[0] === "terminal").map((r) => r.path.join(".")));
     for (const key of ["terminal.retire.lockedBy", "terminal.tabs.retire", "terminal.order.sell", "terminal.tabs.colPnl"]) expect(reused.has(key), key).toBe(true);
+  });
+
+  // P3-05:市场总览页的组件(components/markets)读 terminal.markets.*,另复用终端的 24h 涨跌 / 成交量列名与「情景」标记;扫描要扫到它们
+  it("finds the market overview page's references (components/markets), including the terminal strings it reuses", () => {
+    const { refs } = scanTree();
+    const own = refs.filter((r) => r.file.startsWith("components/markets/") && r.path[0] === "terminal");
+    const keys = new Set(own.map((r) => r.path.join(".")));
+    for (const key of ["terminal.markets.title", "terminal.markets.members", "terminal.markets.gainers", "terminal.markets.scenariosNote", "terminal.markets.stale", "terminal.markets.rowLabel", "terminal.header.change24h", "terminal.tabs.scenarioTag"]) {
+      expect(keys.has(key), key).toBe(true);
+    }
+    expect(own.filter((r) => r.path[1] === "markets").length).toBeGreaterThan(15);
+  });
+
+  // P3-08:通知的铃铛与面板(components/notices)读核心命名空间 notices(铃铛的名字、标题、加载失败的提示)与 ui 的加载 / 重试 / 加载更多;
+  // 扫描要扫到它们、并在合并对象上解析。通知的句子与面板里的其它文案在 messages/notices/(不是 core、不走 useT,由 notice-copy.ts 取),
+  // 它们的键由类型检查(NoticeCopy)与 messages.test.ts 把关
+  it("finds the notification centre's references (components/notices), not zero", () => {
+    const { files, refs } = scanTree();
+    expect(files).toContain("components/notices/NoticeBell.tsx");
+    const own = refs.filter((r) => r.file.startsWith("components/notices/"));
+    const keys = new Set(own.map((r) => `${r.file} ${r.path.join(".")}`));
+    for (const key of [
+      "components/notices/NoticeBell.tsx notices.bell",
+      "components/notices/NoticeBell.tsx notices.title",
+      "components/notices/NoticeBell.tsx notices.error",
+      "components/notices/NoticeBell.tsx ui.loading",
+      "components/notices/NoticePanel.tsx notices.error",
+      "components/notices/NoticePanel.tsx ui.loadMore",
+    ]) {
+      expect(keys.has(key), key).toBe(true);
+    }
+    // 铃铛在 Nav 里,不读终端文案(它在每个页面,那里没有终端的 Provider)
+    expect(own.some((r) => r.path[0] === "terminal" || r.path[0] === "account")).toBe(false);
   });
 });

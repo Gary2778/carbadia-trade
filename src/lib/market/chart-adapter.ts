@@ -9,11 +9,13 @@
 // - 颜色只来自 CSS token(tokens-only.test.ts 扫描本文件):readChartTokens 在图表容器上读计算值 —— 终端 token 定义在
 //   [data-terminal] 上,documentElement 上读不到;buildChartOptions 与各 *SeriesOptions 只引用传入的 token,
 //   半透明色由 token 的十六进制值派生(withAlpha)。<html> 的 data-theme / data-updown 变化后,调用方重读 token 再 applyOptions。
-// - 时间显示按浏览器本地时区(§9.1 第 32 条)。图表库只认 UTC:刻度位置(哪根算「新的一天」、整点刻度落在哪)按 UTC 日历算,
-//   只换格式化函数的话,刻度标签是本地时刻、位置却是 UTC 边界(UTC+10 的「28 日」落在本地 10:00,半小时时区的整点刻度读作 :30)。
-//   所以日内 interval 喂给图表的时间整体平移本地时区偏移(chartShiftFor,「墙上时间」秒),刻度按 UTC 格式化即本地墙上时间;
-//   偏移在每次整段 setData 时取一次、整段共用(夏令时切换那一小时逐根取偏移会让时间倒退,图表库直接抛错),
-//   十字线标签与读数则把平移减回去、按真实本地时区格式化。日线不平移、只显示日期且按 UTC(服务端按 UTC 零点切日线桶)。
+// - 时间显示按用户的时区偏好(浏览器时区 / 北京 / UTC,计划 §6.3.2 C7;格式化全在 lib/time-format.ts)。图表库只认 UTC:刻度位置
+//   (哪根算「新的一天」、整点刻度落在哪)按 UTC 日历算,只换格式化函数的话,刻度标签是所选时区的时刻、位置却是 UTC 边界
+//   (UTC+10 的「28 日」落在 10:00,半小时时区的整点刻度读作 :30)。所以日内 interval 喂给图表的时间整体平移所选时区的偏移
+//   (chartShiftFor,「墙上时间」秒),刻度按 UTC 格式化即所选时区的墙上时间;偏移在每次整段 setData 时取一次、整段共用
+//   (夏令时切换那一小时逐根取偏移会让时间倒退,图表库直接抛错),十字线标签与读数则把平移减回去、按所选时区格式化
+//   (北京与 UTC 没有夏令时,三处恒一致;local 在跨夏令时切换的一段里,刻度用的是整段共用的那一个偏移,十字线是该时刻真实的偏移,会差一小时)。
+//   日线不平移、只显示日期且按 UTC(服务端按 UTC 零点切日线桶),与时区偏好无关。
 import type {
   AreaSeriesPartialOptions,
   CandlestickSeriesPartialOptions,
@@ -30,6 +32,7 @@ import type {
 } from "lightweight-charts";
 import type { CandleBar, CandleInterval } from "@/shared";
 import { MAX_BARS } from "@/shared/constants";
+import { formatTime, type TimeStyle, type ZoneId, zoneOffsetSeconds } from "@/lib/time-format";
 import { ema, emaNext, sma, smaLast } from "@/shared/indicators";
 import { clampPricePrecision, formatPrice, formatQty } from "@/shared/precision";
 
@@ -51,7 +54,7 @@ export type VolumeBar = ChartPoint & { color: string };
 export type UpDownColors = { up: string; down: string };
 
 /**
- * unix ms → 图表时间轴的秒(整秒)。shift = 本地时区平移(秒,见 chartShiftFor);默认 0 即 UTC 秒。
+ * unix ms → 图表时间轴的秒(整秒)。shift = 所选时区的平移(秒,见 chartShiftFor);默认 0 即 UTC 秒。
  * 同一段数据的所有换算(主序列、量柱、指标、十字线定位)必须用同一个 shift。
  */
 export const chartTime = (ms: number, shift = 0): UTCTimestamp => (Math.floor(ms / 1000) + shift) as UTCTimestamp;
@@ -59,11 +62,11 @@ export const chartTime = (ms: number, shift = 0): UTCTimestamp => (Math.floor(ms
 const toUnits = (cents: number): number => cents / 100;
 
 /**
- * 喂图表的时间平移(秒):日内 interval = 浏览器本地时区在 at 时刻相对 UTC 的偏移(东八区 +28800),图表按 UTC 排的刻度
- * 因此落在本地的整点 / 零点上;日线 = 0(桶从 UTC 零点起,按 UTC 日期显示)。调用方每次整段 setData 取一次、整段共用。
+ * 喂图表的时间平移(秒):日内 interval = 所选时区(tz,时区偏好;必传,忘了传就编译不过)在 at 时刻相对 UTC 的偏移(东八区 +28800),
+ * 图表按 UTC 排的刻度因此落在该时区的整点 / 零点上;日线 = 0(桶从 UTC 零点起,按 UTC 日期显示)。调用方每次整段 setData 取一次、整段共用。
  */
-export function chartShiftFor(interval: CandleInterval, at: number = Date.now()): number {
-  return interval === "1d" ? 0 : -new Date(at).getTimezoneOffset() * 60;
+export function chartShiftFor(interval: CandleInterval, at: number, tz: ZoneId): number {
+  return interval === "1d" ? 0 : zoneOffsetSeconds(tz, at);
 }
 
 export function toChartBar(b: CandleBar, shift = 0): ChartBar {
@@ -399,63 +402,35 @@ export function volumeColors(tokens: ChartTokens): UpDownColors {
 
 /**
  * 格式化参数:语言(Intl locale)、价格精度、时间轴是否显示时刻(日线不显示;日线的日期按 UTC,与服务端按 UTC 零点切桶一致)、
- * shift = 当前这段数据的时间平移(秒,chartShiftFor;十字线标签减回去再按真实本地时区格式化)
+ * shift = 当前这段数据的时间平移(秒,chartShiftFor;十字线标签减回去再按所选时区格式化)、tz = 时区偏好(十字线标签的时区,与 shift 取自同一个)
  */
-export type ChartFormat = { locale: string; pricePrecision: number; timeVisible: boolean; shift: number };
-const DEFAULT_FORMAT: ChartFormat = { locale: "en-US", pricePrecision: 2, timeVisible: true, shift: 0 };
+export type ChartFormat = { locale: string; pricePrecision: number; timeVisible: boolean; shift: number; tz: ZoneId };
+const DEFAULT_FORMAT: ChartFormat = { locale: "en-US", pricePrecision: 2, timeVisible: true, shift: 0, tz: "local" };
 
 // d.ts 里的枚举字面量(本模块不 import 图表库的运行时值)
 const COLOR_SOLID = "solid" as ColorType.Solid;
 const CROSSHAIR_NORMAL = 0 as CrosshairMode.Normal;
 const LINE_SOLID = 0 as LineStyle.Solid;
 const LINE_DASHED = 2 as LineStyle.Dashed;
-// TickMarkType:Year 0 / Month 1 / DayOfMonth 2 / Time 3 / TimeWithSeconds 4
-type TickKind = "year" | "month" | "day" | "time" | "seconds";
-const TICK_KINDS: readonly TickKind[] = ["year", "month", "day", "time", "seconds"];
-
-type DateKind = TickKind | "full" | "date";
-const DATE_OPTIONS: Record<DateKind, Intl.DateTimeFormatOptions> = {
-  year: { year: "numeric" },
-  month: { month: "short" },
-  day: { day: "numeric" },
-  time: { hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
-  seconds: { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" },
-  full: { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
-  date: { year: "numeric", month: "2-digit", day: "2-digit" },
-};
-const dateFormats = new Map<string, Intl.DateTimeFormat>();
-/** utc = 按 UTC 显示:刻度(收到的是已平移的墙上时间秒)与日线日期(桶从 UTC 零点起,按本地时区显示会在西半球差出一天) */
-function dateFormat(locale: string, kind: DateKind, utc = false): Intl.DateTimeFormat {
-  const key = `${locale}|${kind}|${utc ? "utc" : "local"}`;
-  let fmt = dateFormats.get(key);
-  if (!fmt) {
-    const options: Intl.DateTimeFormatOptions = utc ? { ...DATE_OPTIONS[kind], timeZone: "UTC" } : DATE_OPTIONS[kind];
-    try {
-      fmt = new Intl.DateTimeFormat(locale, options);
-    } catch {
-      fmt = new Intl.DateTimeFormat("en-US", options);
-    }
-    dateFormats.set(key, fmt);
-  }
-  return fmt;
-}
+/** 图表库的刻度类型 → lib/time-format.ts 的样式;下标 = TickMarkType:Year 0 / Month 1 / DayOfMonth 2 / Time 3 / TimeWithSeconds 4 */
+const TICK_STYLES: readonly TimeStyle[] = ["axisYear", "axisMonth", "axisDay", "axisTime", "axisSeconds"];
 
 /**
- * unix ms → 十字线时间标签与读数的时间:日内 interval 按本地时区「年-月-日 时:分」;
- * dateOnly(日线)只有日期,按 UTC —— 日线桶从 UTC 零点起
+ * unix ms → 十字线时间标签与读数的时间:日内 interval 按所选时区(tz)「年-月-日 时:分」;
+ * dateOnly(日线)只有日期,按 UTC —— 日线桶从 UTC 零点起,与时区偏好无关
  */
-export function formatChartTime(ms: number, locale: string, dateOnly = false): string {
-  return dateOnly ? dateFormat(locale, "date", true).format(ms) : dateFormat(locale, "full").format(ms);
+export function formatChartTime(ms: number, locale: string, dateOnly: boolean, tz: ZoneId): string {
+  return dateOnly ? formatTime(ms, locale, "UTC", "crosshairDate") : formatTime(ms, locale, tz, "crosshair");
 }
 
 /**
  * 图表整体选项:背景 --terminal-panel、文字 --muted、网格与边框 --terminal-border、十字线 --muted、字体 --font-mono;
  * 价格标签按标的精度与语言经 formatPrice(图表值是元,换回分再格式化)。
- * 时间:刻度收到的是已平移的「墙上时间」秒,按 UTC 格式化即本地时刻(日线 shift 0 即 UTC 日期),与图表库按 UTC 日历
- * 选的刻度位置一致;十字线标签减去 shift 还原成真实时刻,按本地时区格式化(与读数同一个函数)。
+ * 时间:刻度收到的是已平移的「墙上时间」秒,按 UTC 格式化即所选时区的时刻(日线 shift 0 即 UTC 日期),与图表库按 UTC 日历
+ * 选的刻度位置一致;十字线标签减去 shift 还原成真实时刻,按所选时区格式化(与读数同一个函数)。
  */
 export function buildChartOptions(tokens: ChartTokens, format: ChartFormat = DEFAULT_FORMAT): DeepPartial<ChartOptions> {
-  const { locale, pricePrecision, timeVisible, shift } = format;
+  const { locale, pricePrecision, timeVisible, shift, tz } = format;
   const crosshairLine = { color: tokens.muted, labelBackgroundColor: tokens.muted };
   return {
     autoSize: true,
@@ -476,15 +451,15 @@ export function buildChartOptions(tokens: ChartTokens, format: ChartFormat = DEF
       timeVisible,
       secondsVisible: false,
       tickMarkFormatter: (time: Time, tickMarkType: number) => {
-        const kind = TICK_KINDS[tickMarkType];
-        if (typeof time !== "number" || kind === undefined) return null;
-        return dateFormat(locale, kind, true).format(time * 1000);
+        const style = TICK_STYLES[tickMarkType];
+        if (typeof time !== "number" || style === undefined) return null;
+        return formatTime(time * 1000, locale, "UTC", style);
       },
     },
     localization: {
       locale,
       priceFormatter: (price: number) => formatPrice(price * 100, pricePrecision, locale),
-      timeFormatter: (time: Time) => (typeof time === "number" ? formatChartTime((time - shift) * 1000, locale, !timeVisible) : String(time)),
+      timeFormatter: (time: Time) => (typeof time === "number" ? formatChartTime((time - shift) * 1000, locale, !timeVisible, tz) : String(time)),
     },
   };
 }

@@ -60,14 +60,14 @@ function LoginForm() {
 
   return (
     <div className="max-w-sm mx-auto mt-10">
-      <div className="rounded-2xl border border-border bg-surface shadow-card p-6">
+      <div className="rounded-panel border border-border bg-surface shadow-card p-6">
         <h1 className="text-lg font-bold mb-1">{t.title}</h1>
         <p className="text-muted text-sm mb-5">{t.subtitle}</p>
         <form onSubmit={submit} className="space-y-3">
           <Input label={t.email} type="email" value={email} onChange={setEmail} placeholder="you@example.com" />
           <Input label={t.password} type="password" value={password} onChange={setPassword} placeholder="••••••" />
           {err && <div className="text-danger text-xs">{err}</div>}
-          <button disabled={busy} className="w-full py-2.5 rounded-full bg-accent text-background font-medium hover:bg-accent-strong transition-colors disabled:opacity-40">
+          <button disabled={busy} className="w-full py-2.5 rounded-control bg-accent text-background font-medium hover:bg-accent-strong transition-colors disabled:opacity-40">
             {busy ? t.loggingIn : t.login}
           </button>
         </form>
@@ -79,7 +79,7 @@ function LoginForm() {
             type="button"
             disabled={demoBusy}
             onClick={startDemo}
-            className="w-full py-2.5 rounded-full bg-surface-2 border border-border text-sm font-medium hover:bg-border/60 transition-colors disabled:opacity-40"
+            className="w-full py-2.5 rounded-control bg-surface-2 border border-border text-sm font-medium hover:bg-border/60 transition-colors disabled:opacity-40"
           >
             {demoBusy ? t.demoStarting : t.tryDemo}
           </button>
@@ -98,7 +98,7 @@ export function Input({ label, type, value, onChange, placeholder }: {
       <span className="text-xs text-muted">{label}</span>
       <input
         type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} required
-        className="w-full mt-1 bg-surface-2 border border-border rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-accent"
+        className="w-full mt-1 bg-surface-2 border border-border rounded-control px-3.5 py-2.5 text-sm outline-none focus:border-accent"
       />
     </label>
   );

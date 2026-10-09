@@ -1,6 +1,7 @@
 // 做市机器人: 每 ~2.5s(BOT_TICK_MS)对每个标的随机游走报价、维护两侧 5 档、概率吃单
 import { randomBytes } from "node:crypto";
 import type { Asset, Order, User } from "@/generated/prisma";
+import { seedBotUserIds } from "../server/market-publisher";
 import { prisma } from "../server/db";
 import { cancelOrder, placeOrder } from "./matching";
 import { buildQuoteLevels, nextFair, shouldTake, takeQty } from "./bot-math";
@@ -16,9 +17,13 @@ const CASH_FLOOR = 100_000_000; // $1M(分)
 const CASH_RESET = 5_000_000_000; // $50M(分; BigInt 列容纳)
 const QTY_FLOOR = 10_000;
 const QTY_TOPUP = 1_000_000;
-// 机器人历史数据保留天数(机器人 24/7 刷单, 不清理 SQLite 会无限膨胀): 机器人之间的成交、机器人的终态订单与账本流水。
-// 默认 7 天(2026-07 生产实测约 35MB/天), 可用 RETENTION_DAYS 环境变量调整(与 entrypoint 的开机清理共用)。
+// 机器人历史数据保留天数(机器人 24/7 刷单, 不清理 SQLite 会无限膨胀): 机器人之间的成交、机器人的终态订单。
+// 默认 7 天(1d / 4h K 线靠这 7 天的成交), 可用 RETENTION_DAYS 环境变量调整(与 entrypoint 的开机清理共用)。
 const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 7);
+// 机器人自己的账本流水单独保留, 默认 1 天:2026-10 生产上它占整库七成(每笔成交约 8 条, 约 320 MB/天),
+// 按 7 天保留时库稳定在 3.1 GB, 5 GB 的卷放不下迁移前的整库备份, 10-03 还把卷写满停了一天多(写入全部失败)。
+// 读流水的页面与接口都按登录用户过滤, 机器人账户不能登录, 没有地方读机器人的流水;真人流水照旧永久保留。
+const BOT_LEDGER_RETENTION_DAYS = Number(process.env.BOT_LEDGER_RETENTION_DAYS ?? 1);
 const CLEANUP_INTERVAL_MS = 6 * 3_600_000; // 清理间隔
 
 declare global {
@@ -77,6 +82,7 @@ const CLEANUP_MAX_BATCHES = 200; // 单轮上限 100 万行, 防止无限循环
 export async function cleanupHistory() {
   try {
     const cutoffMs = Date.now() - RETENTION_DAYS * 86_400_000;
+    const ledgerCutoffMs = Date.now() - BOT_LEDGER_RETENTION_DAYS * 86_400_000;
     let trades = 0;
     let orders = 0;
     let ledgers = 0;
@@ -108,13 +114,13 @@ export async function cleanupHistory() {
       if (n < CLEANUP_BATCH) break;
       await new Promise((r) => setTimeout(r, 300));
     }
-    // 审计流水: 真人流水永久保留; bot 流水随保留期清理(与成交/订单同策略)
+    // 审计流水: 真人流水永久保留; bot 流水按 BOT_LEDGER_RETENTION_DAYS 清理(比成交 / 订单短)
     for (let i = 0; i < CLEANUP_MAX_BATCHES; i++) {
       const n = await prisma.$executeRaw`
         DELETE FROM "LedgerEntry" WHERE rowid IN (
           SELECT l.rowid FROM "LedgerEntry" l
           JOIN "User" u ON u.id = l.userId
-          WHERE u.isBot = 1 AND l.createdAt < ${cutoffMs}
+          WHERE u.isBot = 1 AND l.createdAt < ${ledgerCutoffMs}
           LIMIT ${CLEANUP_BATCH}
         )`;
       ledgers += n;
@@ -158,6 +164,7 @@ async function lockBotCredentials(bots: readonly Pick<User, "id" | "passwordHash
 /** 一轮:对每个标的报价;返回标的数(stats 行的 assets 字段) */
 async function tick(): Promise<number> {
   const bots = await prisma.user.findMany({ where: { isBot: true } });
+  seedBotUserIds(bots.map((b) => b.id)); // 名单顺带交给发布器与提交后钩子共用的缓存:不多查一次库,机器人对机器人的成交从第一笔起就零数据库工作
   if (bots.length === 0) return 0;
   await lockBotCredentials(bots).catch((e) => console.error("[bot] 锁定机器人密码失败", e instanceof Error ? e.message : e));
   const assets = await prisma.asset.findMany();

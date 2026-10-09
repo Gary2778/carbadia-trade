@@ -28,6 +28,8 @@ model User {
   sellTrades  Trade[]       @relation("SellerTrades")
   otcListings OtcListing[]  @relation("OtcSeller")
   otcDeals    OtcDeal[]     @relation("OtcBuyer")
+  triggers    Trigger[]
+  notifications Notification[]
 }
 
 // 碳信用资产 / 标的 (例如某个减排项目签发的核证减排量)
@@ -61,6 +63,7 @@ model Asset {
   orders      Order[]
   trades      Trade[]
   otcListings OtcListing[]
+  triggers    Trigger[]
 
   @@index([projectId])
 }
@@ -103,6 +106,7 @@ model Order {
   @@unique([userId, clientOrderId])
   @@index([assetId, side, status])
   @@index([userId, status])
+  @@index([userId, createdAt]) // 订单分页 / 导出按 createdAt desc 键集翻页(计划 §9.1 第 48 条)
 }
 
 // 成交记录
@@ -147,6 +151,7 @@ model OtcListing {
   deals  OtcDeal[]
 
   @@index([assetId, status])
+  @@index([sellerId]) // 本人挂牌与持仓冻结拆分按卖方查(P2-03 记下的缺口)
 }
 
 // OTC 成交
@@ -161,6 +166,52 @@ model OtcDeal {
 
   listing OtcListing @relation(fields: [listingId], references: [id])
   buyer   User       @relation("OtcBuyer", fields: [buyerId], references: [id])
+}
+
+// 条件单与价格提醒(计划 §6.3.2 C1)。创建时不锁资金、不锁持仓;触发后才以 id 作 clientOrderId 下单(幂等)。
+model Trigger {
+  id           String    @id @default(cuid())   // 触发后下单的 clientOrderId 就是它
+  userId       String
+  assetId      String
+  kind         String                            // ORDER | ALERT
+  direction    String                            // ABOVE(成交价 ≥ 触发价)| BELOW(≤)
+  triggerPrice Int                               // 分
+  side         String?                           // 仅 ORDER: BUY | SELL
+  orderType    String?                           // 仅 ORDER: LIMIT | MARKET
+  limitPrice   Int?                              // 仅 ORDER + LIMIT, 分
+  quantity     Int?                              // 仅 ORDER, 吨
+  ocoGroupId   String?                           // 止盈止损成对: 一个触发, 同组其余撤销
+  status       String    @default("PENDING")     // PENDING | TRIGGERING | TRIGGERED | REJECTED | CANCELLED
+  reason       String?                           // USER | OCO | INSUFFICIENT_CASH | INSUFFICIENT_QTY | INVALID
+  orderId      String?                           // 触发后生成的委托
+  firedPrice   Int?                              // 触发它的那笔成交价, 分
+  clientKey    String?                           // 创建幂等键; SQLite 多个 NULL 不冲突
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  firedAt      DateTime?
+
+  user  User  @relation(fields: [userId], references: [id])
+  asset Asset @relation(fields: [assetId], references: [id])
+
+  @@unique([userId, clientKey])
+  @@index([status, assetId]) // 引擎按状态查: 每 10 s 的 count、每 30 s 的恢复、按标的取 PENDING
+  @@index([userId, status, createdAt])
+}
+
+// 站内通知(计划 §6.3.2 C1): 成交 / 条件单触发 / 价格提醒; payload 是 JSON, 形状见 NoticePayload
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  kind      String                               // fill | trigger | price_alert
+  payload   String                               // JSON
+  dedupeKey String?                              // 同一用户同一键只落一条; SQLite 多个 NULL 不冲突
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, createdAt])
 }
 
 // 第一方产品埋点:匿名漏斗事件(pageview/register/first_order/demo_login),90 天清理
@@ -257,3 +308,9 @@ model Retirement {
   @@index([userId, createdAt])
 }
 
+// 看门狗写入探针(docs/superpowers/specs/2026-10-09-watchdog-alerts-design.md §3.2):只有 id=1 一行,
+// /api/health 带密钥深探时 upsert 一次,证明 Prisma → SQLite WAL → 数据卷这条路还能写。
+model Heartbeat {
+  id Int      @id
+  at DateTime
+}

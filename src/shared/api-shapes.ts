@@ -10,12 +10,16 @@ import type {
   Fill,
   InstrumentListItem,
   LedgerLineView,
+  MarketIndices,
+  Notice,
   Order,
   OrderBookSnapshot,
   OrderType,
   Position,
   Side,
   TapeEntry,
+  Trigger,
+  TriggerDirection,
 } from "./types";
 
 /** GET /api/market/instruments(进程缓存 2 s;ticker.change24h 为百分数) */
@@ -114,6 +118,59 @@ export type PlaceOrderRequest = { assetId: string; side: Side; type: OrderType; 
  * selfTradeCancelled:下单前因自成交防护(计划 §9.1 第 41 条,EXPIRE_MAKER)撤掉的本人挂单条数;缺省视为 0(P1-07b 之前的服务端不带)。
  */
 export type PlaceOrderResponse = { order: Order; filledQty: number; filledCost: number; fills: Fill[]; replayed: boolean; selfTradeCancelled?: number };
-/** GET /api/health;成功体里 db 恒 true(失败走 fail(…, 500));ws 在 START_MODE=next 下为 null */
-export type HealthResponse = { db: boolean; bot: boolean; startMode: "custom" | "next"; ws: WsStats | null };
+/** POST /api/account/triggers(kind = ORDER):触发后以 MARKET / LIMIT 下单;limitPrice 只在 orderType = LIMIT 时给;clientKey 是创建幂等键,重发同一个返回同一条 */
+export type CreateOrderTriggerRequest = {
+  kind: "ORDER";
+  assetId: string;
+  direction: TriggerDirection;
+  triggerPrice: number;
+  side: Side;
+  orderType: OrderType;
+  limitPrice?: number | null;
+  quantity: number;
+  clientKey: string;
+};
+/** POST /api/account/triggers(kind = ALERT):价格提醒,不下单 */
+export type CreateAlertRequest = { kind: "ALERT"; assetId: string; direction: TriggerDirection; triggerPrice: number; clientKey: string };
+/** POST /api/account/triggers 请求体,按 kind 区分 */
+export type CreateTriggerRequest = CreateOrderTriggerRequest | CreateAlertRequest;
+/** POST /api/account/triggers 与 DELETE /api/account/triggers/[id] 的响应(同一个 clientKey 重发返回同一条;DELETE 只有 PENDING 能撤,否则 409) */
+export type TriggerResponse = { trigger: Trigger };
+/** POST /api/account/triggers/oco:止盈止损成对(SELL MARKET);takeProfit / stopLoss 至少给一个,价格整数分,quantity 整数吨 */
+export type CreateOcoRequest = { assetId: string; quantity: number; takeProfit?: number | null; stopLoss?: number | null; clientKey: string };
+/**
+ * 创建条件单的业务字段(请求体去掉 kind 与幂等键 clientKey,limitPrice 恒显式:MARKET 为 null):
+ * order-math 的 validateTriggerDraft 通过时给出它,客户端的 submitOrderTrigger 以它为输入并补上 kind 与 clientKey
+ */
+export type OrderTriggerFields = { assetId: string; direction: TriggerDirection; triggerPrice: number; side: Side; orderType: OrderType; limitPrice: number | null; quantity: number };
+/** 价格提醒的业务字段(trigger-drafts 的 validateAlertDraft 的输出,submitAlert 的输入) */
+export type AlertFields = { assetId: string; direction: TriggerDirection; triggerPrice: number };
+/** 止盈止损的业务字段(trigger-drafts 的 validateOcoDraft 的输出,submitOco 的输入);takeProfit / stopLoss 至少一个非 null */
+export type OcoFields = { assetId: string; quantity: number; takeProfit: number | null; stopLoss: number | null };
+/** POST /api/account/triggers/oco 响应:1 或 2 条,同一 ocoGroupId */
+export type CreateOcoResponse = { triggers: Trigger[] };
+/** GET /api/account/triggers?status=open|history&cursor&limit;open = PENDING / TRIGGERING;键集分页同 /api/account/orders */
+export type AccountTriggersResponse = { triggers: Trigger[]; nextCursor: string | null };
+/** GET /api/account/notices?cursor&limit;新的在前;unread = 本人全部未读条数(不只本页) */
+export type NoticesResponse = { items: Notice[]; nextCursor: string | null; unread: number };
+/** POST /api/account/notices/read:ids = 指定几条,all = 全部标已读 */
+export type MarkNoticesReadRequest = { ids: string[] } | { all: true };
+export type MarkNoticesReadResponse = { unread: number };
+/** GET /api/market/indices(public, max-age=1, s-maxage=5, swr=10);标「模拟指数,24 小时前 = 100」 */
+export type MarketIndicesResponse = MarketIndices;
+/** 数据卷用量(看门狗深探):与 df 同一口径,三个数都取整 */
+export type DiskUsage = { totalMb: number; freeMb: number; usedPct: number };
+/**
+ * GET /api/health;成功体里 db 恒 true(失败走 fail(…, 500));ws 在 START_MODE=next 下为 null。
+ * 请求头 x-watchdog-secret 与 WATCHDOG_SECRET 相等时多 write / writeError / disk(写一次 Heartbeat 表 + 卷用量),否则没有这三个字段。
+ */
+export type HealthResponse = {
+  db: boolean;
+  bot: boolean;
+  startMode: "custom" | "next";
+  ws: WsStats | null;
+  write?: boolean;
+  writeError?: string;
+  disk?: DiskUsage | null;
+};
 export type ApiEnvelope<T> = { ok: true; data: T } | { ok: false; error: string };

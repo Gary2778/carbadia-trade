@@ -5,6 +5,7 @@
 const en = {
   nav: {
     markets: "Markets",
+    overview: "Overview",
     otc: "OTC",
     portfolio: "Portfolio",
     cash: "Available cash",
@@ -34,6 +35,16 @@ const en = {
     dialogClose: "Close dialog",
     listHint: "Scroll to see more rows",
     simulatedUnverified: "Simulated · unverified",
+  },
+
+  // 站内通知的铃铛(每个页面的 Nav 都带):只放铃铛自己要的 —— 可访问名(带未读数)、弹出层标题、面板 chunk 加载失败的提示。
+  // 句子与面板里的其它文案在 ../notices/(随懒加载的面板走,不进每页的 floor 包)
+  notices: {
+    title: "Notifications",
+    bell: (unread: number) => (unread > 0 ? `Notifications, ${unread} unread` : "Notifications"),
+    error: "Could not load notifications",
+    // 面板第二次也加载失败(部署换代后的旧标签页永远取不到旧 chunk):给整页刷新
+    reload: "Reload page",
   },
 
   exchange: {

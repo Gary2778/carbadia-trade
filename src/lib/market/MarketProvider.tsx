@@ -12,11 +12,11 @@
 //     请求在途时切回了 WS(或登出)则丢弃迟到的响应;calibrateCandles 60 s 两种模式都跑,WS 模式下 REST 的最后一根若比
 //     store 里的旧就不用,轮询模式 REST 一律覆盖(本地折算不知道 REST 已算过哪些成交,按 v 比会让多算永远纠不回来);
 //     REST 结果经 poll-frames 翻成 ServerFrame 喂同一 batcher;失败 throw 让 usePolling 退避;
-//   - batcher 的 apply:marketActions.applyEvents(市场事件)+ applyAccountEvents(order / fill / balance / position 经 bridge 的
-//     批量入口转账户 store,一批一次 set());
+//   - batcher 的 apply:marketActions.applyEvents(市场事件)+ applyAccountEvents(order / fill / balance / position / trigger / notice
+//     经 bridge 的批量入口转账户 store,一批一次 set());
 //   - 账户快照的收口:快照只能覆盖、表达不了「已经没有了」(已成交 / 已撤的单、卖光且没注销过的持仓)。轮询路径在 push 快照帧前
-//     retainOpenOrders(挂单翻完才调)+ retainPositions;WS 路径由 ws-client 识别 account 订阅快照的边界(account-snapshot 事件,
-//     帧在快照末尾切开交付),这里先 flush batcher 让快照落地,再按快照里的 id 收口(reconcileAccountSnapshot);
+//     retainOpenOrders(挂单翻完才调)+ retainPositions + retainTriggers(同样要翻完);WS 路径由 ws-client 识别 account 订阅快照的边界
+//     (account-snapshot 事件,帧在快照末尾切开交付),这里先 flush batcher 让快照落地,再按快照里的 id 收口(reconcileAccountSnapshot);
 //   - 账户列表:Nav 只拉身份与余额,挂单 / 持仓归终端 —— account 订阅快照、轮询,以及身份就绪时 transport 送不来的话
 //     自己拉一次(loadAccountListsUnlessStreamed:WS 还在连就先等 ACCOUNT_LISTS_GRACE_MS,快照到了就不拉);轮询快照若在请求期间
 //     store 被写过(本地下单 / 撤单)整轮丢弃;
@@ -31,6 +31,7 @@ import { api } from "@/lib/http/client";
 import {
   applyAccountEvents,
   fetchOpenOrders,
+  fetchOpenTriggers,
   readKnownMeId,
   readListsVersion,
   readMeId,
@@ -38,9 +39,12 @@ import {
   registerTransportReconnect,
   requestAccountLists,
   requestAccountRefresh,
+  requestNoticeRefresh,
   retainOpenOrders,
   retainPositions,
+  retainTriggers,
   subscribeAccount,
+  type OpenTriggersPage,
 } from "./account-bridge";
 import { createBatcher, type Batcher } from "./batcher";
 import { framesFromAccount, framesFromBook, framesFromCandles, framesFromInstruments, framesFromTrades } from "./poll-frames";
@@ -152,26 +156,39 @@ export async function pollMarket(symbol: string, rt: MarketRuntime): Promise<voi
 }
 
 /**
- * 轮询降级 + 已登录:持仓 / 余额 + 当前挂单(按 nextCursor 翻完,见 fetchOpenOrders);先按快照收口挂单与持仓集合
- * (已成交 / 已撤的旧单、卖光的持仓移除 —— /api/account/positions 对卖光且没注销过的持仓不返回数量 0 的行),再喂事件。
+ * 轮询降级 + 已登录:持仓 / 余额 + 当前挂单(按 nextCursor 翻完,见 fetchOpenOrders)+ 未完结的条件单(GET /api/account/triggers?status=open,
+ * 一页装得下:每人未完结的条件单与提醒合计 ≤ 50,见 fetchOpenTriggers;includeTriggers 为假时不取,资产页不显示条件单);
+ * 先按快照收口挂单、持仓与条件单集合
+ * (已成交 / 已撤的旧单、卖光的持仓、已触发 / 已撤的条件单移除 —— /api/account/positions 对卖光且没注销过的持仓不返回数量 0 的行,
+ * 条件单的 open 列表也不会以终态出现),再喂事件(条件单翻成 trigger 帧,排在持仓之后,与 hub 的订阅快照同序)。
  * 整仓注销的行(数量 0、retired > 0)是持仓载荷的一部分(计划 §6.2.2 C1):REST 返回它,收口集合里有它,
  * 账户 store 的折叠也保留它(holdsPosition)—— 注销之后这一行在 ≤ 5 s 内变成 quantity 0、retired 增加,而不是消失。
  * 挂单超过页数上限(complete: false)时不 retainOpenOrders:拿到的只是前 2000 张,其余可能还挂着;帧照常 push(只 upsert)。
- * 任一请求(含翻页中途)失败 → reject,usePolling 退避,本轮不 retain、不 push,保留现状。
+ * 条件单同理:服务端说还有下一页(complete: false)时不 retainTriggers。
+ * 持仓 / 挂单(含翻页中途)任一请求失败 → reject,usePolling 退避,本轮不 retain、不 push,保留现状。
+ * 条件单列表单独兜底:它失败不拖住余额 / 挂单 / 持仓这一轮(附带的数据不该让主数据停摆),按「不完整」处理 —— 本轮没有 trigger 帧、
+ * 不 retainTriggers,store 里已有的条件单原样保留,5 s 后下一轮再读。
  * 迟到的响应(在途时切回了 WS,或已登出 / 换了用户)丢弃:快照里的 OPEN 单会把 WS 刚删掉的已成交 / 已撤单救回来,
  * 之后再没有该单的事件来纠正,它会一直留在 openOrders 里。
- * 请求期间 store 的挂单 / 持仓被写过(请求发出时刻与最近一次写入按版本号比,见 account-bridge 的 readListsVersion;
+ * 请求期间 store 的挂单 / 持仓 / 条件单被写过(请求发出时刻与最近一次写入按版本号比,见 account-bridge 的 readListsVersion;
  * 典型是 OrderPanel 刚落了一张新单、OpenOrdersTab 刚落了撤单响应)同样丢弃整轮:这份快照读在那次变更之前,收口会删掉刚下的单,
  * 灌入会把刚撤的单以 OPEN 写回(后者另有账户 store 的已终结记录兜底)。5 s 后的下一轮照常。
  */
-export async function pollAccount(meId: string, rt: MarketRuntime): Promise<void> {
+export async function pollAccount(meId: string, rt: MarketRuntime, { includeTriggers = true }: { includeTriggers?: boolean } = {}): Promise<void> {
   if (!isPolling()) return;
+  // 轮询模式没有 notice 事件:铃铛的未读数跟着这一轮校正一下(notice-refresh.ts 限流:最多每 30 s 真正读一次,与列表这几个请求互不相干)
+  requestNoticeRefresh("poll");
   const version = readListsVersion();
-  const [positions, orders] = await Promise.all([api<PositionsResponse>("/api/account/positions"), fetchOpenOrders(api)]);
+  const [positions, orders, triggers] = await Promise.all([
+    api<PositionsResponse>("/api/account/positions"),
+    fetchOpenOrders(api),
+    includeTriggers ? fetchOpenTriggers(api).catch((): OpenTriggersPage => ({ triggers: [], complete: false })) : { triggers: [], complete: false },
+  ]);
   if (!isPolling() || readMeId() !== meId || readListsVersion() !== version) return;
   if (orders.complete) retainOpenOrders(new Set(orders.orders.map((o) => o.id)));
   retainPositions(new Set(positions.positions.map((p) => p.assetId)));
-  rt.batcher.push(framesFromAccount(orders.orders, positions.positions, positions.balance));
+  if (triggers.complete) retainTriggers(new Set(triggers.triggers.map((t) => t.id)));
+  rt.batcher.push(framesFromAccount(orders.orders, positions.positions, positions.balance, triggers.triggers));
 }
 
 /**
@@ -236,14 +253,14 @@ export function loadAccountListsUnlessStreamed(connection: ConnectionState = use
 }
 
 /**
- * WS 模式下 account 订阅快照(hub 在 subscribe account 时发 balance → 逐条 order → 逐条 position,§3.3)的收口:
+ * WS 模式下 account 订阅快照(hub 在 subscribe account 时发 balance → 逐条 order → 逐条 position → 逐条 trigger,§3.3、§6.3.2 C2)的收口:
  * ws-client 把帧在快照末尾切开:快照及之前的部分交给 batcher 之后上报 account-snapshot(边界识别见 ws-client),此时快照还在 batcher 里没应用;
- * 先 flush 让它(连同之前积压的帧)落进账户 store,再只保留快照里的挂单 id / 持仓 assetId —— 断线期间成交或撤掉的委托、
- * 卖光的持仓不会出现在快照里,不收口就永远留着。快照里的持仓与 REST 同一口径(计划 §6.2.2 C1):整仓注销的行
+ * 先 flush 让它(连同之前积压的帧)落进账户 store,再只保留快照里的挂单 id / 持仓 assetId / 条件单 id —— 断线期间成交或撤掉的委托、
+ * 卖光的持仓、已触发 / 已撤 / 被拒的条件单不会出现在快照里(条件单只有未完结的在),不收口就永远留着。快照里的持仓与 REST 同一口径(计划 §6.2.2 C1):整仓注销的行
  *(数量 0、retired > 0)在快照里,所以在收口集合里、不会被收走;卖光且没注销过的不在。ids 只是快照自己的行:订阅之后、快照之前到达的增量都比快照旧
- *(hub 查询期间有该用户的事件就重查,见 ws-client 的 accountWatch),它们碰过、快照里却没有的挂单 / 持仓已经没了;
+ *(hub 查询期间有该用户的事件就重查,见 ws-client 的 accountWatch),它们碰过、快照里却没有的挂单 / 持仓 / 条件单已经没了;
  * 同一帧里跟在快照后面的增量(比快照新)要等这里返回之后才交给 batcher,所以这次 flush 应用不到、收口也删不到它们。
- * 前提:快照是全量(hub 的快照来源读全部 OPEN / PARTIAL 挂单与全部持仓,不设条数上限)。将来若给快照加上限,
+ * 前提:快照是全量(hub 的快照来源读全部 OPEN / PARTIAL 挂单、全部持仓与全部未完结条件单,不设条数上限)。将来若给快照加上限,
  * 必须同时给出「是否完整」的信号并在这里照 pollAccount 的 complete 处理,否则收口会删掉真实存在的挂单。
  * 一次 account 订阅一次,强制 flush 的代价可以忽略。
  */
@@ -251,6 +268,9 @@ export function reconcileAccountSnapshot(snapshot: Extract<WsClientEvent, { type
   batcher.flush();
   retainOpenOrders(snapshot.orderIds);
   retainPositions(snapshot.assetIds);
+  retainTriggers(snapshot.triggerIds);
+  // 断线期间写进库的通知不会补发:订阅 / 重订阅的快照到了,顺带校正铃铛的未读数
+  requestNoticeRefresh("subscribed");
 }
 
 /**

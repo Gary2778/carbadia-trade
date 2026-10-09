@@ -14,6 +14,8 @@ import { displayRetirementReason, OTHER_REASON, RETIREMENT_FIELD_MAX, RETIREMENT
 import { lockSourcesOf } from "@/lib/market/position-groups";
 import { canEditRetirement, canSubmitRetirement, type RetireAction, type RetireFlow, type RetireSubmitError } from "@/lib/market/retire-flow";
 import { dispatchRetireFlow, submitRetireFlow, useRetireFlow } from "@/lib/market/retire-flow-store";
+import { formatTime } from "@/lib/time-format";
+import { useTimeZone } from "@/providers/useTimeZone";
 
 // 注销对话框(计划 §6.2.2 C7、§6.2.3 P2-09)。终端「持仓」页签与资产页(P2-10)共用,只能渲染在 /trade 之下(读 terminal.retire)。
 // 调用方的约定:
@@ -393,11 +395,12 @@ export function RetireReceiptStep({ position, flow, stageRef, onAgain, onClose }
   const ui = useT("ui");
   const { lang } = useLang();
   const locale = numberLocale(lang);
+  const tz = useTimeZone();
   const record = flow.receipt;
   if (!record) return null;
   const qty = (n: number) => formatQty(n, 1, locale);
   const created = new Date(record.createdAt);
-  const date = Number.isNaN(created.getTime()) ? record.createdAt : created.toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
+  const date = Number.isNaN(created.getTime()) ? record.createdAt : formatTime(created, locale, tz, "full");
   return (
     <div data-retire-step="receipt" className="flex flex-col gap-panel">
       <div className="flex flex-col gap-1">

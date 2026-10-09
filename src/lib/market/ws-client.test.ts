@@ -146,13 +146,29 @@ const accountPosition = (seq: number, assetId: string, quantity = 5): ServerEven
   seq,
   position: { assetId, symbol: SYM, quantity, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: quantity, retired: 0, lastPrice: 100, marketValue: quantity * 100, averagePurchasePrice: null, unrealisedPnl: null, costBasisStatus: "incomplete_ledger", isScenario: false },
 });
+const accountTrigger = (seq: number, id = `t${seq}`): ServerEvent => ({
+  t: "trigger",
+  topic: ACCOUNT,
+  seq,
+  trigger: {
+    id, kind: "ALERT", assetId: "a1", symbol: SYM, direction: "ABOVE", triggerPrice: 100, side: null, orderType: null, limitPrice: null, quantity: null,
+    ocoGroupId: null, status: "PENDING", reason: null, orderId: null, firedPrice: null, createdAt: seq, updatedAt: seq, firedAt: null,
+  },
+});
+const accountNotice = (seq: number): ServerEvent => ({
+  t: "notice",
+  topic: ACCOUNT,
+  seq,
+  unread: 1,
+  notice: { id: `n${seq}`, createdAt: seq, readAt: null, kind: "price_alert", triggerId: "t1", symbol: SYM, direction: "ABOVE", triggerPrice: 100, firedPrice: 101 },
+});
 const tickerAll = (seq: number): ServerEvent => ({ t: "ticker", topic: TICKER_ALL, seq, symbol: SYM, ticker: { symbol: SYM, lastPrice: 1, ts: seq } });
-/** onEvent 里的 account-snapshot,集合转成排好序的数组便于比较 */
-const snapshotsOf = (onEvent: ReturnType<typeof vi.fn>) =>
-  onEvent.mock.calls
-    .map((c) => c[0] as WsClientEvent)
-    .filter((e): e is Extract<WsClientEvent, { type: "account-snapshot" }> => e.type === "account-snapshot")
-    .map((e) => ({ orderIds: [...e.orderIds].sort(), assetIds: [...e.assetIds].sort() }));
+const accountSnapshotEvents = (onEvent: ReturnType<typeof vi.fn>) =>
+  onEvent.mock.calls.map((c) => c[0] as WsClientEvent).filter((e): e is Extract<WsClientEvent, { type: "account-snapshot" }> => e.type === "account-snapshot");
+/** onEvent 里的 account-snapshot,集合转成排好序的数组便于比较(挂单与持仓) */
+const snapshotsOf = (onEvent: ReturnType<typeof vi.fn>) => accountSnapshotEvents(onEvent).map((e) => ({ orderIds: [...e.orderIds].sort(), assetIds: [...e.assetIds].sort() }));
+/** 同上,只取快照里的未完结条件单 id */
+const snapshotTriggerIdsOf = (onEvent: ReturnType<typeof vi.fn>) => accountSnapshotEvents(onEvent).map((e) => [...e.triggerIds].sort());
 /** onFrame 与 account-snapshot 按调用先后排成一条交付序列:帧写成事件类型数组,快照写成 "snapshot" */
 const deliveriesOf = (onFrame: ReturnType<typeof vi.fn>, onEvent: ReturnType<typeof vi.fn>) =>
   [
@@ -526,7 +542,7 @@ describe("序号与缺口", () => {
     last().frame([{ t: "unsubscribed", topic: ACCOUNT }, subscribed(ACCOUNT, 9), balance(9), fill(10)]);
     expect(onEvent).toHaveBeenCalledWith({ type: "resync", topic: ACCOUNT, ok: true });
     // 重订阅回来的快照同样被识别为边界(这里快照只有 balance:没有挂单也没有持仓),帧在快照末尾切开
-    expect(onEvent).toHaveBeenLastCalledWith({ type: "account-snapshot", orderIds: new Set(), assetIds: new Set() });
+    expect(onEvent).toHaveBeenLastCalledWith({ type: "account-snapshot", orderIds: new Set(), assetIds: new Set(), triggerIds: new Set() });
     expect(deliveriesOf(onFrame, onEvent)).toEqual([["unsubscribed", "subscribed", "balance"], "snapshot", ["fill"]]);
   });
 
@@ -718,6 +734,70 @@ describe("account 订阅快照的边界(account-snapshot 事件)", () => {
     last().frame([subscribed(ACCOUNT, 5)]);
     last().frame([balance(5), accountOrder(5, "o-gone"), accountOrder(5, "o1")]);
     expect(snapshotsOf(onEvent)).toEqual([{ orderIds: ["o1"], assetIds: [] }]);
+  });
+
+  it("快照的最后一段是同 seq 的 trigger(未完结的条件单,hub 排在持仓之后):它们属于快照,id 进 triggerIds,帧交给 onFrame 之后才上报", () => {
+    const { onFrame, onEvent } = connected();
+    last().frame([subscribed(ACCOUNT, 3), balance(3), accountOrder(3, "o1"), accountPosition(3, "a1"), accountTrigger(3, "t-a"), accountTrigger(3, "t-b")]);
+    expect(onFrame.mock.calls[0][0].map((e) => e.t)).toEqual(["subscribed", "balance", "order", "position", "trigger", "trigger"]);
+    expect(snapshotsOf(onEvent)).toEqual([{ orderIds: ["o1"], assetIds: ["a1"] }]);
+    expect(snapshotTriggerIdsOf(onEvent)).toEqual([["t-a", "t-b"]]);
+    expect(deliveriesOf(onFrame, onEvent)).toEqual([["subscribed", "balance", "order", "position", "trigger", "trigger"], "snapshot"]);
+  });
+
+  it("没有未完结条件单的快照:triggerIds 是空集合(收口会把本地的条件单清掉);只有 balance 的快照同样", () => {
+    const { onEvent } = connected();
+    last().frame([subscribed(ACCOUNT, 3), balance(3), accountOrder(3, "o1")]);
+    last().frame([subscribed(ACCOUNT, 4), balance(4)]);
+    expect(snapshotTriggerIdsOf(onEvent)).toEqual([[], []]);
+  });
+
+  it("没有订单与持仓、只有条件单的快照也认(balance → trigger…)", () => {
+    const { onEvent } = connected();
+    last().frame([subscribed(ACCOUNT, 3), balance(3), accountTrigger(3, "t-a")]);
+    expect(snapshotsOf(onEvent)).toEqual([{ orderIds: [], assetIds: [] }]);
+    expect(snapshotTriggerIdsOf(onEvent)).toEqual([["t-a"]]);
+  });
+
+  it("推进序号的 trigger 是增量:不进 triggerIds,把快照结束,快照之后同一帧里的 order 与它一起在上报之后才交出;序号照常推进(没有缺口、不重订阅)", () => {
+    const { onFrame, onEvent } = connected();
+    last().frame([subscribed(ACCOUNT, 3), balance(3), accountOrder(3, "o1"), accountTrigger(3, "t-snap"), accountTrigger(4, "t-live"), accountOrder(5, "o-later")]);
+    expect(snapshotTriggerIdsOf(onEvent)).toEqual([["t-snap"]]);
+    expect(snapshotsOf(onEvent)).toEqual([{ orderIds: ["o1"], assetIds: [] }]);
+    expect(deliveriesOf(onFrame, onEvent)).toEqual([["subscribed", "balance", "order", "trigger"], "snapshot", ["trigger", "order"]]);
+    last().frame([accountTrigger(6, "t-next")]);
+    expect(onFrame.mock.calls.at(-1)?.[0].map((e) => e.t)).toEqual(["trigger"]);
+    expect(last().takeOps()).toEqual([]);
+  });
+
+  it("订阅之后、快照之前到达的条件单增量(比快照旧)不并入 triggerIds:快照里没有就是已经没了", () => {
+    const { onEvent } = connected();
+    last().frame([subscribed(ACCOUNT, 3)]);
+    last().frame([accountTrigger(4, "t-seen-before"), accountTrigger(5, "t-also")]);
+    expect(snapshotsOf(onEvent)).toEqual([]);
+    last().frame([balance(5), accountOrder(5, "o1"), accountTrigger(5, "t-a")]);
+    expect(snapshotTriggerIdsOf(onEvent)).toEqual([["t-a"]]);
+  });
+
+  it("notice 不是快照的行(通知不进快照):出现处快照结束;它与增量一样按序号放行并推进序号", () => {
+    const { onFrame, onEvent } = connected();
+    last().frame([subscribed(ACCOUNT, 3), balance(3), accountOrder(3, "o1"), accountNotice(4), accountTrigger(5, "t-live"), accountOrder(6, "o-later")]);
+    expect(snapshotsOf(onEvent)).toEqual([{ orderIds: ["o1"], assetIds: [] }]);
+    expect(snapshotTriggerIdsOf(onEvent)).toEqual([[]]);
+    expect(deliveriesOf(onFrame, onEvent)).toEqual([["subscribed", "balance", "order"], "snapshot", ["notice", "trigger", "order"]]);
+    last().frame([accountNotice(7)]);
+    expect(onFrame.mock.calls.at(-1)?.[0].map((e) => e.t)).toEqual(["notice"]);
+    expect(last().takeOps()).toEqual([]);
+  });
+
+  it("同一帧里两份快照各带各的条件单:各自的 triggerIds,不串", () => {
+    const { onEvent } = connected();
+    last().frame([
+      subscribed(ACCOUNT, 3), balance(3), accountOrder(3, "o1"), accountTrigger(3, "t-1"),
+      { t: "unsubscribed", topic: ACCOUNT },
+      subscribed(ACCOUNT, 3), balance(3), accountOrder(3, "o2"), accountTrigger(3, "t-2"), accountTrigger(3, "t-3"),
+    ]);
+    expect(snapshotTriggerIdsOf(onEvent)).toEqual([["t-1"], ["t-2", "t-3"]]);
   });
 
   it("快照在第一条不属于它的事件处结束,帧在那里切开:快照及之前的部分交给 onFrame → 上报快照 → 其余部分再交给 onFrame", () => {

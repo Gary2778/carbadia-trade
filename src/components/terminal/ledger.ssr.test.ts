@@ -87,14 +87,14 @@ const viewProps = (patch: Partial<LedgerViewProps> = {}): LedgerViewProps => ({
 });
 const view = (patch: Partial<LedgerViewProps> = {}) => renderToStaticMarkup(createElement(LedgerView, viewProps(patch)));
 
-const ALL: LedgerRequest = { account: null, type: null, symbol: null, range: "all" };
+const ALL: LedgerRequest = { account: null, type: null, symbol: null, range: "all", tz: "local" };
 
 describe("ledger filters → query (pure)", () => {
   it("starts with no filter: all accounts, all types, all instruments, all time", () => {
     expect(DEFAULT_LEDGER_FILTERS).toEqual({ account: null, type: null, scope: "all", range: "all" });
     expect(isDefaultLedgerFilters(DEFAULT_LEDGER_FILTERS)).toBe(true);
     expect(isDefaultLedgerFilters({ ...DEFAULT_LEDGER_FILTERS, range: "7d" })).toBe(false);
-    expect(ledgerRequest(DEFAULT_LEDGER_FILTERS, "VCS-FOR-2021")).toEqual(ALL);
+    expect(ledgerRequest(DEFAULT_LEDGER_FILTERS, "VCS-FOR-2021", "local")).toEqual(ALL);
     expect(ledgerQueryParams(ALL, NOW).toString()).toBe("");
     expect(ledgerPageUrl(ALL, null, NOW)).toBe(`/api/transactions?limit=${LEDGER_PAGE_LIMIT}`);
     expect(LEDGER_PAGE_LIMIT).toBe(50);
@@ -102,20 +102,20 @@ describe("ledger filters → query (pure)", () => {
 
   it("the symbol filter follows the terminal's current symbol only in the 'current' scope", () => {
     const current: LedgerFilterState = { ...DEFAULT_LEDGER_FILTERS, scope: "current" };
-    expect(ledgerRequest(current, "VCS-FOR-2021").symbol).toBe("VCS-FOR-2021");
-    expect(ledgerRequest(current, "GS-WIND-2022").symbol).toBe("GS-WIND-2022");
-    expect(ledgerRequest({ ...current, scope: "all" }, "GS-WIND-2022").symbol).toBeNull();
+    expect(ledgerRequest(current, "VCS-FOR-2021", "local").symbol).toBe("VCS-FOR-2021");
+    expect(ledgerRequest(current, "GS-WIND-2022", "local").symbol).toBe("GS-WIND-2022");
+    expect(ledgerRequest({ ...current, scope: "all" }, "GS-WIND-2022", "local").symbol).toBeNull();
   });
 
   it("maps each filter to the C4 parameter names (account, type, symbol, from), one at a time and combined", () => {
     expect(ledgerQueryParams({ ...ALL, account: "CASH_LOCKED" }, NOW).toString()).toBe("account=CASH_LOCKED");
     expect(ledgerQueryParams({ ...ALL, type: "RELEASE" }, NOW).toString()).toBe("type=RELEASE");
     expect(ledgerQueryParams({ ...ALL, symbol: "VCS-FOR-2021" }, NOW).toString()).toBe("symbol=VCS-FOR-2021");
-    expect(ledgerQueryParams({ ...ALL, range: "today" }, NOW).toString()).toBe(`from=${rangeFrom("today", NOW)}`);
-    const combined: LedgerRequest = { account: "HOLDING", type: "BUY", symbol: "GS-WIND-2022", range: "7d" };
+    expect(ledgerQueryParams({ ...ALL, range: "today" }, NOW).toString()).toBe(`from=${rangeFrom("today", NOW, "local")}`);
+    const combined: LedgerRequest = { account: "HOLDING", type: "BUY", symbol: "GS-WIND-2022", range: "7d", tz: "local" };
     const params = ledgerQueryParams(combined, NOW);
     expect([...params.keys()]).toEqual(["account", "type", "symbol", "from"]);
-    expect(Object.fromEntries(params)).toEqual({ account: "HOLDING", type: "BUY", symbol: "GS-WIND-2022", from: String(rangeFrom("7d", NOW)) });
+    expect(Object.fromEntries(params)).toEqual({ account: "HOLDING", type: "BUY", symbol: "GS-WIND-2022", from: String(rangeFrom("7d", NOW, "local")) });
     // 不传 to(到此刻为止),也不带 limit / cursor:CSV 导出(P2-06)用同一组筛选参数
     expect(params.has("to")).toBe(false);
     expect(params.has("limit")).toBe(false);
@@ -128,20 +128,54 @@ describe("ledger filters → query (pure)", () => {
 
   it("time ranges start at local midnight: today, today and the 6 / 29 days before it; 'all' has no lower bound", () => {
     expect(LEDGER_RANGES).toEqual(["today", "7d", "30d", "all"]);
-    expect(rangeFrom("all", NOW)).toBeNull();
-    const today = rangeFrom("today", NOW)!;
+    expect(rangeFrom("all", NOW, "local")).toBeNull();
+    const today = rangeFrom("today", NOW, "local")!;
     expect(today).toBe(new Date(2026, 9, 1).getTime());
-    expect(rangeFrom("7d", NOW)).toBe(new Date(2026, 8, 25).getTime());
-    expect(rangeFrom("30d", NOW)).toBe(new Date(2026, 8, 2).getTime());
+    expect(rangeFrom("7d", NOW, "local")).toBe(new Date(2026, 8, 25).getTime());
+    expect(rangeFrom("30d", NOW, "local")).toBe(new Date(2026, 8, 2).getTime());
     // 一天之内边界不动:同一份查询翻页、刷新用的是同一个 from
-    expect(rangeFrom("today", NOW + 3 * 3_600_000)).toBe(today);
-    expect(rangeFrom("today", today)).toBe(today);
-    expect(rangeFrom("today", today - 1)).toBe(today - DAY);
+    expect(rangeFrom("today", NOW + 3 * 3_600_000, "local")).toBe(today);
+    expect(rangeFrom("today", today, "local")).toBe(today);
+    expect(rangeFrom("today", today - 1, "local")).toBe(today - DAY);
     // 服务端要求 from 是 0..8.64e15 的整数毫秒
     for (const range of LEDGER_RANGES) {
-      const from = rangeFrom(range, NOW);
+      const from = rangeFrom(range, NOW, "local");
       if (from !== null) expect(Number.isSafeInteger(from) && from >= 0 && from <= NOW, range).toBe(true);
     }
+  });
+
+  it("time ranges follow the chosen zone's midnight (P3-09): Beijing and UTC give different lower bounds for the same instant, and the key, the page URL and the CSV link carry them", () => {
+    // 2026-10-01 20:00 UTC = 2026-10-02 04:00 北京时间:UTC 的「今天」是 10-01,北京的「今天」已经是 10-02
+    const at = Date.UTC(2026, 9, 1, 20, 0);
+    expect(rangeFrom("today", at, "UTC")).toBe(Date.UTC(2026, 9, 1));
+    expect(rangeFrom("7d", at, "UTC")).toBe(Date.UTC(2026, 8, 25));
+    expect(rangeFrom("30d", at, "UTC")).toBe(Date.UTC(2026, 8, 2));
+    expect(rangeFrom("today", at, "Asia/Shanghai")).toBe(Date.UTC(2026, 9, 1, 16)); // 10-02 00:00 +08:00
+    expect(rangeFrom("7d", at, "Asia/Shanghai")).toBe(Date.UTC(2026, 8, 25, 16)); // 09-26 00:00 +08:00
+    expect(rangeFrom("30d", at, "Asia/Shanghai")).toBe(Date.UTC(2026, 8, 2, 16)); // 09-03 00:00 +08:00
+    expect(rangeFrom("all", at, "Asia/Shanghai")).toBeNull();
+    const beijing: LedgerRequest = { ...ALL, range: "today", tz: "Asia/Shanghai" };
+    const utc: LedgerRequest = { ...ALL, range: "today", tz: "UTC" };
+    expect(ledgerRequestKey(beijing, at)).toBe(`*|*|*|today@${Date.UTC(2026, 9, 1, 16)}`);
+    expect(ledgerRequestKey(utc, at)).toBe(`*|*|*|today@${Date.UTC(2026, 9, 1)}`);
+    expect(ledgerPageUrl(beijing, null, at)).toBe(`/api/transactions?limit=50&from=${Date.UTC(2026, 9, 1, 16)}`);
+    // CSV 链接的 from 随时区(内容仍是 UTC,见 shared/csv.ts),其余参数不变
+    expect(ledgerCsvHref(beijing, at)).toBe(`/api/transactions.csv?from=${Date.UTC(2026, 9, 1, 16)}`);
+    expect(ledgerCsvHref(utc, at)).toBe(`/api/transactions.csv?from=${Date.UTC(2026, 9, 1)}`);
+    expect(ledgerCsvHref({ ...beijing, range: "all" }, at)).toBe("/api/transactions.csv");
+    // 一天之内(按所选时区)边界不动,过了那个时区的午夜才换:北京 10-02 00:00 = UTC 10-01 16:00
+    expect(ledgerRequestKey(beijing, Date.UTC(2026, 9, 1, 16))).toBe(ledgerRequestKey(beijing, at));
+    expect(ledgerRequestKey(beijing, Date.UTC(2026, 9, 1, 15, 59, 59, 999))).not.toBe(ledgerRequestKey(beijing, at));
+  });
+
+  it("counting back 6 / 29 days lands on that day's midnight even when a daylight-saving change makes a day 23 or 25 hours (zone passed explicitly, not the machine's)", () => {
+    // 洛杉矶 2026-03-08 凌晨 2 点进入夏令时(当天 23 小时),11-01 退出(25 小时)
+    const afterSpring = Date.UTC(2026, 2, 11, 1, 0); // 03-10 18:00 PDT
+    expect(rangeFrom("today", afterSpring, "America/Los_Angeles")).toBe(Date.UTC(2026, 2, 10, 7)); // 03-10 00:00 PDT
+    expect(rangeFrom("7d", afterSpring, "America/Los_Angeles")).toBe(Date.UTC(2026, 2, 4, 8)); // 03-04 00:00 PST,不是「往前 6 × 24 小时」的 03-03 23:00
+    const afterFall = Date.UTC(2026, 10, 3, 18, 0); // 11-03 10:00 PST
+    expect(rangeFrom("7d", afterFall, "America/Los_Angeles")).toBe(Date.UTC(2026, 9, 28, 7)); // 10-28 00:00 PDT
+    expect(rangeFrom("30d", afterFall, "America/Los_Angeles")).toBe(Date.UTC(2026, 9, 5, 7)); // 10-05 00:00 PDT
   });
 
   it("the cache key identifies the filter combination plus the day's lower bound: stable within a local day, new on the next", () => {
@@ -149,13 +183,13 @@ describe("ledger filters → query (pure)", () => {
     for (const account of [null, ...LEDGER_ACCOUNTS]) {
       for (const type of [null, "BUY", "RELEASE"] as const) {
         for (const symbol of [null, "VCS-FOR-2021"]) {
-          for (const range of LEDGER_RANGES) keys.add(ledgerRequestKey({ account, type, symbol, range }, NOW));
+          for (const range of LEDGER_RANGES) keys.add(ledgerRequestKey({ account, type, symbol, range, tz: "local" }, NOW));
         }
       }
     }
     expect(keys.size).toBe(5 * 3 * 2 * 4);
     // 有下界的时间段带上当天算出的 from;「全部」没有下界,键里也就没有时间
-    expect(ledgerRequestKey({ account: "CASH", type: "RESERVE", symbol: "VCS-FOR-2021", range: "7d" }, NOW)).toBe(`CASH|RESERVE|VCS-FOR-2021|7d@${new Date(2026, 8, 25).getTime()}`);
+    expect(ledgerRequestKey({ account: "CASH", type: "RESERVE", symbol: "VCS-FOR-2021", range: "7d", tz: "local" }, NOW)).toBe(`CASH|RESERVE|VCS-FOR-2021|7d@${new Date(2026, 8, 25).getTime()}`);
     expect(ledgerRequestKey({ ...ALL, range: "today" }, NOW)).toBe(`*|*|*|today@${new Date(2026, 9, 1).getTime()}`);
     expect(ledgerRequestKey(ALL, NOW)).toBe("*|*|*|all");
     const midnight = new Date(2026, 9, 2).getTime();
@@ -324,9 +358,9 @@ describe("CSV export (P2-06)", () => {
   it("ledgerCsvHref = /api/transactions.csv + exactly the list's filter params (no limit / cursor), from counted on the same local day", () => {
     expect(ledgerCsvHref(ALL, NOW)).toBe("/api/transactions.csv");
     const combos: LedgerRequest[] = [
-      { account: "CASH_LOCKED", type: null, symbol: null, range: "all" },
-      { account: null, type: "RESERVE", symbol: "VCS-FOR-2021", range: "today" },
-      { account: "HOLDING", type: "BUY", symbol: "=SUM(1,2)", range: "30d" },
+      { account: "CASH_LOCKED", type: null, symbol: null, range: "all", tz: "local" },
+      { account: null, type: "RESERVE", symbol: "VCS-FOR-2021", range: "today", tz: "local" },
+      { account: "HOLDING", type: "BUY", symbol: "=SUM(1,2)", range: "30d", tz: "local" },
     ];
     for (const combo of combos) {
       const href = new URL(ledgerCsvHref(combo, NOW), "http://localhost");
@@ -336,7 +370,7 @@ describe("CSV export (P2-06)", () => {
       expect(href.pathname).toBe("/api/transactions.csv");
       expect([...href.searchParams], JSON.stringify(combo)).toEqual([...page]);
       expect(href.searchParams.has("limit")).toBe(false);
-      expect(href.searchParams.get("from")).toBe(combo.range === "all" ? null : String(rangeFrom(combo.range, NOW)));
+      expect(href.searchParams.get("from")).toBe(combo.range === "all" ? null : String(rangeFrom(combo.range, NOW, "local")));
     }
     // 标的代码经 URLSearchParams 编码,不会拼坏查询串
     expect(ledgerCsvHref(combos[2], NOW)).toContain("symbol=%3DSUM%281%2C2%29");
@@ -366,7 +400,7 @@ describe("CSV export (P2-06)", () => {
     expect(plain.indexOf("data-export-csv")).toBeLessThan(plain.indexOf(`>${T.tabs.colTime}</span>`));
 
     const filters: LedgerFilterState = { account: "CASH", type: "RESERVE", scope: "current", range: "7d" };
-    const filteredHref = ledgerCsvHref(ledgerRequest(filters, "VCS-FOR-2021"), NOW);
+    const filteredHref = ledgerCsvHref(ledgerRequest(filters, "VCS-FOR-2021", "local"), NOW);
     const filtered = view({ filters, exportHref: filteredHref, pager: { status: "done", onLoadMore: () => {} } });
     expect(filtered).toContain(`<a href="${esc(filteredHref)}" download="" data-export-csv="" title="${esc(T.exportCsv.hintFiltered)}"`);
     expect(filteredHref).toMatch(/^\/api\/transactions\.csv\?account=CASH&type=RESERVE&symbol=VCS-FOR-2021&from=\d+$/);
@@ -511,17 +545,17 @@ describe("ledger query cache (per user, per filter combination)", () => {
     const week: LedgerRequest = { ...ALL, range: "7d" };
     const tomorrow = NOW + DAY;
     const day1 = ledgerQueries.forUser("u1", week, NOW)!;
-    expect(day1.key).toBe(`ledger:*|*|*|7d@${rangeFrom("7d", NOW)}:u1`);
+    expect(day1.key).toBe(`ledger:*|*|*|7d@${rangeFrom("7d", NOW, "local")}:u1`);
     // 当天稍后再取(切走页签又回来):还是那一份
     expect(ledgerQueries.forUser("u1", week, NOW + 3_600_000)).toBe(day1);
     // 过了午夜:新的一份,窗口往前挪一天 —— 昨天那份里掉出窗口的行不会被带过来
     const day2 = ledgerQueries.forUser("u1", week, tomorrow)!;
     expect(day2).not.toBe(day1);
-    expect(day2.key).toBe(`ledger:*|*|*|7d@${rangeFrom("7d", tomorrow)}:u1`);
+    expect(day2.key).toBe(`ledger:*|*|*|7d@${rangeFrom("7d", tomorrow, "local")}:u1`);
     await day2.loadMore();
     await day1.refresh();
     // 每份查询的请求都带它建立那天的 from(不是发请求那一刻重新算的)
-    expect(calls).toEqual([`/api/transactions?limit=50&from=${rangeFrom("7d", tomorrow)}`, `/api/transactions?limit=50&from=${rangeFrom("7d", NOW)}`]);
+    expect(calls).toEqual([`/api/transactions?limit=50&from=${rangeFrom("7d", tomorrow, "local")}`, `/api/transactions?limit=50&from=${rangeFrom("7d", NOW, "local")}`]);
     // 「全部」没有下界:跨天还是同一份
     expect(ledgerQueries.forUser("u1", ALL, tomorrow)).toBe(ledgerQueries.forUser("u1", ALL, NOW));
   });
@@ -545,7 +579,7 @@ describe("ledger query cache (per user, per filter combination)", () => {
       calls.push(url);
       return calls.length === 1 ? page([activity("b", 2), activity("a", 1)], "CUR1") : page([activity("a", 1), activity("0", 0)], null);
     });
-    const request: LedgerRequest = { account: "CASH", type: "RESERVE", symbol: "VCS-FOR-2021", range: "all" };
+    const request: LedgerRequest = { account: "CASH", type: "RESERVE", symbol: "VCS-FOR-2021", range: "all", tz: "local" };
     const query = ledgerQueries.forUser("u1", request)!;
     await query.loadMore();
     expect(calls).toEqual(["/api/transactions?limit=50&account=CASH&type=RESERVE&symbol=VCS-FOR-2021"]);
@@ -590,7 +624,7 @@ describe("ledger query cache (per user, per filter combination)", () => {
     try {
       const { ledgerQueries: ledger } = await import("./LedgerTab");
       const { useAccountStore: store } = await import("@/lib/market/account-store");
-      store.setState({ me: { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 0, lockedCash: 0 }, status: "ready" });
+      store.setState({ me: { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 0, lockedCash: 0, unreadNotices: 0 }, status: "ready" });
       const all = ledger.forUser("u1", ALL);
       const cash = ledger.forUser("u1", { ...ALL, account: "CASH" });
       store.setState({ me: null, status: "anon" });

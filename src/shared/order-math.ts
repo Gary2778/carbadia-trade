@@ -1,7 +1,7 @@
 // 下单算术纯函数(计划 §3.5、§4.4):价格取整到 tick、数量取整到 step、金额 ↔ 数量互算、仓位百分比、草稿校验。
 // 单位:价格与金额整数分、数量整数吨。非法输入返回 null(算术)或 DraftError(校验),从不抛错。
-import type { PlaceOrderRequest } from "./api-shapes";
-import type { DraftError, Instrument, OrderType, Side } from "./types";
+import type { OrderTriggerFields, PlaceOrderRequest } from "./api-shapes";
+import type { DraftError, Instrument, OrderType, Side, TriggerDirection, TriggerDraftError } from "./types";
 
 /**
  * 交易输入护栏,与 src/lib/exchange/limits.ts 同值(shared 不得 import lib,order-math.test.ts 断言两边相等)。
@@ -11,8 +11,8 @@ export const MAX_PRICE_CENTS = 100_000_000; // $1,000,000 / 吨
 export const MAX_NOTIONAL_CENTS = 1_000_000_000; // $10,000,000 / 单
 
 /** 正整数步长才有效;其余按 1(tickSize / qtyStep 默认都是 1) */
-const stepOf = (n: number): number => (Number.isSafeInteger(n) && n > 0 ? n : 1);
-const isInt = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n);
+export const stepOf = (n: number): number => (Number.isSafeInteger(n) && n > 0 ? n : 1);
+export const isInt = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n);
 
 /** 价格取整到 tick:BUY 向下、SELL 向上;结果必须 ≥ 1 tick,否则(含非有限输入)返回 null */
 export function roundToTick(priceCents: number, tickSize: number, side: Side): number | null {
@@ -143,4 +143,97 @@ export function validateDraft(draft: OrderDraft, instrument: DraftInstrument, av
   };
   if (draft.clientOrderId) order.clientOrderId = draft.clientOrderId;
   return { ok: true, order };
+}
+
+// ---- 条件单 / 止盈止损 / 价格提醒的草稿校验(P3-06;计划 §6.3.2 C3 的创建校验,客户端先照同样的规则拦一道)----
+// 价格 / 数量输入沿用 validateDraft 的约定:空框 null,垃圾输入 NaN(都算无效)。不检查现金与持仓(创建时不锁资金、不锁持仓,触发时才检查),
+// 唯一的例外是止盈止损的数量不得超过持仓(服务端同样拒)。tick / step / min / max 与 validateDraft 同一组规则
+// (服务端创建条件单时只查价格与数量的上下限和限价单的名义额,下单时也不查 tick / step / min:这三条和普通下单一样是客户端自己的规则,
+// 目的是不让界面产生奇怪的价位 / 数量)。
+// 只有两个对话框用的止盈止损 / 价格提醒校验在 ./trigger-drafts.ts(P3-07 复审:随懒加载的对话框走,不进下单面板的首屏包);
+// 这里留下单面板要用的条件单校验,以及它们共用的几条规则(priceProblem / checkTrigger / failure 等,导出给那个文件)。
+
+/** 最新价已知:正整数(null = 还没有成交过;服务端在最新价为空时放行任意方向) */
+export const isLastPrice = (n: number | null): n is number => isInt(n) && n > 0;
+
+/**
+ * 触发价相对最新价的方向:高于最新价 → ABOVE(价格涨到触发价才触发),低于 → BELOW(跌到触发价)。
+ * 返回 null 的情形:触发价等于最新价(创建即触发,validateTriggerDraft 判 wouldTriggerNow);触发价不是整数;
+ * 最新价未知(null:该标的还没有成交过)—— 此时方向推不出来,由调用方让用户自己选(把选择交给 validateTriggerDraft 的 draft.direction,
+ * 未选则返回 directionNeeded)。
+ */
+export function triggerDirection(triggerPrice: number, lastPrice: number | null): TriggerDirection | null {
+  if (!isInt(triggerPrice) || !isLastPrice(lastPrice)) return null;
+  return triggerPrice > lastPrice ? "ABOVE" : triggerPrice < lastPrice ? "BELOW" : null;
+}
+
+/** 错误归到哪个输入框(P3-07 据此设 aria-invalid、把文案放在框下);form = 不属于某一个框 */
+export type TriggerDraftField = "triggerPrice" | "direction" | "limitPrice" | "quantity" | "takeProfit" | "stopLoss" | "form";
+export type TriggerDraftFailure = { ok: false; reason: TriggerDraftError; field: TriggerDraftField };
+export const failure = (reason: TriggerDraftError, field: TriggerDraftField): TriggerDraftFailure => ({ ok: false, reason, field });
+
+/** 价格输入的三条通用规则:空 / 非整数 / ≤ 0 → invalid;> MAX_PRICE_CENTS → overMaxPrice;不是 tick 倍数 → offTick;通过为 null */
+export function priceProblem(price: number | null, tickSize: number, invalid: TriggerDraftError): TriggerDraftError | null {
+  if (!isInt(price) || price <= 0) return invalid;
+  if (price > MAX_PRICE_CENTS) return "overMaxPrice";
+  if (price % stepOf(tickSize) !== 0) return "offTick";
+  return null;
+}
+
+/**
+ * 触发价本身的校验与方向:价格三条规则 → 方向。最新价已知时方向由触发价与最新价的大小关系定(pick 被忽略),相等 → wouldTriggerNow;
+ * 最新价未知时看 pick(用户选的 ABOVE / BELOW),没选 → directionNeeded。
+ */
+export function checkTrigger(triggerPrice: number | null, pick: TriggerDirection | null | undefined, tickSize: number, lastPrice: number | null): { ok: true; direction: TriggerDirection } | TriggerDraftFailure {
+  const problem = priceProblem(triggerPrice, tickSize, "invalidTrigger");
+  if (problem) return failure(problem, "triggerPrice");
+  if (!isLastPrice(lastPrice)) return pick === "ABOVE" || pick === "BELOW" ? { ok: true, direction: pick } : failure("directionNeeded", "direction");
+  const direction = triggerDirection(triggerPrice!, lastPrice);
+  return direction ? { ok: true, direction } : failure("wouldTriggerNow", "triggerPrice");
+}
+
+/** 条件单草稿:triggerPrice / limitPrice / quantity 是输入框解析后的值;limitPrice 只在 orderType = LIMIT 时用;direction 只在最新价未知时用 */
+export type TriggerDraft = {
+  side: Side;
+  orderType: OrderType;
+  triggerPrice: number | null;
+  limitPrice: number | null;
+  quantity: number | null;
+  direction?: TriggerDirection | null;
+};
+export type TriggerDraftResult = { ok: true; trigger: OrderTriggerFields } | TriggerDraftFailure;
+
+/**
+ * 条件单草稿校验,第一条不通过的规则即返回(顺序固定,界面只显示一条):
+ * 1. 触发价:invalidTrigger → overMaxPrice → offTick,再定方向(wouldTriggerNow / directionNeeded,见 checkTrigger)
+ * 2. LIMIT 的限价:invalidPrice → overMaxPrice → offTick(MARKET 忽略限价)
+ * 3. 数量:invalidQty → belowMinQty → offStep
+ * 4. LIMIT 名义额:overMaxNotional(限价 × 数量 > MAX_NOTIONAL_CENTS,服务端创建时同样查;MARKET 不查)
+ * 通过时给出 submitOrderTrigger 的输入(MARKET 的 limitPrice 为 null)。不查现金 / 持仓。
+ */
+export function validateTriggerDraft(draft: TriggerDraft, instrument: DraftInstrument, lastPrice: number | null): TriggerDraftResult {
+  const trigger = checkTrigger(draft.triggerPrice, draft.direction, instrument.tickSize, lastPrice);
+  if (!trigger.ok) return trigger;
+  const isLimit = draft.orderType === "LIMIT";
+  if (isLimit) {
+    const problem = priceProblem(draft.limitPrice, instrument.tickSize, "invalidPrice");
+    if (problem) return failure(problem, "limitPrice");
+  }
+  const qty = draft.quantity;
+  if (!isInt(qty) || qty <= 0) return failure("invalidQty", "quantity");
+  if (qty < instrument.minQty) return failure("belowMinQty", "quantity");
+  if (qty % stepOf(instrument.qtyStep) !== 0) return failure("offStep", "quantity");
+  if (isLimit && draft.limitPrice! * qty > MAX_NOTIONAL_CENTS) return failure("overMaxNotional", "quantity");
+  return {
+    ok: true,
+    trigger: {
+      assetId: instrument.id,
+      direction: trigger.direction,
+      triggerPrice: draft.triggerPrice!,
+      side: draft.side,
+      orderType: draft.orderType,
+      limitPrice: isLimit ? draft.limitPrice! : null,
+      quantity: qty,
+    },
+  };
 }

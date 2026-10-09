@@ -30,6 +30,8 @@ async function main() {
   await prisma.trade.deleteMany();
   await prisma.order.deleteMany();
   await prisma.holding.deleteMany();
+  await prisma.trigger.deleteMany(); // Trigger / Notification 外键指向 Asset / User, 先于二者删除
+  await prisma.notification.deleteMany();
   await prisma.asset.deleteMany();
   await prisma.user.deleteMany();
 

@@ -27,6 +27,10 @@ export async function register() {
     const { startMarketBot } = await import("./lib/exchange/bot");
     startMarketBot();
   }
+  // 条件单触发引擎(计划 §6.3.2 C4):排在机器人之后,与 BOT_DISABLED 无关(人与人的成交照样触发);TRIGGERS_DISABLED=1 时它自己什么都不做。
+  // 它订阅总线,START_MODE=next(没有 hub)下发布器因此也发 trades。
+  const { startTriggerEngine } = await import("./lib/server/trigger-engine");
+  startTriggerEngine();
   if (process.env.SYNC_DISABLED !== "1") {
     const { startRealSync } = await import("./lib/real-sync");
     startRealSync();

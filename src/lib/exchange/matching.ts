@@ -4,6 +4,8 @@ import type { OrderBookLevel } from "@/shared/types";
 import { MAX_NOTIONAL_CENTS, MAX_PRICE_CENTS } from "./limits";
 import { writeLedger, type LedgerLine } from "./ledger";
 import { publishOrderResult } from "../server/market-publisher";
+import { afterOrderCommit } from "../server/order-hooks";
+import { prismaErrorCode } from "../server/prisma-errors";
 
 export type Side = "BUY" | "SELL";
 export type OrderType = "LIMIT" | "MARKET";
@@ -66,19 +68,6 @@ export type CancelOrderResult = { order: OrderRow };
 
 /** SQLite 单写者下并发双击更常见的是 P2034(写冲突)/ P2028(事务超时)/ P1008(操作超时)而不是 P2002(唯一键) */
 const CONTENTION_CODES = new Set(["P2002", "P2034", "P2028", "P1008"]);
-
-/**
- * Prisma 已知错误的 code 字段;只认字段,不认类:instrumentation 与 route handler 是两个 bundle,各带一份 Prisma 运行时
- *(计划 §1.4、§3.2 三个 realm),生产下 globalThis.prisma 由 instrumentation 那份创建,请求路径里抛出的错误对本 bundle 的
- * Prisma.PrismaClientKnownRequestError 做 instanceof 恒为 false(2026-09-24 Prisma.sql 跨 bundle 事故的镜像)。
- * 判据:Error 实例(同一 V8 realm,Error 是同一个全局)+ 字符串 code(P 开头的 code 是 Prisma 的命名空间;
- * err.name 也是自有属性 "PrismaClientKnownRequestError",但不再多加一个可能写错的字符串条件)。不是 Error 或没有字符串 code → null。
- * retirement.ts 的 P2002 重放分支也用它。
- */
-export function prismaErrorCode(err: unknown): string | null {
-  const code = (err as { code?: unknown } | null)?.code;
-  return err instanceof Error && typeof code === "string" ? code : null;
-}
 
 /** 争用 / 超时错误(code ∈ CONTENTION_CODES):placeOrderTx 按幂等键重读,retirement.ts 映射 503;跨 bundle 同样成立 */
 export function isContentionError(err: unknown): boolean {
@@ -448,10 +437,11 @@ export async function placeOrderTx(input: PlaceOrderInput): Promise<PlaceOrderRe
   }
 }
 
-/** 下单:事务提交(Promise resolve)后把结果交给发布器,失败的事务永不进总线;发布不 await */
+/** 下单:事务提交(Promise resolve)后把结果交给发布器与提交后钩子(成交通知),失败的事务永不进总线;都不 await */
 export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult> {
   const result = await placeOrderTx(input);
   publishOrderResult(result);
+  afterOrderCommit(result);
   return result;
 }
 
@@ -479,10 +469,11 @@ export async function cancelOrderTx(userId: string, orderId: string): Promise<Ca
   }
 }
 
-/** 撤单:事务提交后交给发布器,同 placeOrder */
+/** 撤单:事务提交后交给发布器与提交后钩子,同 placeOrder */
 export async function cancelOrder(userId: string, orderId: string): Promise<CancelOrderResult> {
   const result = await cancelOrderTx(userId, orderId);
   publishOrderResult(result);
+  afterOrderCommit(result);
   return result;
 }
 

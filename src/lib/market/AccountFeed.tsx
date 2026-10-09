@@ -4,7 +4,8 @@
 //   - 只给已登录用户开(P2-13,终审 UI-3):未登录时页面只有登录入口(AccountGate),用不上价格 —— 不连 /ws、不订 ticker:*、不轮询;
 //     登录(含一键演示)之后 meId 有了才启动,登出即停,换人则按新身份重开(startAccountFeed);
 //   - transport 生命周期与 account 订阅和终端同一份代码(MarketProvider.tsx 的 startFeed / subscribeAccountTopic);
-//   - 轮询降级:pollTickers(只拉 /api/market/instruments,翻成 ticker 帧)2 s、pollAccount(持仓 / 余额 + 当前挂单)5 s,
+//   - 轮询降级:pollTickers(只拉 /api/market/instruments,翻成 ticker 帧)2 s、pollAccount(持仓 / 余额 + 当前挂单;不取条件单,
+//     资产页不显示它们 —— includeTriggers: false)5 s,
 //     都只在 connection.transport === "poll" 时打 REST;未登录时不拉行情(页面只有登录入口,用不上价格);
 //     第一次不看可见性(runFirstWhileHidden,P2-12):在后台标签页里打开的资产页在轮询降级下也有首屏数据,之后后台照旧暂停
 //    (终端的 MarketProvider 不变:后台打开的终端回前台才取);
@@ -90,7 +91,7 @@ export function AccountFeed({ initialInstruments, transportMode }: AccountFeedPr
     () => {
       const rt = getMarketRuntime();
       if (!rt || !isPolling() || !meId) return;
-      return pollAccount(meId, rt);
+      return pollAccount(meId, rt, { includeTriggers: false });
     },
     POLL_ACCOUNT_MS,
     meId,

@@ -63,6 +63,28 @@ const account = {
     unpriced: (count: number) => (count === 1 ? "1 holding without a current price is not included." : `${count} holdings without a current price are not included.`),
   },
 
+  // 碳信用的类别与类型名(持仓行的「产地」、分布的分组名):键是 getCreditProfile(lib/exchange/carbon.ts)给的英文名,值是当前语言;
+  // 键里没有的(项目类型的原值)原样显示。两种语言的键必须一致(类型保证),与 carbon.ts 的措辞一致由 src/components/account/credit-names.test.ts 钉住
+  credit: {
+    categories: {
+      "Blue carbon": "Blue carbon",
+      "Clean cookstoves": "Clean cookstoves",
+      "Methane capture": "Methane capture",
+      "Direct air capture": "Direct air capture",
+      Biochar: "Biochar",
+      Forestry: "Forestry",
+      "Wind energy": "Wind energy",
+      "Solar energy": "Solar energy",
+      Other: "Other",
+    },
+    approaches: {
+      Removal: "Removal",
+      Avoidance: "Avoidance",
+      "Mixed / project-specific": "Mixed / project-specific",
+      "Not specified": "Not specified",
+    },
+  },
+
   otc: {
     title: "My OTC listings",
     market: "OTC market",

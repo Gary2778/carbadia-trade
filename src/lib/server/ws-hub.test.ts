@@ -9,7 +9,7 @@ import { approxBytes, createHub, originAllowed, parseAllowedOrigins, zeroWsStats
 import { serverFrameSchema } from "../../../server/ws-schema.mjs";
 import type { AccountEvent, BusMessage } from "@/shared/bus";
 import { auditRefOf } from "@/shared/constants";
-import type { Order, OrderBookSnapshot, Position, TapeEntry } from "@/shared/types";
+import type { Notice, Order, OrderBookSnapshot, Position, TapeEntry, Trigger } from "@/shared/types";
 import type { ServerEvent, Topic } from "@/shared/ws-protocol";
 
 class FakeWs extends EventEmitter {
@@ -95,6 +95,15 @@ function position(assetId: string): Position {
     assetId, symbol: "VCS-FOR-2021", quantity: 10, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 10, retired: 0, lastPrice: 6_800, marketValue: 68_000,
     averagePurchasePrice: null, unrealisedPnl: null, costBasisStatus: "unknown_acquisition_cost", isScenario: false,
   };
+}
+function trigger(id: string): Trigger {
+  return {
+    id, kind: "ORDER", assetId: "a1", symbol: "VCS-FOR-2021", direction: "ABOVE", triggerPrice: 7_200, side: "SELL", orderType: "MARKET", limitPrice: null, quantity: 5,
+    ocoGroupId: null, status: "PENDING", reason: null, orderId: null, firedPrice: null, createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000, firedAt: null,
+  };
+}
+function notice(id: string): Notice {
+  return { id, createdAt: 1_700_000_000_000, readAt: null, kind: "price_alert", triggerId: "t1", symbol: "VCS-FOR-2021", direction: "BELOW", triggerPrice: 6_500, firedPrice: 6_490 };
 }
 async function connected(hub: ReturnType<typeof createHub>, userId: string | null = null) {
   const ws = new FakeWs();
@@ -433,6 +442,26 @@ describe("createHub · 错误码", () => {
     expect(globalThis.__carbadiaTopicSeq?.has("account")).toBe(false);
   });
 
+  it("trigger 与 notice 账户事件与 order / balance 同路:只发给本人的 account 订阅,与其它账户事件共用该用户的 seq,没有订阅的用户不记 seq", async () => {
+    const { hub, bus } = makeHub();
+    const u1 = await subscribed(hub, ["account"], "u1");
+    const u2 = await subscribed(hub, ["account"], "u2");
+    bus.publish({ kind: "account", userId: "u1", event: { t: "trigger", trigger: trigger("t1") } });
+    bus.publish({ kind: "account", userId: "u1", event: { t: "notice", notice: notice("n1"), unread: 2 } });
+    bus.publish({ kind: "account", userId: "u3", event: { t: "notice", notice: notice("n9"), unread: 1 } }); // u3 没有 account 订阅:丢弃
+    bus.publish({ kind: "account", userId: "u1", event: { t: "balance", balance: { cashBalance: 100, lockedCash: 0 } } });
+    await vi.waitFor(() => expect(u1.of("balance")).toHaveLength(1));
+    expect(u1.of("trigger")).toEqual([{ t: "trigger", topic: "account", seq: 1, trigger: trigger("t1") }]);
+    expect(u1.of("notice")).toEqual([{ t: "notice", topic: "account", seq: 2, notice: notice("n1"), unread: 2 }]);
+    expect(u1.of("balance")[0].seq).toBe(3);
+    // u2 没收到别人的事件,它自己的 seq 也没被推进
+    bus.publish({ kind: "account", userId: "u2", event: { t: "notice", notice: notice("n2"), unread: 7 } });
+    await vi.waitFor(() => expect(u2.of("notice")).toHaveLength(1));
+    expect(u2.of("trigger")).toHaveLength(0);
+    expect(u2.of("notice")).toEqual([{ t: "notice", topic: "account", seq: 1, notice: notice("n2"), unread: 7 }]);
+    expect(globalThis.__carbadiaTopicSeq?.has("account")).toBe(false);
+  });
+
   it("account 订阅时若注入了快照来源,逐条发出且带当前 seq", async () => {
     const balance = { cashBalance: 5, lockedCash: 1 };
     const { hub } = makeHub({ accountSnapshot: async (userId) => [{ t: "balance", balance: { ...balance, cashBalance: userId.length } }] });
@@ -441,26 +470,31 @@ describe("createHub · 错误码", () => {
     expect(ws.of("balance")[0]).toEqual({ t: "balance", topic: "account", seq: 0, balance: { cashBalance: 2, lockedCash: 1 } });
   });
 
-  it("没注入选项时每次订阅读 globalThis.__carbadiaAccountSnapshot(发布器挂的钩子),{ balance, orders, positions } 展开为 balance → order → position", async () => {
+  it("没注入选项时每次订阅读 globalThis.__carbadiaAccountSnapshot(发布器挂的钩子),{ balance, orders, positions, triggers } 展开为 balance → order → position → trigger", async () => {
     const { hub } = makeHub();
+    const snapshotKinds = new Set(["balance", "order", "position", "trigger"]);
     const noHook = await subscribed(hub, ["account"], "u1");
     await sleep(20);
-    expect(noHook.events().filter((e) => e.t === "balance" || e.t === "order" || e.t === "position")).toHaveLength(0); // 钩子还没挂:不发快照
+    expect(noHook.events().filter((e) => snapshotKinds.has(e.t))).toHaveLength(0); // 钩子还没挂:不发快照
 
     const hook = vi.fn(async (userId: string) => ({
       balance: { cashBalance: userId.length, lockedCash: 0 },
       orders: [order("o1"), order("o2")],
       positions: [position("a1")],
+      triggers: [trigger("t1"), trigger("t2")],
     }));
     globalThis.__carbadiaAccountSnapshot = hook;
     const ws = await subscribed(hub, ["account"], "u1"); // 钩子在 hub 之后才挂上也能用:订阅时才读
-    await vi.waitFor(() => expect(ws.of("position")).toHaveLength(1));
+    await vi.waitFor(() => expect(ws.of("trigger")).toHaveLength(2));
     expect(hook).toHaveBeenCalledWith("u1");
-    const snapshot = ws.events().filter((e) => e.t === "balance" || e.t === "order" || e.t === "position");
-    expect(snapshot.map((e) => e.t)).toEqual(["balance", "order", "order", "position"]);
+    const snapshot = ws.events().filter((e) => snapshotKinds.has(e.t));
+    // 未完结的条件单排在持仓之后(计划 §6.3.2 C2),与其余快照行同一个 seq
+    expect(snapshot.map((e) => e.t)).toEqual(["balance", "order", "order", "position", "trigger", "trigger"]);
     expect(snapshot[0]).toEqual({ t: "balance", topic: "account", seq: 0, balance: { cashBalance: 2, lockedCash: 0 } });
     expect(snapshot[1]).toMatchObject({ t: "order", topic: "account", seq: 0, order: { id: "o1" } });
     expect(snapshot[3]).toMatchObject({ t: "position", topic: "account", seq: 0, position: { assetId: "a1" } });
+    expect(snapshot[4]).toEqual({ t: "trigger", topic: "account", seq: 0, trigger: trigger("t1") });
+    expect(snapshot[5]).toMatchObject({ t: "trigger", topic: "account", seq: 0, trigger: { id: "t2" } });
   });
 
   it("查询期间该用户有事件流出 → 这份快照可能读于那笔提交之前,不发、重查;重查期间没有事件才发,带与最近一条事件相同的 seq", async () => {
@@ -1141,6 +1175,7 @@ describe("createHub · 订阅去重与背压下的快照", () => {
       balance: { cashBalance: userId.length, lockedCash: 0 },
       orders: [order("o1")],
       positions: [],
+      triggers: [],
     }));
     globalThis.__carbadiaAccountSnapshot = hook; // 生产路径:不注入 accountSnapshot 选项,由发布器挂钩子
     const { hub, bus, flush, scan, connect, op } = fakeClockHub();
@@ -1472,6 +1507,30 @@ describe("approxBytes · 待发事件的字节估计不低于真实 JSON", () =>
         },
       },
       { t: "balance", topic: "account", seq: 1_234_567, balance: { cashBalance: 123_456_789_012, lockedCash: 123_456_789_012 } },
+      // 满字段的条件单(每个可空字段都填上、reason 取最长的、三个时间戳都带):实测约 515 字节,超过 account 行的 512,所以单列一个常数
+      {
+        t: "trigger", topic: "account", seq: 1_234_567,
+        trigger: {
+          id: cuid(1), kind: "ORDER", assetId: cuid(2), symbol: SYM, direction: "ABOVE", triggerPrice: 1_234_567, side: "SELL", orderType: "LIMIT", limitPrice: 1_234_567, quantity: 100_000,
+          ocoGroupId: cuid(3), status: "TRIGGERING", reason: "INSUFFICIENT_CASH", orderId: cuid(4), firedPrice: 1_234_567, createdAt: TS, updatedAt: TS, firedAt: TS,
+        },
+      },
+      // 三种通知载荷:约 306–379 字节(trigger 载荷最长),与 account 行同档
+      {
+        t: "notice", topic: "account", seq: 1_234_567, unread: 12_345,
+        notice: { id: cuid(1), createdAt: TS, readAt: TS, kind: "fill", orderId: cuid(2), symbol: SYM, side: "BUY", role: "TAKER", quantity: 100_000, price: 1_234_567, orderStatus: "PARTIAL" },
+      },
+      {
+        t: "notice", topic: "account", seq: 1_234_567, unread: 12_345,
+        notice: {
+          id: cuid(1), createdAt: TS, readAt: TS, kind: "trigger", triggerId: cuid(2), symbol: SYM, outcome: "REJECTED", reason: "INSUFFICIENT_QTY", side: "BUY", quantity: 100_000,
+          triggerPrice: 1_234_567, orderId: cuid(3),
+        },
+      },
+      {
+        t: "notice", topic: "account", seq: 1_234_567, unread: 12_345,
+        notice: { id: cuid(1), createdAt: TS, readAt: TS, kind: "price_alert", triggerId: cuid(2), symbol: SYM, direction: "BELOW", triggerPrice: 1_234_567, firedPrice: 1_234_567 },
+      },
       { t: "subscribed", topic: `candles:${SYM}:15m`, seq: 1_234_567 },
       { t: "unsubscribed", topic: `candles:${SYM}:15m` },
       { t: "resync", topic: `candles:${SYM}:15m`, reason: "backpressure" },

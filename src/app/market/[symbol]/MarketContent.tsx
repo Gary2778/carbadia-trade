@@ -114,14 +114,14 @@ export function MarketContent({ symbol }: { symbol: string }) {
       </nav>
       {err && <div className="text-danger text-sm">{t.refreshFailed}</div>}
 
-      <header className="rounded-2xl border border-border bg-surface shadow-card p-5 flex flex-wrap items-center gap-x-8 gap-y-3">
+      <header className="rounded-panel border border-border bg-surface shadow-card p-5 flex flex-wrap items-center gap-x-8 gap-y-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-bold">{asset.symbol}</h1>
             <span className="rounded bg-surface-2 border border-border px-2 py-0.5 text-xs">
               {asset.standard}
             </span>
-            <span className="rounded-full bg-accent/10 border border-accent/20 px-2 py-0.5 text-xs text-accent">
+            <span className="rounded-chip bg-accent/10 border border-accent/20 px-2 py-0.5 text-xs text-accent">
               {asset.isScenario
                 ? zh
                   ? "配额／指数情景"
@@ -213,13 +213,13 @@ export function MarketContent({ symbol }: { symbol: string }) {
 
       <nav
         aria-label={zh ? "标的查看" : "Instrument view"}
-        className="flex w-fit gap-1 rounded-full border border-border bg-surface p-1 text-sm font-medium"
+        className="flex w-fit gap-1 rounded-control border border-border bg-surface p-1 text-sm font-medium"
       >
         <Link
           href={viewHref("overview")}
           scroll={false}
           aria-current={view === "overview" ? "page" : undefined}
-          className={`rounded-full px-5 py-2 transition-colors ${view === "overview" ? "bg-accent text-background" : "text-muted hover:text-foreground hover:bg-surface-2"}`}
+          className={`rounded-chip px-5 py-2 transition-colors ${view === "overview" ? "bg-accent text-background" : "text-muted hover:text-foreground hover:bg-surface-2"}`}
         >
           {zh ? "总览" : "Overview"}
         </Link>
@@ -227,7 +227,7 @@ export function MarketContent({ symbol }: { symbol: string }) {
           href={viewHref("trade")}
           scroll={false}
           aria-current={view === "trade" ? "page" : undefined}
-          className={`rounded-full px-5 py-2 transition-colors ${view === "trade" ? "bg-accent text-background" : "text-muted hover:text-foreground hover:bg-surface-2"}`}
+          className={`rounded-chip px-5 py-2 transition-colors ${view === "trade" ? "bg-accent text-background" : "text-muted hover:text-foreground hover:bg-surface-2"}`}
         >
           {zh ? "交易" : "Trade"}
         </Link>
@@ -246,18 +246,18 @@ export function MarketContent({ symbol }: { symbol: string }) {
         <>
           {/* 简易交易在本页;高级交易(限价 / 市价、盘口、K 线)是终端 /trade/<symbol>,方向随 ?side= 带过去 */}
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex gap-1 rounded-full border border-border bg-surface p-1 text-sm">
+            <div className="flex gap-1 rounded-control border border-border bg-surface p-1 text-sm">
               <Link
                 href={`${pathname}?tab=trade&side=${initialSide}`}
                 scroll={false}
                 aria-current="page"
-                className="rounded-full px-4 py-1.5 transition-colors bg-accent/10 font-medium text-accent"
+                className="rounded-chip px-4 py-1.5 transition-colors bg-accent/10 font-medium text-accent"
               >
                 {zh ? "简易" : "Simple"}
               </Link>
               <Link
                 href={terminalHref(asset.symbol, `side=${initialSide}`)}
-                className="rounded-full px-4 py-1.5 transition-colors text-muted hover:bg-surface-2"
+                className="rounded-chip px-4 py-1.5 transition-colors text-muted hover:bg-surface-2"
               >
                 {zh ? "高级" : "Advanced"}
               </Link>

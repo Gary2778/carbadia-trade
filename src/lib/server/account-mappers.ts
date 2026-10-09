@@ -1,12 +1,28 @@
 // Prisma 行 → 共享类型(计划 §3.5 Order / Fill / Position / LedgerLineView)。REST 与发布器共用同一份映射,时间转 unix ms,不外露 userId。
 // P1-07 提供 toOrder / toFill / ledgerIdsByTrade;P1-09 补 toPosition / toLedgerLineView / avgFillPricesByOrder;P1-22d 补 selfTradeCancelledIds;
-// P2-03 给 toPosition 加 lockedBy(持仓的查询在 positions.ts)。
-import type { Holding, LedgerEntry, Prisma } from "@/generated/prisma";
+// P2-03 给 toPosition 加 lockedBy(持仓的查询在 positions.ts);P3-02 补 toTrigger / toNotice(条件单与通知,计划 §6.3.2 C2)。
+import type { Holding, LedgerEntry, Notification as NotificationRow, Prisma, Trigger as TriggerRow } from "@/generated/prisma";
 import type { OrderRow, TradeRow } from "../exchange/matching";
 import { reconstructPositionBasis, type CostBasisLedgerLine } from "../exchange/portfolio-analysis";
 import { auditRefOf } from "@/shared/constants";
 import { takerSideOf } from "@/shared/taker";
-import type { CancelReason, Fill, LedgerLineView, Order, OrderStatus, OrderType, Position, Side } from "@/shared/types";
+import type {
+  CancelReason,
+  Fill,
+  LedgerLineView,
+  Notice,
+  NoticePayload,
+  Order,
+  OrderStatus,
+  OrderType,
+  Position,
+  Side,
+  Trigger,
+  TriggerDirection,
+  TriggerKind,
+  TriggerReason,
+  TriggerStatus,
+} from "@/shared/types";
 
 /**
  * cancelReason 不落库,由映射派生(计划 §9.1 第 24、41 条):
@@ -204,4 +220,115 @@ export async function avgFillPricesByOrder(
     result.set(order.id, complete ? Math.round(total.cost / total.quantity) : null);
   }
   return result;
+}
+
+// ---- 条件单与通知(P3-02,计划 §6.3.2 C1 / C2)----
+// Trigger / Notification 的字符串列都是自由 TEXT,读取边界一律经下面的小收窄函数,不用 as 断言。
+// 未知值(只可能来自手工改库或旧 / 新镜像互相回滚)落到各自文档里写明的安全回退,不抛错、不让一行脏数据拖垮整页列表。
+
+const SIDES = ["BUY", "SELL"] as const satisfies readonly Side[];
+const ORDER_TYPES = ["LIMIT", "MARKET"] as const satisfies readonly OrderType[];
+const ORDER_STATUSES = ["OPEN", "PARTIAL", "FILLED", "CANCELLED"] as const satisfies readonly OrderStatus[];
+const TRIGGER_KINDS = ["ORDER", "ALERT"] as const satisfies readonly TriggerKind[];
+const TRIGGER_DIRECTIONS = ["ABOVE", "BELOW"] as const satisfies readonly TriggerDirection[];
+const TRIGGER_STATUSES = ["PENDING", "TRIGGERING", "TRIGGERED", "REJECTED", "CANCELLED"] as const satisfies readonly TriggerStatus[];
+const TRIGGER_REASONS = ["USER", "OCO", "INSUFFICIENT_CASH", "INSUFFICIENT_QTY", "NO_FILL", "INVALID"] as const satisfies readonly TriggerReason[];
+const OUTCOMES = ["TRIGGERED", "REJECTED", "CANCELLED"] as const satisfies readonly Extract<NoticePayload, { kind: "trigger" }>["outcome"][];
+const ROLES = ["MAKER", "TAKER"] as const satisfies readonly Extract<NoticePayload, { kind: "fill" }>["role"][];
+
+/** 值在名单里就原样返回(类型随名单收窄),否则 null;名单是 as const 的字面量元组,find 的返回类型就是联合,不需要断言 */
+function oneOf<T extends string>(list: readonly T[], value: unknown): T | null {
+  return list.find((item) => item === value) ?? null;
+}
+/** 订单行的 side / status 列(TEXT)收窄成共享类型;未知值(只可能来自手工改库)返回 null,调用方跳过 */
+export const narrowSide = (value: string): Side | null => oneOf(SIDES, value);
+export const narrowOrderStatus = (value: string): OrderStatus | null => oneOf(ORDER_STATUSES, value);
+/** 非负安全整数:分与吨(与 ws-schema 的 cents / tonnes 同口径) */
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+const isNonEmptyString = (v: unknown): v is string => typeof v === "string" && v !== "";
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** 未知状态当 CANCELLED:界面只把 PENDING / TRIGGERING 当「未完结」,脏状态宁可显示成已撤销,也不能冒出一条永远等不到触发的幻影条件单 */
+const narrowTriggerStatus = (s: string): TriggerStatus => oneOf(TRIGGER_STATUSES, s) ?? "CANCELLED";
+/** 未知类型当 ALERT:提醒不下单,即便行上带了下单字段也不会被当成会成交的条件单 */
+const narrowTriggerKind = (s: string): TriggerKind => oneOf(TRIGGER_KINDS, s) ?? "ALERT";
+/** 方向没有「安全」的值,只用于显示(触发引擎读的是库里的行,不是这个映射),未知时回 ABOVE */
+const narrowTriggerDirection = (s: string): TriggerDirection => oneOf(TRIGGER_DIRECTIONS, s) ?? "ABOVE";
+
+/**
+ * 条件单行 → 共享 Trigger(计划 §6.3.2 C2):symbol 由调用方带上(查询时 include asset 或按 assetId 取),时间转 unix ms,不外露 userId / clientKey。
+ * 可空的枚举列(side / orderType / reason)未知值一律回 null(界面当「没有」处理)。
+ */
+export function toTrigger(row: TriggerRow, symbol: string): Trigger {
+  return {
+    id: row.id,
+    kind: narrowTriggerKind(row.kind),
+    assetId: row.assetId,
+    symbol,
+    direction: narrowTriggerDirection(row.direction),
+    triggerPrice: row.triggerPrice,
+    side: oneOf(SIDES, row.side),
+    orderType: oneOf(ORDER_TYPES, row.orderType),
+    limitPrice: row.limitPrice,
+    quantity: row.quantity,
+    ocoGroupId: row.ocoGroupId,
+    status: narrowTriggerStatus(row.status),
+    reason: oneOf(TRIGGER_REASONS, row.reason),
+    orderId: row.orderId,
+    firedPrice: row.firedPrice,
+    createdAt: row.createdAt.getTime(),
+    updatedAt: row.updatedAt.getTime(),
+    firedAt: row.firedAt?.getTime() ?? null,
+  };
+}
+
+/**
+ * payload 的 JSON 解出来之后逐字段核对,收窄成 NoticePayload;缺字段、类型不对、枚举值未知都返回 null。
+ * 按字段重建新对象,JSON 里多出来的键不会带进响应。可空字段(reason / side / quantity / orderId)要显式是 null,缺了就是不匹配。
+ */
+function noticePayloadOf(value: unknown): NoticePayload | null {
+  if (!isRecord(value)) return null;
+  switch (value.kind) {
+    case "fill": {
+      const { orderId, symbol, side, role, quantity, price, orderStatus } = value;
+      const checkedSide = oneOf(SIDES, side);
+      const checkedRole = oneOf(ROLES, role);
+      const checkedStatus = oneOf(ORDER_STATUSES, orderStatus);
+      if (!isNonEmptyString(orderId) || !isNonEmptyString(symbol) || !checkedSide || !checkedRole || !isCount(quantity) || !isCount(price) || !checkedStatus) return null;
+      return { kind: "fill", orderId, symbol, side: checkedSide, role: checkedRole, quantity, price, orderStatus: checkedStatus };
+    }
+    case "trigger": {
+      const { triggerId, symbol, outcome, reason, side, quantity, triggerPrice, orderId } = value;
+      const checkedOutcome = oneOf(OUTCOMES, outcome);
+      const checkedReason = reason === null ? null : oneOf(TRIGGER_REASONS, reason);
+      const checkedSide = side === null ? null : oneOf(SIDES, side);
+      if (!isNonEmptyString(triggerId) || !isNonEmptyString(symbol) || !checkedOutcome || !isCount(triggerPrice)) return null;
+      if ((reason !== null && !checkedReason) || (side !== null && !checkedSide) || (quantity !== null && !isCount(quantity)) || (orderId !== null && !isNonEmptyString(orderId))) return null;
+      return { kind: "trigger", triggerId, symbol, outcome: checkedOutcome, reason: checkedReason, side: checkedSide, quantity, triggerPrice, orderId };
+    }
+    case "price_alert": {
+      const { triggerId, symbol, direction, triggerPrice, firedPrice } = value;
+      const checkedDirection = oneOf(TRIGGER_DIRECTIONS, direction);
+      if (!isNonEmptyString(triggerId) || !isNonEmptyString(symbol) || !checkedDirection || !isCount(triggerPrice) || !isCount(firedPrice)) return null;
+      return { kind: "price_alert", triggerId, symbol, direction: checkedDirection, triggerPrice, firedPrice };
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * 通知行 → 共享 Notice(计划 §6.3.2 C2):payload 列是 JSON 文本,解析失败或与 NoticePayload 对不上就返回 null,调用方跳过这一行
+ * (不抛错:一行脏数据不该让整页通知打不开)。载荷自己的 kind 是判别式,Notification.kind 列只是查询用的冗余,这里不交叉校验。不外露 userId / dedupeKey。
+ */
+export function toNotice(row: NotificationRow): Notice | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.payload);
+  } catch {
+    return null;
+  }
+  const payload = noticePayloadOf(parsed);
+  if (!payload) return null;
+  return { id: row.id, createdAt: row.createdAt.getTime(), readAt: row.readAt?.getTime() ?? null, ...payload };
 }

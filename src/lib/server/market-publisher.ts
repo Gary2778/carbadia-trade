@@ -48,17 +48,19 @@
 // account 订阅快照与事件之间的先后由 hub 的 seq 检查负责(查询期间有事件流出就重查)。
 // 票号表按用户回收(见 sweepTickets):用户离线后每分钟清扫一次,回收之后才返回的旧读取按「已被取代」丢掉;终结的挂单一发布就删;
 // 掉线期间有提交动到的条目不等清扫、当场删(见上「提交时用户不在线」)。
-// 做市机器人账户不发 account 事件(机器人名单首次需要时查一次库,挂在 __carbadiaPublisherState 上)。
+// 做市机器人账户不发 account 事件(机器人名单首次需要时查一次库、或由机器人循环每轮顺带放进来(seedBotUserIds),挂在 __carbadiaPublisherState 上;
+// 提交后钩子 order-hooks.ts 共用这份名单)。
 // 所有计时器 unref():测试与 SIGTERM 不被挂住。
 import type { AccountEvent, CarbadiaBus } from "../../shared/bus";
 import { bucketUpdate, INTERVAL_MS } from "../../shared/candle-live";
 import { auditRefOf, CANDLE_INTERVALS } from "../../shared/constants";
 import { diffBook } from "../../shared/orderbook";
-import type { Balance, CandleBar, Order, OrderBookSnapshot, Position, Side, TapeEntry, TickerUpdate } from "../../shared/types";
+import type { Balance, CandleBar, Order, OrderBookSnapshot, Position, Side, TapeEntry, TickerUpdate, Trigger } from "../../shared/types";
 import type { CancelOrderResult, OrderRow, PlaceOrderResult, TradeRow } from "../exchange/matching";
 import { getOrderBook } from "../exchange/matching";
 import { stats24h, type Stats24h } from "../exchange/stats24h";
 import { avgFillPricesByOrder, ledgerIdsByTrade, selfTradeCancelledIds, toFill, toOrder } from "./account-mappers";
+import { openTriggersRead, triggersFromRows } from "./account-pages";
 import { getBus } from "./bus";
 import { prisma } from "./db";
 import { WS_TAPE_RING } from "../../shared/ws-protocol";
@@ -75,8 +77,11 @@ export const STATS_TTL_MS = 10_000;
 /** 发给 hub 的盘口深度 = 客户端最大深度选项 */
 export const BOOK_DEPTH = 50;
 
-/** account 订阅时 hub 要的快照(计划 §3.3「snapshot-on-subscribe」的 account 段);hub 零 DB,经 globalThis 钩子取 */
-export type AccountSnapshot = { balance: Balance; orders: Order[]; positions: Position[] };
+/**
+ * account 订阅时 hub 要的快照(计划 §3.3「snapshot-on-subscribe」的 account 段);hub 零 DB,经 globalThis 钩子取。
+ * triggers = 未完结(PENDING / TRIGGERING)的条件单,hub 排在 positions 之后发(计划 §6.3.2 C2)
+ */
+export type AccountSnapshot = { balance: Balance; orders: Order[]; positions: Position[]; triggers: Trigger[] };
 
 /**
  * refreshBook 的结果:found = 库里有这个 symbol。hub 只用它区分「查无此 symbol」——那就不再为它请刷新(直到下一次订阅),
@@ -263,14 +268,14 @@ function knownBot(userId: string): boolean {
 }
 
 /** 本 bundle 在途的机器人名单查询(两个 bundle 各至多查一次,之后都读 globalThis 上的结果) */
-let botIdsLoading: Promise<ReadonlySet<string>> | null = null;
+let botIdsLoading: Promise<ReadonlySet<string> | null> | null = null;
 
 /**
- * 做市机器人的 userId 集合。机器人不发 account 事件(P1-25b 让机器人账户不能登录;这里是 WS 一侧的收口,
- * 也挡住在那之前签出、hub 仍能验过的旧会话)。首次需要时查一次库,结果挂在 __carbadiaPublisherState 上;
- * 机器人账户只由种子创建,进程内不会新增。查库失败时本次按「没有机器人」处理、下次再查,不因此丢掉真人用户的事件。
+ * 做市机器人的 userId 集合;查库失败返回 null(记日志,下次再查)—— 「不知道」不等于「没有机器人」,
+ * 提交后钩子(order-hooks.ts)据此宁可丢一批通知,也不给机器人写通知。首次需要时查一次库,结果挂在 __carbadiaPublisherState 上,
+ * 发布器与钩子共用这一份。机器人账户只由种子创建,进程内不会新增。
  */
-async function botUserIds(): Promise<ReadonlySet<string>> {
+export async function loadBotUserIds(): Promise<ReadonlySet<string> | null> {
   const known = publisherState().botUserIds;
   if (known) return new Set(known);
   botIdsLoading ??= prisma.user
@@ -282,12 +287,33 @@ async function botUserIds(): Promise<ReadonlySet<string>> {
     })
     .catch((err) => {
       logError("bot user lookup failed", err);
-      return new Set<string>();
+      return null;
     })
     .finally(() => {
       botIdsLoading = null;
     });
   return botIdsLoading;
+}
+
+/** 已查到的机器人名单(同步、不查库);还没查过 → null。提交后钩子靠它在名单已知时同步跳过机器人对机器人的成交 */
+export function knownBotUserIds(): readonly string[] | null {
+  return publisherState().botUserIds;
+}
+
+/**
+ * 机器人循环每轮读完机器人账户后把名单放进同一份缓存(bot.ts 的 tick,不多查一次库):机器人在跑的进程里,提交后钩子的
+ * 机器人对机器人快路径从第一笔成交起就成立,发布器也不必再为名单查库。机器人没跑(BOT_DISABLED)时缓存仍由首次需要时的查库填。
+ */
+export function seedBotUserIds(ids: readonly string[]): void {
+  publisherState().botUserIds = [...ids];
+}
+
+/**
+ * 机器人不发 account 事件(P1-25b 让机器人账户不能登录;这里是 WS 一侧的收口,也挡住在那之前签出、hub 仍能验过的旧会话)。
+ * 查库失败时本次按「没有机器人」处理、下次再查,不因此丢掉真人用户的事件。
+ */
+async function botUserIds(): Promise<ReadonlySet<string>> {
+  return (await loadBotUserIds()) ?? new Set<string>();
 }
 
 function logError(what: string, err: unknown) {
@@ -774,8 +800,9 @@ function publishPositionRows(bus: CarbadiaBus, userId: string, positions: readon
 
 /**
  * account 订阅时的快照:balance + 当前挂单(OPEN / PARTIAL,与 GET /api/account/orders?status=open 同序)+ 持仓
+ * + 未完结的条件单(PENDING / TRIGGERING,与 GET /api/account/triggers?status=open 同序;P3-03)
  *(hub 经 globalThis.__carbadiaAccountSnapshot 调用)。持仓与 GET /api/account/positions 同一口径(positions.ts):数量 > 0 的行,
- * 加上整仓注销的行(数量 0、retired > 0),带锁定来源 lockedBy。余额、挂单与持仓的五个读取(持仓行、账本、注销、SELL 挂单汇总、
+ * 加上整仓注销的行(数量 0、retired > 0),带锁定来源 lockedBy。余额、挂单、条件单与持仓的五个读取(持仓行、账本、注销、SELL 挂单汇总、
  * 场外挂牌汇总)放进同一个批量事务:看到的是同一个提交点,不会出现「余额已含某笔成交、挂单还是成交前」的拼接快照。
  * 挂单均价在事务之后按成交重算(需要挂单 id):只有成交合计恰好等于行上的 filledQuantity 才给值,读到中间态时是 null,不会给错数。
  * 快照不领持仓票号:票号只裁决事件之间的先后;快照若采用票号,在途的事件读取会被丢掉,而快照只发给正在订阅的那条连接,
@@ -784,13 +811,14 @@ function publishPositionRows(bus: CarbadiaBus, userId: string, positions: readon
 export async function loadAccountSnapshot(userId: string): Promise<AccountSnapshot> {
   // 机器人账户没有 account 流(见 botUserIds):拒绝,hub 记一行、不发;它的账本很大,也不该为一个旧会话整本读一遍
   if ((await botUserIds()).has(userId)) throw new Error("bot accounts have no account stream");
-  const [balanceRow, orderRows, ...positionRows] = await prisma.$transaction([
+  const [balanceRow, orderRows, triggerRows, ...positionRows] = await prisma.$transaction([
     prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { cashBalance: true, lockedCash: true } }),
     prisma.order.findMany({
       where: { userId, status: { in: ["OPEN", "PARTIAL"] } },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       include: { asset: { select: { symbol: true } } },
     }),
+    openTriggersRead(prisma, userId),
     ...positionReads(prisma, userId),
   ]);
   const avg = await avgFillPricesByOrder(prisma, orderRows);
@@ -798,6 +826,7 @@ export async function loadAccountSnapshot(userId: string): Promise<AccountSnapsh
     balance: { cashBalance: Number(balanceRow.cashBalance), lockedCash: Number(balanceRow.lockedCash) }, // BigInt → number
     orders: orderRows.map((row) => toOrder(row, avg.has(row.id) ? avg.get(row.id) : undefined)),
     positions: await positionsFromRows(prisma, userId, positionRows),
+    triggers: triggersFromRows(triggerRows),
   };
 }
 

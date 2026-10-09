@@ -147,13 +147,8 @@ export function lockSourcesOf(position: { lockedBy?: Position["lockedBy"] | null
   return sources && Number.isFinite(sources.orders) && Number.isFinite(sources.otc) ? sources : null;
 }
 
-/** 行情 store 里某个标的的最新价:逐笔推送的 ticker 优先,其次标的列表里的 lastPrice;都没有 → null */
-export function lastPriceOf(
-  state: { tickers: Readonly<Record<string, { lastPrice: number | null } | undefined>>; instruments: Readonly<Record<string, { lastPrice: number | null } | undefined>> },
-  symbol: string,
-): number | null {
-  return state.tickers[symbol]?.lastPrice ?? state.instruments[symbol]?.lastPrice ?? null;
-}
+/** 行情 store 里某个标的的最新价(定义在 ./last-price.ts,下单面板也用;这里原样再导出,既有调用方不用改) */
+export { lastPriceOf } from "./last-price";
 
 export type PositionValue = {
   /** 估值用的价格:行情的最新价,行情里没有时退回持仓事件自带的那个;null = 从未成交 */

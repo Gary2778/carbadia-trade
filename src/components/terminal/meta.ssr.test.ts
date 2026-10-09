@@ -425,6 +425,8 @@ describe("VintageSelector", () => {
   it("lists the other vintages of the project as links, not the current one", () => {
     const html = renderVintages("VCS-FOR-2021");
     expect(html).toContain(`aria-label="${en.terminal.instruments.vintages}"`);
+    // 看得见的那行字只在 ≥ 100rem 显示(头部 1280 宽要放进一行);它是 aria-hidden,读屏念的是 nav 的 aria-label
+    expect(html).toContain(`<span aria-hidden="true" class="text-t-2xs text-muted-2 max-[100rem]:hidden">${en.terminal.instruments.vintages}</span>`);
     expect(hrefs(html)).toEqual(["/trade/VCS-FOR-2022", "/trade/VCS-FOR-2023"]);
     expect(html).not.toContain('data-symbol="VCS-FOR-2021"');
     expect(html).toContain(">2022<");

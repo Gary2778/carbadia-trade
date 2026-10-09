@@ -10,8 +10,9 @@ import { DemoBadge } from "./terminal/DemoBadge";
 
 // §9.1 第 7 条:不引 jsdom,只做 renderToStaticMarkup 的服务端标记测试;没有 LangProvider 时 useT 落到默认英文。
 // Nav 的 usePathname / useRouter 在 App Router 之外没有上下文,按 next/navigation 的模块边界打桩。
+const nav = vi.hoisted(() => ({ pathname: "/otc" }));
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/otc",
+  usePathname: () => nav.pathname,
   useRouter: () => ({ push: () => {}, refresh: () => {} }),
 }));
 
@@ -22,6 +23,7 @@ const TOKENS_ONLY_VIOLATION =
   /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsl\(|\b\d+(\.\d+)?px\b|(text|bg|border|ring|fill|stroke|from|to)-(amber|red|green|blue|slate|gray|zinc|neutral|stone|emerald|rose|sky|indigo|orange|yellow|lime|teal|cyan|violet|purple|fuchsia|pink)-\d|text-\[|min-h-\[|w-\[\d|h-\[\d|z-\[/;
 
 beforeEach(() => {
+  nav.pathname = "/otc";
   useAccountStore.setState(createInitialAccountState(), true);
 });
 
@@ -33,7 +35,7 @@ describe("DemoBadge", () => {
       expect(html).toContain(`>${en.nav.demoBadge}<`);
       expect(html).toContain(`title="${en.nav.demoTooltip}"`);
       expect(html).toContain("text-warning");
-      expect(html).toContain("rounded-pill");
+      expect(html).toContain("rounded-chip");
     }
     expect(compact).toContain('data-demo-badge="compact"');
     expect(compact).toContain("text-t-2xs");
@@ -66,26 +68,49 @@ describe("Nav", () => {
     expect(html).not.toContain('href="/portfolio"');
   });
 
+  // P3-05:「总览」(/trade/markets)夹在「行情」与「Terminal」之间;桌面导航与手机菜单读同一份 LINKS,所以手机菜单里顺序与高亮规则相同
+  it("lists Overview between Markets and Terminal, pointing at /trade/markets, in the desktop nav and (same LINKS array) the phone menu", () => {
+    const html = renderToStaticMarkup(createElement(Nav));
+    const order = ['href="/"', 'href="/trade/markets"', 'href="/trade"', 'href="/otc"', 'href="/trade/account"'].map((needle) => html.indexOf(needle, html.indexOf("<nav")));
+    expect(order.every((i) => i > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(html).toContain(`>${en.nav.overview}<`);
+    expect(source("./Nav.tsx").match(/\{LINKS\.map\(/g)).toHaveLength(2); // 桌面一处、手机菜单一处
+    expect(en.nav.overview).toBe("Overview");
+  });
+
+  it("on /trade/markets the Overview link is the current page and Terminal is not", () => {
+    nav.pathname = "/trade/markets";
+    const html = renderToStaticMarkup(createElement(Nav));
+    expect(html).toMatch(/aria-current="page"[^>]*href="\/trade\/markets"/);
+    expect(html).not.toMatch(/aria-current="page"[^>]*href="\/trade"/);
+    expect(count(html, 'aria-current="page"')).toBe(1);
+  });
+
   // P2-10(计划 §6.2.2 C8):/trade/account 亮「持仓」,其余 /trade* 亮「Terminal」;/orders、/retirement、/transactions、/account 仍亮「持仓」
-  it("highlights Portfolio on /trade/account and the old account pages, and Terminal on every other /trade path", () => {
-    const active = (pathname: string) => ["/", "/trade", "/otc", "/trade/account"].filter((href) => isActive(href, pathname));
+  it("highlights Portfolio on /trade/account and the old account pages, Overview on /trade/markets, and Terminal on every other /trade path", () => {
+    const active = (pathname: string) => ["/", "/trade/markets", "/trade", "/otc", "/trade/account"].filter((href) => isActive(href, pathname));
     expect(active("/trade/account")).toEqual(["/trade/account"]);
     expect(active("/trade/account/")).toEqual(["/trade/account"]);
+    // P3-05:总览页亮「总览」,不亮「Terminal」(也不亮「行情」:那一项只认 / 与旧行情页)
+    expect(active("/trade/markets")).toEqual(["/trade/markets"]);
+    expect(active("/trade/markets/")).toEqual(["/trade/markets"]);
     for (const pathname of ["/trade", "/trade/VCS-FOR-2021", "/trade/CEA-SCEN-2026"]) expect(active(pathname), pathname).toEqual(["/trade"]);
-    // 形如 /trade/accountX 的不是资产页
+    // 形如 /trade/accountX、/trade/marketsX 的不是资产页、总览页
     expect(active("/trade/accounts")).toEqual(["/trade"]);
+    expect(active("/trade/marketsX")).toEqual(["/trade"]);
     for (const pathname of ["/orders", "/retirement", "/transactions", "/account"]) expect(active(pathname), pathname).toEqual(["/trade/account"]);
     for (const pathname of ["/", "/market/VCS-FOR-2021", "/projects", "/watchlist"]) expect(active(pathname), pathname).toEqual(["/"]);
     expect(active("/otc")).toEqual(["/otc"]);
   });
 
-  it("keeps the brand on one line at phone width: leaf alone below 23rem, short wordmark up to sm, full name from sm; badge never hidden or shrunk, token gaps", () => {
+  it("keeps the brand on one line at phone width: leaf alone below 23.25rem, short wordmark up to sm, full name from sm; badge never hidden or shrunk, token gaps", () => {
     const html = renderToStaticMarkup(createElement(Nav));
     // 品牌链接:可访问名恒为全称(字标隐藏时也是);可收缩(min-w-0)而不是把徽标挤到右侧控件上
     expect(html).toMatch(/<a[^>]*aria-label="Carbadia Trade"[^>]*class="[^"]*\bmin-w-0\b[^"]*"[^>]*href="\/"|<a[^>]*href="\/"[^>]*aria-label="Carbadia Trade"[^>]*class="[^"]*\bmin-w-0\b/);
-    // 三段只靠 CSS 显隐(SSR 与首帧一致):< 23rem 只有叶子;23rem–sm 只有 Carbadia(单行,truncate 兜底);sm 起叶子 + Carbadia Trade
-    expect(html).toContain('<span class="hidden text-accent text-lg max-[23rem]:inline sm:inline">🌿</span>');
-    expect(html).toContain('<span class="truncate max-[23rem]:hidden">Carbadia<span class="hidden sm:inline"> Trade</span></span>');
+    // 三段只靠 CSS 显隐(SSR 与首帧一致):< 23.25rem 只有叶子;23.25rem–sm 只有 Carbadia(单行,truncate 兜底);sm 起叶子 + Carbadia Trade
+    expect(html).toContain('aria-hidden="true" class="hidden shrink-0 max-[23.25rem]:inline sm:inline"><path fill="#2ee27f"');
+    expect(html).toContain('<span class="truncate max-[23.25rem]:hidden">Carbadia<span class="hidden sm:inline"> Trade</span></span>');
     // 断点用 rem,不写 px(§4.6)
     expect(source("./Nav.tsx")).not.toMatch(/(max|min)-\[\d+px\]/);
     // 徽标任何宽度都在(§4.3):自身与所在的品牌行都没有任何 hidden 变体;shrink-0 由 DemoBadge 自带
@@ -98,17 +123,25 @@ describe("Nav", () => {
     expect(html).toMatch(/class="max-w-7xl[^"]*\bgap-3\b/);
   });
 
-  it("paints no account area during SSR, whatever the store holds (markup never depends on store state)", () => {
+  it("paints no account area (and no notification bell) during SSR, whatever the store holds (markup never depends on store state)", () => {
     const empty = renderToStaticMarkup(createElement(Nav));
     expect(empty).not.toContain(en.nav.login);
     expect(empty).not.toContain(en.nav.logout);
     useAccountStore.setState({
-      me: { id: "u-1", email: "a@example.com", name: "Alice", cashBalance: 12_345, lockedCash: 0 },
+      me: { id: "u-1", email: "a@example.com", name: "Alice", cashBalance: 12_345, lockedCash: 0, unreadNotices: 5 },
       balance: { cashBalance: 12_345, lockedCash: 0 },
+      unreadNotices: 5,
       status: "ready",
     });
     const hydrated = renderToStaticMarkup(createElement(Nav));
     expect(hydrated).toBe(empty);
+    // 铃铛(P3-08)也一样:没登录态、没未读数时都不画,SSR 与水合首帧里没有它
+    expect(empty).not.toContain("aria-haspopup=\"dialog\"");
+  });
+
+  it("caps the user name (registration allows 40 characters) so a long one cannot squeeze the wordmark", () => {
+    // 账户区只在挂载后才画(SSR 不画),所以按源码钉
+    expect(source("./Nav.tsx")).toContain('<span className="max-w-24 truncate text-muted">{tUserName(me.name, lang)}</span>');
   });
 
   it("no longer borrows the direction colour for the destructive logout action", () => {

@@ -8,6 +8,8 @@ import { isChinese } from "@/i18n/config";
 import { tName } from "@/i18n/data";
 import { api, ApiError } from "@/lib/http/client";
 import { fmtQty } from "@/lib/format";
+import { formatTime } from "@/lib/time-format";
+import { useTimeZone } from "@/providers/useTimeZone";
 import { retirementOutcomeUncertain } from "@/lib/exchange/retirement-outcome";
 import { RETIREMENT_REASONS } from "@/lib/exchange/retirement-form";
 import { usePolling } from "@/hooks/usePolling";
@@ -186,11 +188,11 @@ const copy = {
 };
 
 const inputClass =
-  "w-full rounded-xl border border-border bg-background px-3.5 py-3 text-sm text-foreground outline-none focus:border-accent focus:ring-2 focus:ring-accent/15 disabled:opacity-50";
+  "w-full rounded-control border border-border bg-background px-3.5 py-3 text-sm text-foreground outline-none focus:border-accent focus:ring-2 focus:ring-accent/15 disabled:opacity-50";
 const primaryClass =
-  "inline-flex min-h-11 items-center justify-center rounded-full bg-accent px-5 py-3 text-sm font-semibold text-background transition hover:bg-accent-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-45";
+  "inline-flex min-h-11 items-center justify-center rounded-control bg-accent px-5 py-3 text-sm font-semibold text-background transition hover:bg-accent-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-45";
 const secondaryClass =
-  "inline-flex min-h-11 items-center justify-center rounded-full border border-border bg-surface px-4 py-2.5 text-sm font-medium hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-45";
+  "inline-flex min-h-11 items-center justify-center rounded-control border border-border bg-surface px-4 py-2.5 text-sm font-medium hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-45";
 
 export default function RetirementPage() {
   const { lang } = useLang();
@@ -217,6 +219,7 @@ function RetirementRoute() {
 
 function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
   const { lang } = useLang();
+  const tz = useTimeZone();
   const t = isChinese(lang) ? copy.zh : copy.en;
   const toast = useToast();
   const [data, setData] = useState<RetirementOverview | null>(null);
@@ -271,10 +274,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
   );
   const step = completed ? 2 : draft ? 1 : 0;
   const date = (value: string) =>
-    new Date(value).toLocaleString(isChinese(lang) ? "zh-CN" : "en", {
-      dateStyle: "medium",
-      timeStyle: "short",
-    });
+    formatTime(new Date(value), isChinese(lang) ? "zh-CN" : "en", tz, "full");
   const focusStage = () =>
     requestAnimationFrame(() => stageTitle.current?.focus());
   const displayReason = (value: string) => {
@@ -371,7 +371,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
         </p>
       </header>
 
-      <div className="flex gap-3 rounded-2xl border border-border bg-surface p-4 text-foreground shadow-card">
+      <div className="flex gap-3 rounded-panel border border-border bg-surface p-4 text-foreground shadow-card">
         <span
           aria-hidden="true"
           className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-accent text-accent text-xs font-bold"
@@ -385,7 +385,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
       </div>
 
       {unauthorized ? (
-        <section className="rounded-2xl border border-border bg-surface px-6 py-16 text-center shadow-card">
+        <section className="rounded-panel border border-border bg-surface px-6 py-16 text-center shadow-card">
           <h2 className="text-lg font-semibold">{t.login}</h2>
           <p className="mx-auto mt-2 max-w-md text-sm text-muted">
             {t.loginHelp}
@@ -399,7 +399,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
         </section>
       ) : !data ? (
         <section
-          className="rounded-2xl border border-border bg-surface p-12 text-center shadow-card"
+          className="rounded-panel border border-border bg-surface p-12 text-center shadow-card"
           aria-live="polite"
         >
           <p className="text-sm text-muted">
@@ -420,13 +420,13 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
           {loadError && (
             <div
               role="alert"
-              className="rounded-xl border border-danger/25 bg-danger-soft p-3 text-sm text-danger"
+              className="rounded-control border border-danger/25 bg-danger-soft p-3 text-sm text-danger"
             >
               {t.refreshError}
             </div>
           )}
           <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_290px]">
-            <section className="overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
+            <section className="overflow-hidden rounded-panel border border-border bg-surface shadow-card">
               <ol
                 className="grid grid-cols-3 border-b border-border bg-surface-2/60 px-4 py-4"
                 aria-label={t.title}
@@ -466,7 +466,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                   <p className="mt-2 text-sm leading-6 text-muted">
                     {t.doneBody}
                   </p>
-                  <div className="mt-6 rounded-xl border border-accent/20 bg-accent/5 p-5">
+                  <div className="mt-6 rounded-panel border border-accent/20 bg-accent/5 p-5">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-wider text-accent">
@@ -479,7 +479,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                           </span>
                         </p>
                       </div>
-                      <span className="rounded-md border border-accent/20 px-2 py-1 text-[10px] font-semibold text-accent">
+                      <span className="rounded-chip border border-accent/20 px-2 py-1 text-[10px] font-semibold text-accent">
                         SIMULATED
                       </span>
                     </div>
@@ -571,7 +571,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                   <p className="mt-2 text-sm leading-6 text-muted">
                     {t.reviewHelp}
                   </p>
-                  <div className="my-6 flex flex-wrap items-center justify-between gap-4 rounded-xl bg-surface-2 p-5">
+                  <div className="my-6 flex flex-wrap items-center justify-between gap-4 rounded-panel bg-surface-2 p-5">
                     <div>
                       <p className="text-xs text-muted">{t.amount}</p>
                       <p className="mt-1 text-3xl font-semibold tnum">
@@ -581,7 +581,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                         </span>
                       </p>
                     </div>
-                    <span className="rounded-md border border-border bg-surface px-2 py-1 text-[10px] font-semibold text-muted">
+                    <span className="rounded-chip border border-border bg-surface px-2 py-1 text-[10px] font-semibold text-muted">
                       SIMULATED
                     </span>
                   </div>
@@ -618,7 +618,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                       />
                     )}
                   </dl>
-                  <label className="mt-7 flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-surface-2/50 p-4">
+                  <label className="mt-7 flex cursor-pointer items-start gap-3 rounded-panel border border-border bg-surface-2/50 p-4">
                     <input
                       type="checkbox"
                       required
@@ -636,7 +636,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                   {formError && (
                     <div
                       role="alert"
-                      className="mt-4 rounded-xl border border-danger/25 bg-danger-soft p-4 text-sm text-danger"
+                      className="mt-4 rounded-control border border-danger/25 bg-danger-soft p-4 text-sm text-danger"
                     >
                       <p>{formError}</p>
                       {uncertain && (
@@ -737,7 +737,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                     </select>
                   </div>
                   {selected && (
-                    <div className="rounded-xl border border-border bg-surface-2/60 p-4">
+                    <div className="rounded-panel border border-border bg-surface-2/60 p-4">
                       <p className="text-sm font-medium">
                         {tName(selected.symbol, selected.name, lang)}
                       </p>
@@ -924,7 +924,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
             </section>
 
             <aside className="space-y-4">
-              <div className="rounded-xl border border-border bg-surface p-5">
+              <div className="rounded-panel border border-border bg-surface p-5">
                 <p className="text-xs font-medium text-muted">{t.total}</p>
                 <p className="mt-3 text-3xl font-semibold tnum">
                   {fmtQty(data.totalRetired)}
@@ -936,7 +936,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                   SIMULATION ONLY
                 </div>
               </div>
-              <div className="rounded-xl border border-border bg-surface p-5">
+              <div className="rounded-panel border border-border bg-surface p-5">
                 <h2 className="text-sm font-semibold">{t.processTitle}</h2>
                 <p className="mt-2 text-xs leading-6 text-muted">
                   {t.processBody}
@@ -951,7 +951,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
             </aside>
           </div>
 
-          <section className="overflow-hidden rounded-xl border border-border bg-surface">
+          <section className="overflow-hidden rounded-panel border border-border bg-surface">
             <div className="border-b border-border px-5 py-5">
               <h2 className="text-lg font-semibold">{t.history}</h2>
               <p className="mt-1 text-xs leading-5 text-muted">
@@ -1028,7 +1028,7 @@ function RetirementWorkspace({ initialAssetId }: { initialAssetId: string }) {
                           {date(record.createdAt)}
                         </td>
                         <td className="px-4 py-4">
-                          <span className="whitespace-nowrap rounded-md bg-accent/8 px-2 py-1 text-[10px] font-medium text-accent">
+                          <span className="whitespace-nowrap rounded-chip bg-accent/8 px-2 py-1 text-[10px] font-medium text-accent">
                             {t.recorded}
                           </span>
                         </td>

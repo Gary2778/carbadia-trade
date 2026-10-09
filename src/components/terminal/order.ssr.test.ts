@@ -7,12 +7,16 @@ import type { AccountStatus } from "@/lib/market/account-store";
 import { DEFAULT_FEE_SCHEDULE, type Order } from "@/shared";
 import type { DialogProps } from "@/components/ui/Dialog";
 import en from "@/i18n/messages/en";
+import zhCNMessages from "@/i18n/messages/zh-CN";
 import type { OrderReview } from "@/lib/market/order-draft";
+import type { TriggerReview } from "./trigger-ticket";
 import { ORDERS_HISTORY_HREF, placedNotice, type PlacedNotice } from "@/lib/market/order-submit";
 import { FeeLine } from "./FeeLine";
 import { DemoFailureNotice, LoginGate, demoFailureOf, loginHrefFor } from "./LoginGate";
 import { OrderConfirmDialog, blockRepeatActivation } from "./OrderConfirmDialog";
-import { OrderPanel, keepsFormHeight, placedToasts } from "./OrderPanel";
+import { OrderFailureNotice, OrderPanel, failureLink, keepsFormHeight, placedToasts } from "./OrderPanel";
+import { showTriggersTab } from "./useConditionalTicket";
+import { submitFailure } from "./trigger-ticket";
 import { PositionSlider } from "./PositionSlider";
 
 // 下单面板的服务端标记测试(计划 §3.1、§4.5、§9.1 第 7 条:node 环境,不引 jsdom;没有 LangProvider 时 useT 落到英文)。
@@ -47,7 +51,15 @@ vi.mock("@/components/ui/Dialog", async (importOriginal) => {
   };
 });
 
+// 偏好写入:记下来(「打开条件单页签」写 prefs.bottomTab),不碰存储
+const prefs = vi.hoisted(() => ({ writes: [] as unknown[] }));
+vi.mock("@/lib/market/prefs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/market/prefs")>();
+  return { ...real, writePrefs: (partial: unknown) => void prefs.writes.push(partial) };
+});
+
 afterEach(() => {
+  prefs.writes = [];
   account.status = null;
   account.sequence = [];
   dialog.last = null;
@@ -84,6 +96,12 @@ describe("OrderPanel(SSR 首屏:账户 status idle)", () => {
     // 类型按钮带 data-order-type(TerminalShell 的 l / m 按它找按钮);默认限价
     expect(html).toMatch(new RegExp(`data-order-type="LIMIT" aria-pressed="true"[^>]*>${en.terminal.order.limit}<`));
     expect(html).toMatch(new RegExp(`data-order-type="MARKET" aria-pressed="false"[^>]*>${en.terminal.order.market}<`));
+    // 第三种票据「条件单」(P3-07):排在限价 / 市价之后,未选中;它不是 OrderType,不带 data-order-type(l / m 只认那两个);
+    // 默认画的是限价票据,条件单的输入框不在首屏里
+    expect(html).toMatch(new RegExp(`data-order-type="MARKET"[^>]*>${en.terminal.order.market}</button><button type="button" data-ticket="CONDITIONAL" aria-pressed="false"[^>]*>${en.terminal.order.conditional}</button>`));
+    expect(html).not.toContain('data-order-type="CONDITIONAL"');
+    expect(html).not.toContain(`>${en.terminal.order.triggerPrice}</label>`);
+    expect(html.match(/data-price-field/g)).toHaveLength(1);
     // LoginGate 不出现;面板是表单自己的高度,不带「保持表单高度」的标记
     expect(html).not.toContain("data-login-gate");
     expect(html).not.toContain("data-keep-height");
@@ -345,6 +363,57 @@ describe("OrderConfirmDialog", () => {
     expect(html).not.toContain(`>${en.terminal.order.feeDemo}<`);
   });
 
+  // 条件单(P3-07)的确认单:同一个对话框,摘要换成条件说成话、触发后下的单、核对时的最新成交价、预估合计(市价按触发价粗估)与手续费行,
+  // 外加一段引擎实际做什么的说明;结果未确认时给「打开条件单页签」(不是委托记录的链接),确认键变重试
+  const trigger: TriggerReview = {
+    fields: { assetId: "asset-1", direction: "ABOVE", triggerPrice: 7_000, side: "BUY", orderType: "MARKET", limitPrice: null, quantity: 10 },
+    estNotional: 70_000,
+    lastPrice: 6_500,
+  };
+  const triggerProps = { trigger, instrument, onConfirm: () => {}, onCancel: () => {}, busy: false, error: null, uncertain: false };
+
+  it("条件单:标题写明是条件单,类型写「条件单」;条件、触发后、最新成交价、按触发价的预估合计、手续费 0.00 · 演示与说明", () => {
+    const html = render(createElement(OrderConfirmDialog, triggerProps));
+    // 标题说明这是条件单(P3 终审):Confirm conditional buy …
+    expect(html).toContain(`>${en.terminal.order.confirmConditionalTitle({ buy: true, symbol: SYMBOL })}<`);
+    expect(en.terminal.order.confirmConditionalTitle({ buy: true, symbol: SYMBOL })).toBe(`Confirm conditional buy ${SYMBOL}`);
+    expect(zhCNMessages.terminal.order.confirmConditionalTitle({ buy: false, symbol: SYMBOL })).toBe(`确认条件卖出 ${SYMBOL}`);
+    expect(html).toContain(`<span class="text-muted">${en.terminal.order.conditional}</span>`);
+    expect(html).toContain('data-trigger-review=""');
+    expect(html).not.toContain("data-order-review");
+    expect(html).toContain(`>${escapeHtml(en.terminal.triggers.whenAbove("70.00"))}</dd>`);
+    expect(html).toContain(`>${en.terminal.triggers.actionMarket({ buy: true, qty: "10" })}</dd>`);
+    expect(html).toContain(`>${en.terminal.triggers.after}</dt><dd class="tnum text-foreground">`);
+    expect(html).toContain(`>${en.terminal.triggers.lastTrade}</dt><dd class="tnum text-foreground">65.00</dd>`);
+    // 对话框的描述先念条件单的说明,再念演示说明
+    const [condBody, demoBody] = (/<dialog[^>]*aria-describedby="([^"]+)"/.exec(html)?.[1] ?? "").split(" ");
+    expect(html).toContain(`<p id="${condBody}" class="text-t-sm text-foreground">${escapeHtml(en.terminal.order.conditionalBody)}</p>`);
+    expect(html).toContain(`<p id="${demoBody}" class="text-t-sm text-muted">${escapeHtml(en.terminal.order.confirmBody)}</p>`);
+    expect(html).toContain(`>${en.terminal.order.estTotalAtTrigger}</dt><dd class="tnum text-foreground">700.00</dd>`);
+    expect(html).toContain(`>${en.terminal.order.feeDemo}<`);
+    expect(html).toContain(escapeHtml(en.terminal.order.conditionalBody));
+    expect(html).toContain(escapeHtml(en.terminal.order.confirmBody));
+    expect(html).toContain(escapeHtml(en.compliance.text));
+    expect(html).toMatch(/class="[^"]*bg-\(--terminal-up\)[^"]*">Confirm<\/button>/);
+  });
+
+  it("条件单(限价、卖出、BELOW):触发后带委托价,合计按委托价;方向色跟着卖出", () => {
+    const limit: TriggerReview = { ...trigger, fields: { ...trigger.fields, side: "SELL", direction: "BELOW", triggerPrice: 6_000, orderType: "LIMIT", limitPrice: 5_950 }, estNotional: 59_500 };
+    const html = render(createElement(OrderConfirmDialog, { ...triggerProps, trigger: limit }));
+    expect(html).toContain(`>${escapeHtml(en.terminal.triggers.whenBelow("60.00"))}</dd>`);
+    expect(html).toContain(`>${en.terminal.triggers.actionLimit({ buy: false, qty: "10", price: "59.50" })}</dd>`);
+    expect(html).toContain(`>${en.terminal.order.estTotal}</dt><dd class="tnum text-foreground">595.00</dd>`);
+    expect(html).toMatch(/class="[^"]*bg-\(--terminal-down\)[^"]*">Confirm<\/button>/);
+  });
+
+  it("条件单结果未确认:说明 + 「打开条件单页签」按钮(不给委托记录的链接),确认键变重试", () => {
+    const html = render(createElement(OrderConfirmDialog, { ...triggerProps, error: en.terminal.triggers.submitErrors.uncertain, uncertain: true }));
+    expect(html).toContain(`>${escapeHtml(en.terminal.triggers.submitErrors.uncertain)}<`);
+    expect(html).toContain(`>${en.terminal.triggers.checkTab}</button>`);
+    expect(html).not.toContain(ORDERS_HISTORY_HREF);
+    expect(html).toContain(`>${en.ui.retry}</button>`);
+  });
+
   it("市价单显示预估均价;吃不满给提交前的 partialWarning 提示(不是「部分成交」);提交中按钮禁用并显示 submitting", () => {
     const market: OrderReview = { ...review, request: { ...review.request, type: "MARKET", price: null, side: "SELL" }, estAvgPrice: 9_993, warnings: ["partialFill"] };
     const html = render(createElement(OrderConfirmDialog, { ...props, review: market, busy: true }));
@@ -355,6 +424,69 @@ describe("OrderConfirmDialog", () => {
     expect(html).toMatch(/disabled=""[^>]*class="[^"]*bg-\(--terminal-down\)[^"]*">Submitting…<\/button>/);
     // 吃得满:没有提示
     expect(render(createElement(OrderConfirmDialog, props))).not.toContain("data-warning");
+  });
+});
+
+// 确认框关掉之后留在面板里的失败说明(P3-07 复审):条件单的「结果未确认」给「打开条件单页签」,不给委托记录的链接;
+// 表单卸载后的 toast 动作用同一个 failureLink
+describe("面板里的失败说明(OrderFailureNotice / failureLink)", () => {
+  const T = en.terminal;
+  it("failureLink:结果未确认 → 条件单页签(条件单)或全部委托(普通委托);401 → 登录;其余没有", () => {
+    expect(failureLink({ message: "x", uncertain: true, loginHref: null, triggers: true })).toEqual({ kind: "triggersTab" });
+    expect(failureLink({ message: "x", uncertain: true, loginHref: null })).toEqual({ kind: "orders" });
+    expect(failureLink({ message: "x", uncertain: false, loginHref: "/login?r", triggers: true })).toEqual({ kind: "login", href: "/login?r" });
+    expect(failureLink({ message: "x", uncertain: false, loginHref: null, triggers: true })).toBeNull();
+  });
+
+  it("条件单提交结果未确认:说明 + 「打开条件单页签」按钮(点它切到那个页签),没有委托记录的链接", () => {
+    const failure = { ...submitFailure({ code: "uncertain", retryAfter: null }, T, loginHrefFor(SYMBOL)), triggers: true };
+    const html = render(createElement(OrderFailureNotice, { failure }));
+    expect(html).toContain('data-order-failure=""');
+    expect(html).toContain(`>${escapeHtml(T.triggers.submitErrors.uncertain)}<`);
+    expect(html).toMatch(new RegExp(`<button type="button" class="[^"]*border-warning/40 text-warning">${T.triggers.checkTab}</button>`));
+    expect(html).not.toContain(ORDERS_HISTORY_HREF);
+    // 按钮的处理函数就是切页签的那个:写 prefs.bottomTab = triggers(表单卸载后的 toast 动作同一个)
+    expect(source("./OrderPanel.tsx")).toMatch(/<button type="button" onClick=\{showTriggersTab\}/);
+    // 手机布局(< 48rem)底部页签只在「下单」手机页签下:不在那一页时先当场点它(P3-11);桌面 / 平板与已在「下单」页时选择器什么也选不到。
+    // 下一帧(页签条已按新偏好重渲染):底部页签区滚进视野、焦点落到选中的页签上。node 里没有 DOM 与 rAF:替身记下调用
+    const MOBILE_ORDER_TAB = '[data-terminal][data-layout="mobile"]:not([data-mobile-tab="order"]) [data-area="mobile-tabs"] [role="tab"][id$="-order-tab"]';
+    for (const phone of [false, true]) {
+      prefs.writes = [];
+      const calls: string[] = [];
+      const tab = { focus: () => void calls.push("focus") };
+      const area = { scrollIntoView: (o: unknown) => void calls.push(`scroll:${JSON.stringify(o)}`), querySelector: (sel: string) => (calls.push(`tab:${sel}`), tab) };
+      const orderTab = { click: () => void calls.push("mobile:order") };
+      const frame: { run: (() => void) | null } = { run: null };
+      vi.stubGlobal("document", { querySelector: (sel: string) => (sel === MOBILE_ORDER_TAB ? (phone ? orderTab : null) : (calls.push(`area:${sel}`), area)) });
+      vi.stubGlobal("requestAnimationFrame", (cb: () => void) => ((frame.run = cb), 1));
+      try {
+        showTriggersTab();
+        expect(prefs.writes).toEqual([{ bottomTab: "triggers" }]);
+        expect(calls, `phone ${phone}`).toEqual(phone ? ["mobile:order"] : []);
+        frame.run?.();
+        expect(calls.slice(phone ? 1 : 0)).toEqual(['area:[data-area="tabs"]', 'scroll:{"block":"nearest"}', 'tab:[role="tab"][aria-selected="true"]', "focus"]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    }
+    // 选择器对得上 MobileTabs 的页签按钮 id 与 TerminalShell 根上的两个属性
+    expect(source("./MobileTabs.tsx")).toContain("const tabId = (key: MobileTab) => `${id}-${key}-tab`;");
+    expect(source("./TerminalShell.tsx")).toMatch(/data-terminal="" data-glass="off" data-density=\{density\} data-layout=\{layout\} data-mobile-tab=\{mobileTab\}/);
+    // 断网同样是结果未确认
+    const network = render(createElement(OrderFailureNotice, { failure: { ...submitFailure({ code: "network", retryAfter: null }, T, loginHrefFor(SYMBOL)), triggers: true } }));
+    expect(network).toContain(`>${T.triggers.checkTab}</button>`);
+  });
+
+  it("条件单被拒(4xx):只有说明;401 给登录入口;普通委托结果未确认仍是「查看全部委托」链接", () => {
+    const refused = render(createElement(OrderFailureNotice, { failure: { ...submitFailure({ code: "wouldTriggerNow", retryAfter: null }, T, loginHrefFor(SYMBOL)), triggers: true } }));
+    expect(refused).toContain(`>${escapeHtml(T.triggers.submitErrors.wouldTriggerNow)}<`);
+    expect(refused).not.toContain("<button");
+    expect(refused).not.toContain("<a ");
+    const unauth = render(createElement(OrderFailureNotice, { failure: { ...submitFailure({ code: "unauthorized", retryAfter: null }, T, loginHrefFor(SYMBOL)), triggers: true } }));
+    expect(unauth).toContain(`href="${escapeHtml(loginHrefFor(SYMBOL))}"`);
+    const order = render(createElement(OrderFailureNotice, { failure: { message: T.order.uncertain, uncertain: true, loginHref: null } }));
+    expect(order).toContain(`href="${escapeHtml(ORDERS_HISTORY_HREF)}"`);
+    expect(order).not.toContain(T.triggers.checkTab);
   });
 });
 

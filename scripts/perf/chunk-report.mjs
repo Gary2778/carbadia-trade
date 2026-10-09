@@ -23,21 +23,26 @@
 //   终端文案(src/i18n/messages/terminal/*,P2-01)= 其中三条文案的原文(字符串字面量压缩后原样保留):
 //   "Includes your order"、"Resting on the book"(英文)与「含你的委托」(中文);改这三条文案时同步改这里的标记;
 //   资产页文案(src/i18n/messages/account/*,P2-10)= "Retirements and certificates"、"Minimum fill (t)"(英文)与「注销记录与证书」(中文),
-//   改这三条文案时同样同步改这里。
-// 断言(预算:Phase 1 收尾按实测重定;P2-01 把终端文案移出全站公共包后按新实测 + 约 3 KB 下调 floor 与受它影响的首屏数,
-// 理由见 docs/perf-report.md 与计划 §7.1):
-//   floor ≤ 201 KB;/ 首屏 ≤ 217 KB 且自有 ≤ 20 KB;/market/[symbol] 首屏 ≤ 221 KB;
-//   /trade/[symbol] 自有 ≤ 70 KB 且首屏 ≤ 271 KB(= floor 预算 + 自有预算);图表懒加载组 ≤ 64 KB;
-//   /trade/account 自有 ≤ 42 KB 且首屏 ≤ 243 KB(= floor 预算 + 自有预算;P2-11 按实测 39.0 KB + 约 3 KB 定);
-//   lightweight-charts 不在任何路由的首屏集合;motion 不在 /trade 的自有集合;
+//   改这三条文案时同样同步改这里;
+//   通知句子与面板文案(src/i18n/messages/notices/*,P3-08 修订;终审修复轮换了第二条)= "Your trades, triggered orders"、"your alert price"(英文)与「你的成交、条件单触发」(中文),
+//   改这三条文案时同样同步改这里(别选终端文案里也有的句子:终端的 "No one was buying" 就在 /trade 的自有 chunk 里)。
+// 断言(预算:Phase 1 收尾按实测重定;P2-01 把终端文案移出全站公共包后按新实测 + 约 3 KB 下调 floor 与受它影响的首屏数;
+// Phase 3 收尾(P3-11)按最终实测 + 约 2 KB 定了一次,此后只下调不上调;理由见 docs/perf-report.md 与计划 §7.1、§9.1 第 61 条):
+//   floor ≤ 201 KB;/ 首屏 ≤ 219 KB 且自有 ≤ 20 KB;/market/[symbol] 首屏 ≤ 223 KB;
+//   /trade/[symbol] 自有 ≤ 77 KB 且首屏 ≤ 278 KB(= floor 预算 + 自有预算);图表懒加载组 ≤ 64 KB;
+//   /trade/account 自有 ≤ 48 KB 且首屏 ≤ 249 KB(= floor 预算 + 自有预算);
+//   /trade/markets 自有 ≤ 33 KB 且首屏 ≤ 234 KB(= floor 预算 + 自有预算;市场总览页,P3-05);
+//   lightweight-charts 不在任何路由的首屏集合;motion 不在 /trade/[symbol] 与 /trade/markets 的自有集合;
 //   市场 store 不在 /trade 以外任何路由(/、/market/[symbol])的首屏集合(计划 §7.1:它只在 /trade 的自有 chunk 里);
 //   终端文案不在 /trade 以外任何路由(/、/market/[symbol])的首屏集合(计划 §6.2.2 C9:它只随 /trade 的 chunk 加载);
-//   资产页文案不在 /、/market/[symbol]、/trade/[symbol] 的首屏集合(P2-10:它只随 /trade/account 的 chunk 加载,终端首屏不背它)。
+//   资产页文案不在 /、/market/[symbol]、/trade/[symbol] 的首屏集合(P2-10:它只随 /trade/account 的 chunk 加载,终端首屏不背它);
+//   通知文案不在任何路由的首屏集合(含 floor:Nav 的铃铛每页都有,但句子只随懒加载的通知面板与首条实时通知才加载的 Toast 文案 chunk 走)。
 // 资产页 /trade/account 也在读取之列(P2-10):表格里照常列出、lightweight-charts 的断言照样覆盖它;体积预算见上(P2-11)。
+// 市场总览页 /trade/markets(P3-05)同理;它不读资产页文案,所以下面「资产页文案不在 …」的断言也覆盖它。
 // 市场 store 与终端文案的「不在」断言只针对 /trade 之外的路由(资产页挂着 AccountFeed、在 /trade 布局之下,两者都在它的首屏里是预期)。
 // 阳性对照(失败即打印「检测失效」并 exit 1,说明标记过期或清单读错):
 //   / 的首屏集合必须检出 motion;/trade 的懒加载组里必须有一组检出 lightweight-charts;/trade 的自有集合必须检出市场 store;
-//   /trade 的自有集合必须检出终端文案;/trade/account 的自有集合必须检出资产页文案。
+//   /trade 的自有集合必须检出终端文案;/trade/account 的自有集合必须检出资产页文案;/ 的某个懒加载组必须检出通知文案(通知面板)。
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -52,12 +57,14 @@ const ROUTES = /** @type {const} */ ([
   { key: "/market/[symbol]/page", manifest: "market/[symbol]/page_client-reference-manifest.js" },
   { key: "/trade/[symbol]/page", manifest: "trade/[symbol]/page_client-reference-manifest.js" },
   { key: "/trade/account/page", manifest: "trade/account/page_client-reference-manifest.js" },
+  { key: "/trade/markets/page", manifest: "trade/markets/page_client-reference-manifest.js" },
 ]);
 const HOME = "/page";
 const MARKET = "/market/[symbol]/page";
 const TRADE = "/trade/[symbol]/page";
 const ACCOUNT = "/trade/account/page";
-/** /trade 下的路由(终端页与资产页):市场 store 与终端文案都在它们的首屏里是预期 */
+const MARKETS = "/trade/markets/page";
+/** /trade 下的路由(终端页、资产页与市场总览页):市场 store 与终端文案都在它们的首屏里是预期 */
 const underTrade = (/** @type {string} */ key) => key.startsWith("/trade/");
 
 /** 底价的两个入口(根布局与根模板) */
@@ -69,6 +76,7 @@ const MARKERS = /** @type {const} */ ({
   marketStore: ["tickersVersion", "instrumentsVersion", "evictSymbol"],
   terminalCopy: ["Includes your order", "Resting on the book", "含你的委托"],
   accountCopy: ["Retirements and certificates", "Minimum fill (t)", "注销记录与证书"],
+  noticeCopy: ["Your trades, triggered orders", "your alert price", "你的成交、条件单触发"],
 });
 /** @typedef {keyof typeof MARKERS} Lib */
 const LIBS = /** @type {Lib[]} */ (Object.keys(MARKERS));
@@ -77,16 +85,26 @@ const LIBS = /** @type {Lib[]} */ (Object.keys(MARKERS));
  * 预算(gzip KB)。P2-01(终端文案移出全站公共包)实测 floor 198.2、/ 首屏 214.3、/market/[symbol] 首屏 218.2,
  * 三项按实测 + 约 3 KB 下调(原 211 / 228 / 231);/trade 自有不变,/trade 首屏取 floor 预算 + 自有预算(原 290)。
  * 资产页(P2-11,Phase 2 收尾实测自有 39.0、首屏 237.1):自有按实测 + 约 3 KB,首屏同 /trade 的取法 = floor 预算 + 自有预算。
+ * 市场总览页(P3-05,计划 §6.3.3):自有 ≤ 30、首屏 ≤ 243(= floor 预算 201 + 42,与资产页同一个首屏上限)。
+ * Phase 3 期间上调过(计划 §9.1 第 61 条,P3-07 实测):条件单界面让 /trade 三条路由共用的终端文案多 1.9 KB、终端页另多约 3.3 KB,
+ * 三项自有预算先到 74 / 45 / 32,P3-09 之后再给 1 KB(75 / 46);首屏按「floor 预算 + 自有预算」取。
+ * P3-11 收尾按最终实测 + 约 2 KB(取整到 KB)定一次(构建 7f3a716 + 预算提交;实测 gzip):
+ *   /trade/[symbol] 自有 74.56 → 77、首屏 275.40 → 278;/trade/account 自有 45.66 → 48、首屏 246.50 → 249;
+ *   /trade/markets 自有 30.74 → 33、首屏 231.58 → 234(原 246,下调);/ 首屏 217.00 → 219(Nav 铃铛约 2.4 KB 进了每页的包,
+ *   原预算只剩几个字节);/market/[symbol] 首屏 220.89 → 223。/trade 三条路由的首屏 = floor 预算 201 + 自有预算,与之前的取法一致。
+ *   floor 201、/ 自有 20、图表懒加载组 64 不动(这三项只许下调)。从此所有预算只下调、不上调;真正的验收是 Lighthouse 的 LCP。
  */
 const BUDGET = {
   floor: 201,
-  homeFirst: 217,
+  homeFirst: 219,
   homeOwn: 20,
-  marketFirst: 221,
-  tradeOwn: 70,
-  tradeFirst: 271,
-  accountOwn: 42,
-  accountFirst: 243,
+  marketFirst: 223,
+  tradeOwn: 77,
+  tradeFirst: 278,
+  accountOwn: 48,
+  accountFirst: 249,
+  marketsOwn: 33,
+  marketsFirst: 234,
   chartLazy: 64,
 };
 
@@ -260,6 +278,7 @@ function main() {
   const market = routes[MARKET];
   const trade = routes[TRADE];
   const account = routes[ACCOUNT];
+  const markets = routes[MARKETS];
   const chartGroups = trade.lazy.filter((g) => g.detected.lightweightCharts);
   const kb = (/** @type {number} */ b) => Math.round((b / KB) * 10) / 10;
   /** @type {{ label: string; pass: boolean; control?: boolean }[]} */
@@ -272,9 +291,12 @@ function main() {
     { label: `/trade/[symbol] first load ${kb(trade.firstLoad.gzip)} KB <= ${BUDGET.tradeFirst} KB`, pass: trade.firstLoad.gzip <= BUDGET.tradeFirst * KB },
     { label: `/trade/account own ${kb(account.own.gzip)} KB <= ${BUDGET.accountOwn} KB`, pass: account.own.gzip <= BUDGET.accountOwn * KB },
     { label: `/trade/account first load ${kb(account.firstLoad.gzip)} KB <= ${BUDGET.accountFirst} KB`, pass: account.firstLoad.gzip <= BUDGET.accountFirst * KB },
+    { label: `/trade/markets own ${kb(markets.own.gzip)} KB <= ${BUDGET.marketsOwn} KB`, pass: markets.own.gzip <= BUDGET.marketsOwn * KB },
+    { label: `/trade/markets first load ${kb(markets.firstLoad.gzip)} KB <= ${BUDGET.marketsFirst} KB`, pass: markets.firstLoad.gzip <= BUDGET.marketsFirst * KB },
     ...chartGroups.map((g) => ({ label: `chart lazy group ${g.files.join(" + ")} ${kb(g.gzip)} KB <= ${BUDGET.chartLazy} KB`, pass: g.gzip <= BUDGET.chartLazy * KB })),
     ...Object.entries(routes).map(([key, r]) => ({ label: `lightweight-charts not in ${key} first load`, pass: !r.firstLoad.detected.lightweightCharts })),
     { label: "motion not in /trade/[symbol] own chunks", pass: !trade.own.detected.motion },
+    { label: "motion not in /trade/markets own chunks", pass: !markets.own.detected.motion },
     // 市场 store 只允许出现在 /trade 下路由的自有 chunk 里(floor 属于每个路由的首屏,所以也一并排除了 floor)
     ...Object.entries(routes)
       .filter(([key]) => !underTrade(key))
@@ -287,11 +309,14 @@ function main() {
     ...Object.entries(routes)
       .filter(([key]) => key !== ACCOUNT)
       .map(([key, r]) => ({ label: `portfolio page copy not in ${key} first load`, pass: !r.firstLoad.detected.accountCopy })),
+    // 通知句子与面板文案只随懒加载的 chunk 走(P3-08 修订):任何路由的首屏(含 floor)里一条都不该有
+    ...Object.entries(routes).map(([key, r]) => ({ label: `notice copy not in ${key} first load`, pass: !r.firstLoad.detected.noticeCopy })),
     { label: "control: motion detected in / first load", pass: home.firstLoad.detected.motion, control: true },
     { label: "control: lightweight-charts detected in a /trade lazy group", pass: chartGroups.length > 0, control: true },
     { label: "control: market store detected in /trade own chunks", pass: trade.own.detected.marketStore, control: true },
     { label: "control: terminal copy detected in /trade own chunks", pass: trade.own.detected.terminalCopy, control: true },
     { label: "control: portfolio page copy detected in /trade/account own chunks", pass: account.own.detected.accountCopy, control: true },
+    { label: "control: notice copy detected in a lazy group of /", pass: home.lazy.some((g) => g.detected.noticeCopy), control: true },
   ];
   const failed = checks.filter((c) => !c.pass);
   const controlFailed = failed.some((c) => c.control);

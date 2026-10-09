@@ -278,7 +278,7 @@ export function reduceEvents(state: MarketState, events: readonly ServerEvent[])
         break;
       }
       default:
-        // hello / subscribed / pong / error / resync / order / fill / balance / position:本 store 不变
+        // hello / subscribed / pong / error / resync / order / fill / balance / position / trigger / notice:本 store 不变(账户事件归账户 store)
         break;
     }
   }

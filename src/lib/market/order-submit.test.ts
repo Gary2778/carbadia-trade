@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Fill, Order, PlaceOrderResponse } from "@/shared";
 import { DEFAULT_FEE_SCHEDULE } from "@/shared";
 import { initialDraft, toReview, type Draft, type DraftCtx, type OrderReview } from "./order-draft";
+import { clearOwnOrders, isOwnOrder } from "./own-orders";
 import {
   ORDERS_URL,
   UNSETTLED_TTL_MS,
   accountEventsOf,
   clearUnsettledReviews,
+  deleteEnvelope,
   failureAfterClose,
   failureSurface,
   markUnsettled,
@@ -163,10 +165,43 @@ describe("submitOrder / postEnvelope", () => {
     expect(await submitOrder(limitReview, unauth.impl)).toEqual({ kind: "rejected", status: 401, message: null, retryAfter: null });
   });
 
+  it("请求体序列化不了(循环引用、toJSON 抛错):postEnvelope 不抛,与断网同样是 uncertain(status 0),fetch 没有被调用", async () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const throwing = {
+      toJSON(): never {
+        throw new Error("cannot serialise");
+      },
+    };
+    for (const body of [circular, throwing]) {
+      const { impl, calls } = fakeFetch([json(200, { ok: true, data: {} })]);
+      expect(await postEnvelope("/x", body, impl)).toEqual({ kind: "uncertain", status: 0 });
+      expect(calls).toEqual([]);
+    }
+  });
+
   it("postEnvelope:无请求体的 POST(演示账户入口),ok 带 data 与状态码", async () => {
     const { impl, calls } = fakeFetch([json(200, { ok: true, data: { id: "u1" } })]);
     expect(await postEnvelope("/api/auth/demo", undefined, impl)).toEqual({ kind: "ok", status: 200, data: { id: "u1" } });
     expect(calls).toEqual([{ url: "/api/auth/demo", body: undefined }]);
+  });
+});
+
+describe("deleteEnvelope(P3-06:撤条件单)", () => {
+  it("DELETE、无请求体与请求头,信封分类与 postEnvelope 同一套:ok 带 data,4xx rejected(409 照样),断网 / 5xx uncertain", async () => {
+    const seen: { url: string; init: RequestInit | undefined }[] = [];
+    const impl = ((url: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({ url: String(url), init });
+      return Promise.resolve(new Response(JSON.stringify({ ok: true, data: { trigger: { id: "t1" } } }), { status: 200 }));
+    }) as typeof fetch;
+    expect(await deleteEnvelope("/api/account/triggers/t1", impl)).toEqual({ kind: "ok", status: 200, data: { trigger: { id: "t1" } } });
+    expect(seen).toEqual([{ url: "/api/account/triggers/t1", init: { method: "DELETE", cache: "no-store" } }]);
+    const conflict = fakeFetch([json(409, { ok: false, error: "Trigger can no longer be cancelled" })]);
+    expect(await deleteEnvelope("/x", conflict.impl)).toEqual({ kind: "rejected", status: 409, message: "Trigger can no longer be cancelled", retryAfter: null });
+    const limited = fakeFetch([json(429, { ok: false, error: "slow down" }, { "Retry-After": "5" })]);
+    expect(await deleteEnvelope("/x", limited.impl)).toEqual({ kind: "rejected", status: 429, message: "slow down", retryAfter: 5 });
+    expect(await deleteEnvelope("/x", fakeFetch([offline]).impl)).toEqual({ kind: "uncertain", status: 0 });
+    expect(await deleteEnvelope("/x", fakeFetch([json(502, { ok: false, error: "bad gateway" })]).impl)).toEqual({ kind: "uncertain", status: 502, message: "bad gateway" });
   });
 });
 
@@ -393,5 +428,28 @@ describe("结果未确认登记簿(模块级,跨表单重挂载)", () => {
     for (let i = 0; i < 40; i++) markUnsettled({ ...a, request: { ...a.request, quantity: 100 + i, clientOrderId: `id-${i}` } });
     expect(unsettledReviews().length).toBe(32);
     expect(unsettledReviews().at(-1)?.request.clientOrderId).toBe("id-39");
+  });
+});
+
+// P3-08:通知 Toast 跳过「本页刚提交的单」的 taker 成交 —— 只登记服务端确认了结果(形状校验通过,含重放)的单
+describe("submitOrder 登记本页提交的订单(own-orders)", () => {
+  afterEach(clearOwnOrders);
+
+  it("ok:登记 order.id(同一张确认单的重放也登记);用 submitReview 提交同样", async () => {
+    const { impl } = fakeFetch([json(200, { ok: true, data: response(limitReview, { order: { id: "order-mine" } }) })]);
+    expect((await submitOrder(limitReview, impl)).kind).toBe("ok");
+    expect(isOwnOrder("order-mine")).toBe(true);
+    const replayed = fakeFetch([json(200, { ok: true, data: response(limitReview, { replayed: true, order: { id: "order-replayed" } }) })]);
+    expect((await submitReview(limitReview, replayed.impl)).kind).toBe("ok");
+    expect(isOwnOrder("order-replayed")).toBe(true);
+    expect(isOwnOrder("order-someone-else")).toBe(false);
+  });
+
+  it("uncertain(断网、5xx、形状对不上)与 rejected(4xx)不登记:没有确认过的单不当成本页的", async () => {
+    for (const res of [offline, json(503, { ok: false, error: "Busy" }), json(200, { ok: true, data: response(limitReview, { order: { id: "order-bad", clientOrderId: "x" } }) }), json(400, { ok: false, error: "no" })]) {
+      await submitOrder(limitReview, fakeFetch([res]).impl);
+    }
+    expect(isOwnOrder("order-bad")).toBe(false);
+    expect(isOwnOrder("order-1")).toBe(false);
   });
 });

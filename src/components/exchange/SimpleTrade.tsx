@@ -176,10 +176,10 @@ export function SimpleTrade({
     return (
       <section
         aria-live="polite"
-        className="mx-auto max-w-2xl rounded-2xl border border-border bg-surface p-5 shadow-card"
+        className="mx-auto max-w-2xl rounded-panel border border-border bg-surface p-5 shadow-card"
       >
         <div
-          className={`mb-5 inline-flex rounded-full px-3 py-1 text-xs font-medium ${receipt.filledQty > 0 ? "bg-accent/10 text-accent" : "bg-surface-2 text-muted"}`}
+          className={`mb-5 inline-flex rounded-chip px-3 py-1 text-xs font-medium ${receipt.filledQty > 0 ? "bg-accent/10 text-accent" : "bg-surface-2 text-muted"}`}
         >
           {zh ? "模拟订单结果" : "Demo order result"}
         </div>
@@ -231,13 +231,13 @@ export function SimpleTrade({
         <div className="mt-6 flex flex-wrap gap-3">
           <Link
             href="/trade/account"
-            className="rounded-full bg-accent px-4 py-2.5 text-sm font-semibold text-background"
+            className="rounded-control bg-accent px-4 py-2.5 text-sm font-semibold text-background"
           >
             {zh ? "查看投资组合" : "View portfolio"}
           </Link>
           <Link
             href="/orders?status=ALL"
-            className="rounded-full border border-border px-4 py-2.5 text-sm font-medium"
+            className="rounded-control border border-border px-4 py-2.5 text-sm font-medium"
           >
             {zh ? "查看订单" : "View orders"}
           </Link>
@@ -261,7 +261,7 @@ export function SimpleTrade({
     <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-3">
       <section
         aria-busy={busy}
-        className="rounded-2xl border border-border bg-surface p-5 shadow-card lg:col-span-2"
+        className="rounded-panel border border-border bg-surface p-5 shadow-card lg:col-span-2"
       >
         <div className="mb-5 flex items-start justify-between gap-3">
           <div>
@@ -284,14 +284,14 @@ export function SimpleTrade({
                 : "Buy or sell at the available market prices."}
             </p>
           </div>
-          <span className="shrink-0 rounded-full border border-border px-2.5 py-1 text-xs text-muted">
+          <span className="shrink-0 rounded-chip border border-border px-2.5 py-1 text-xs text-muted">
             {zh ? "市价单" : "Market order"}
           </span>
         </div>
 
         {review ? (
           <div className="space-y-4">
-            <div className="rounded-xl bg-surface-2 p-4">
+            <div className="rounded-panel bg-surface-2 p-4">
               <p className="text-lg font-semibold">
                 {review.side === "BUY"
                   ? zh
@@ -322,7 +322,7 @@ export function SimpleTrade({
                 ref={errorRef}
                 tabIndex={-1}
                 role="alert"
-                className="rounded-xl border border-danger/25 bg-danger-soft p-3 text-sm text-danger"
+                className="rounded-control border border-danger/25 bg-danger-soft p-3 text-sm text-danger"
               >
                 {error}
               </p>
@@ -330,7 +330,7 @@ export function SimpleTrade({
             {uncertain ? (
               <Link
                 href="/orders?status=ALL"
-                className="block rounded-full bg-accent px-4 py-3 text-center text-sm font-semibold text-background"
+                className="block rounded-control bg-accent px-4 py-3 text-center text-sm font-semibold text-background"
               >
                 {zh ? "先查看订单记录" : "Check order history"}
               </Link>
@@ -339,7 +339,7 @@ export function SimpleTrade({
                 type="button"
                 disabled={busy}
                 onClick={confirm}
-                className="w-full rounded-full bg-accent px-4 py-3 text-sm font-semibold text-background hover:bg-accent-strong disabled:opacity-50"
+                className="w-full rounded-control bg-accent px-4 py-3 text-sm font-semibold text-background hover:bg-accent-strong disabled:opacity-50"
               >
                 {busy
                   ? zh
@@ -362,7 +362,7 @@ export function SimpleTrade({
                   setReview(null);
                   setError("");
                 }}
-                className="w-full rounded-full border border-border px-4 py-2.5 text-sm disabled:opacity-50"
+                className="w-full rounded-control border border-border px-4 py-2.5 text-sm disabled:opacity-50"
               >
                 {zh ? "返回修改" : "Back to edit"}
               </button>
@@ -382,7 +382,7 @@ export function SimpleTrade({
             <div
               role="group"
               aria-label={zh ? "交易方向" : "Order side"}
-              className="grid grid-cols-2 gap-1 rounded-full bg-surface-2 p-1"
+              className="grid grid-cols-2 gap-1 rounded-control bg-surface-2 p-1"
             >
               {(["BUY", "SELL"] as const).map((value) => (
                 <button
@@ -393,7 +393,7 @@ export function SimpleTrade({
                     onSideChange(value);
                     setError("");
                   }}
-                  className={`rounded-full px-4 py-2 text-sm font-semibold transition-colors ${side === value ? "bg-accent text-background shadow-sm" : "text-muted"}`}
+                  className={`rounded-chip px-4 py-2 text-sm font-semibold transition-colors ${side === value ? "bg-accent text-background shadow-sm" : "text-muted"}`}
                 >
                   {value === "BUY"
                     ? zh
@@ -425,7 +425,7 @@ export function SimpleTrade({
                 placeholder={zh ? "输入整数数量" : "Enter a whole number"}
                 aria-describedby="simple-quantity-help simple-quantity-error"
                 aria-invalid={quantity !== "" && (!validQty || overHolding)}
-                className="mt-2 w-full rounded-xl border border-border bg-surface-2 px-4 py-3 text-base tnum outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
+                className="mt-2 w-full rounded-control border border-border bg-surface-2 px-4 py-3 text-base tnum outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
               />
               <p
                 id="simple-quantity-help"
@@ -451,7 +451,7 @@ export function SimpleTrade({
                     : ""}
               </p>
             </div>
-            <div className="rounded-xl bg-surface-2 px-4 py-3 text-sm">
+            <div className="rounded-panel bg-surface-2 px-4 py-3 text-sm">
               {side === "BUY" ? (
                 <div className="flex justify-between gap-3">
                   <span className="text-muted">
@@ -498,7 +498,7 @@ export function SimpleTrade({
             {loggedIn === false ? (
               <Link
                 href={`/login?returnTo=${encodeURIComponent(`/market/${asset.symbol}?tab=trade&side=${side}`)}`}
-                className="block rounded-full bg-accent px-4 py-3 text-center text-sm font-semibold text-background"
+                className="block rounded-control bg-accent px-4 py-3 text-center text-sm font-semibold text-background"
               >
                 {zh ? "登录以模拟交易" : "Sign in to trade with demo funds"}
               </Link>
@@ -506,7 +506,7 @@ export function SimpleTrade({
               <button
                 type="submit"
                 disabled={!canReview}
-                className="w-full rounded-full bg-accent px-4 py-3 text-sm font-semibold text-background hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-40"
+                className="w-full rounded-control bg-accent px-4 py-3 text-sm font-semibold text-background hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {loggedIn === null
                   ? zh
@@ -527,7 +527,7 @@ export function SimpleTrade({
       </section>
 
       <aside className="space-y-4">
-        <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+        <section className="rounded-panel border border-border bg-surface p-5 shadow-card">
           <h2 className="font-semibold">
             {zh ? "订单估算" : "Order estimate"}
           </h2>
@@ -579,7 +579,7 @@ export function SimpleTrade({
           {selectedEstimate && selectedEstimate.unfilledQuantity > 0 && (
             <p
               role="status"
-              className="mt-4 rounded-xl border border-warning/25 bg-warning-soft p-3 text-xs leading-5 text-muted"
+              className="mt-4 rounded-control border border-warning/25 bg-warning-soft p-3 text-xs leading-5 text-muted"
             >
               {zh
                 ? `目前估算只能成交 ${fmtQty(selectedEstimate.quantity)} / ${fmtQty(selectedQty)} 单位。流动性或可用资金不足；结果可能是部分成交。`

@@ -73,4 +73,32 @@ describe("cleanupHistory", () => {
     expect(orderIds).not.toContain(orphanBot.id);   // 过期机器人孤儿终态订单:删
     expect(orderIds).toContain(orphanHuman.id);     // 真人订单:保留
   });
+
+  it("机器人流水只留 1 天(成交仍留 7 天),真人流水永久保留", async () => {
+    const [bot, human] = await Promise.all([
+      prisma.user.create({ data: { email: "lb@t.bot", name: "lb", passwordHash: "x", isBot: true, cashBalance: 0 } }),
+      prisma.user.create({ data: { email: "lh@t.io", name: "lh", passwordHash: "x", isBot: false, cashBalance: 0 } }),
+    ]);
+    const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000);
+    const mkLine = (userId: string, createdAt: Date) =>
+      prisma.ledgerEntry.create({ data: { userId, account: "CASH", delta: BigInt(1), reason: "TRADE_SETTLE", createdAt } });
+    const botOld = await mkLine(bot.id, twoDaysAgo);
+    const botNew = await mkLine(bot.id, new Date());
+    const humanOld = await mkLine(human.id, new Date(Date.now() - 30 * 86_400_000));
+    const bot2 = await prisma.user.create({ data: { email: "lb2@t.bot", name: "lb2", passwordHash: "x", isBot: true, cashBalance: 0 } });
+    const asset = await prisma.asset.findFirstOrThrow();
+    const [buy, sell] = await Promise.all([bot.id, bot2.id].map((userId) =>
+      prisma.order.create({ data: { userId, assetId: asset.id, side: "BUY", type: "LIMIT", price: 1, quantity: 1, status: "FILLED", createdAt: twoDaysAgo } })));
+    const botTrade2d = await prisma.trade.create({
+      data: { assetId: asset.id, buyerId: bot.id, sellerId: bot2.id, buyOrderId: buy.id, sellOrderId: sell.id, price: 1, quantity: 1, createdAt: twoDaysAgo },
+    });
+
+    await cleanupHistory();
+
+    const lineIds = (await prisma.ledgerEntry.findMany({ select: { id: true } })).map((l) => l.id);
+    expect(lineIds).not.toContain(botOld.id);       // 机器人流水 2 天前:删
+    expect(lineIds).toContain(botNew.id);           // 机器人流水当天:留
+    expect(lineIds).toContain(humanOld.id);         // 真人流水 30 天前:留
+    expect((await prisma.trade.findMany({ select: { id: true } })).map((x) => x.id)).toContain(botTrade2d.id); // 机器人成交 2 天前:仍在 7 天内,留
+  });
 });

@@ -9,8 +9,12 @@
 //     比游标旧的行全读出来再排序,导出每一页都这样,整份导出是平方级;
 //   - 订单:Order 没有 (userId, createdAt) 索引(Phase 2 不改库),每页仍要把该用户的订单读一遍再排序;CSV 导出因此用大页
 //    (csv-export.ts 的 CSV_ORDER_PAGE_ROWS),全量读的次数少一个数量级。索引留给下一个允许迁移的阶段(计划 §9.1)。
-import type { Fill, Order } from "@/shared/types";
-import { avgFillPricesByOrder, ledgerIdsByTrade, selfTradeCancelledIds, toFill, toOrder } from "./account-mappers";
+//
+// 条件单(P3-03):未完结行的读取(openTriggersRead / triggersFromRows)也在这里 —— 账户快照(发布器)要用它,
+// 而条件单服务 triggers.ts 依赖触发引擎与 matching(matching ↔ 发布器本来就成环),放在这个只依赖 db 与映射的模块里不再加环。
+import type { PrismaClient, Trigger as TriggerRow } from "@/generated/prisma";
+import type { Fill, Order, Trigger } from "@/shared/types";
+import { avgFillPricesByOrder, ledgerIdsByTrade, selfTradeCancelledIds, toFill, toOrder, toTrigger } from "./account-mappers";
 import type { Cursor } from "./cursor";
 import { prisma } from "./db";
 
@@ -28,8 +32,8 @@ export function readOrderFilters(params: URLSearchParams): OrderFilters | { erro
   return { statuses: statuses ?? null, symbol: params.get("symbol") || null };
 }
 
-/** 键集分页 createdAt desc, id desc:取 (createdAt, id) 严格小于游标的行 */
-const beforeCursor = (cursor: Cursor) => ({
+/** 键集分页 createdAt desc, id desc:取 (createdAt, id) 严格小于游标的行(条件单列表 triggers.ts 也用它) */
+export const beforeCursor = (cursor: Cursor) => ({
   OR: [{ createdAt: { lt: new Date(cursor.createdAt) } }, { createdAt: new Date(cursor.createdAt), id: { lt: cursor.id } }],
 });
 
@@ -158,3 +162,23 @@ export async function readFillsPage(
     next: last ? { createdAt: last.ts, id: last.id } : null,
   };
 }
+
+// ---- 条件单(P3-03,计划 §6.3.2 C2 / C3)----
+
+/** 未完结的条件单状态:GET /api/account/triggers?status=open、账户快照与「每人至多 50 条」同一口径 */
+export const OPEN_TRIGGER_STATUSES: readonly string[] = ["PENDING", "TRIGGERING"];
+
+/** 条件单行带上标的 symbol(toTrigger 要它):快照、条件单服务与触发引擎的查询都用这一个 include */
+export const TRIGGER_WITH_SYMBOL = { asset: { select: { symbol: true } } } as const;
+export type TriggerRowWithSymbol = TriggerRow & { asset: { symbol: string } };
+
+/** 未完结的条件单,新的在前(与 ?status=open 同序);返回未执行的查询,账户快照把它和余额、挂单、持仓放进同一个批量事务 */
+export function openTriggersRead(db: PrismaClient, userId: string) {
+  return db.trigger.findMany({
+    where: { userId, status: { in: [...OPEN_TRIGGER_STATUSES] } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    include: TRIGGER_WITH_SYMBOL,
+  });
+}
+
+export const triggersFromRows = (rows: readonly TriggerRowWithSymbol[]): Trigger[] => rows.map((row) => toTrigger(row, row.asset.symbol));

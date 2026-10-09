@@ -3,6 +3,8 @@
 import { memo } from "react";
 import type { AuditRef, Side } from "@/shared";
 import { useLang, useT } from "@/i18n/LangProvider";
+import { formatTime } from "@/lib/time-format";
+import { useTimeZone } from "@/providers/useTimeZone";
 import { formatPrice, formatQty } from "@/shared/precision";
 
 export type TapeRowProps = {
@@ -21,17 +23,6 @@ export type TapeRowProps = {
   qtyStep?: number;
 };
 
-const timeFormatters = new Map<string, Intl.DateTimeFormat>();
-/** HH:MM:SS,24 小时制,浏览器时区(Phase 1 不做时区偏好,§9.1 第 32 条);Intl 实例按 locale 缓存 */
-export function formatTapeTime(ts: number, locale: string): string {
-  let fmt = timeFormatters.get(locale);
-  if (!fmt) {
-    fmt = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
-    timeFormatters.set(locale, fmt);
-  }
-  return fmt.format(ts);
-}
-
 /**
  * 成交 tape 的一行(计划 §3.1):React.memo + 原始类型 props,新成交进来时已有的行零提交。
  * 价格按主动方着色(买 = 涨色、卖 = 跌色,随涨跌轴翻转),读屏另念方向文字(颜色不是唯一信息);
@@ -40,11 +31,13 @@ export function formatTapeTime(ts: number, locale: string): string {
  * 触屏与只用键盘的明眼用户在这里看不到逐笔引用:自己成交的引用在底部「成交」页签与成交详情里可见、可聚焦(FillsTab /
  * FillDetailDialog,§4.8 列的另两处展示);公共 tape 行不进 Tab 序列(最多 200 行)。
  * 数量按 qtyStep 的小数位显示(§4.4;Phase 1 种子恒 1,即整数吨)。
+ * 时间 = HH:mm:ss,24 小时制,按时区偏好(useTimeZone,服务端快照 local;lib/time-format.ts 的 tape 样式)。
  */
 export const TapeRow = memo(function TapeRow({ price, quantity, takerSide, ts, auditRef, precision, qtyStep = 1 }: TapeRowProps) {
   const t = useT("terminal");
   const { lang } = useLang();
   const locale = lang === "zh-CN" ? "zh-CN" : "en-US";
+  const tz = useTimeZone();
   const buy = takerSide === "BUY";
   const audit = `${t.tape.auditRef} ${auditRef}`;
   return (
@@ -53,7 +46,7 @@ export const TapeRow = memo(function TapeRow({ price, quantity, takerSide, ts, a
       title={`${audit}\n${t.tape.auditNote}`}
       className="t-tape-grid h-row px-gap text-t-sm leading-t-tight hover:bg-(--terminal-row-hover)"
     >
-      <span className="tnum truncate text-t-2xs text-muted">{formatTapeTime(ts, locale)}</span>
+      <span className="tnum truncate text-t-2xs text-muted">{formatTime(ts, locale, tz, "tape")}</span>
       <span className={`tnum truncate text-end ${buy ? "text-(--terminal-up)" : "text-(--terminal-down)"}`}>
         {formatPrice(price, precision, locale)}
         <span className="sr-only"> {buy ? t.tape.buy : t.tape.sell}</span>

@@ -45,8 +45,8 @@ const ids = { assetA: "", assetB: "", alice: "", bob: "", order: "" };
 /** 页签发出的请求(路径 + 查询串),按先后 */
 const requests: string[] = [];
 
-const ALL: LedgerRequest = { account: null, type: null, symbol: null, range: "all" };
-const request = (patch: Partial<LedgerFilterState>, symbol = SYMBOL_A): LedgerRequest => ledgerRequest({ ...DEFAULT_LEDGER_FILTERS, ...patch }, symbol);
+const ALL: LedgerRequest = { account: null, type: null, symbol: null, range: "all", tz: "local" };
+const request = (patch: Partial<LedgerFilterState>, symbol = SYMBOL_A): LedgerRequest => ledgerRequest({ ...DEFAULT_LEDGER_FILTERS, ...patch }, symbol, "local");
 
 /** 以某位用户的身份,把这一份筛选的流水翻到底 */
 async function loadAll(userId: string, req: LedgerRequest): Promise<readonly LedgerActivity[]> {

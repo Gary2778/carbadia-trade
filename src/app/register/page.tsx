@@ -46,7 +46,7 @@ function RegisterForm() {
 
   return (
     <div className="max-w-sm mx-auto mt-10">
-      <div className="rounded-2xl border border-border bg-surface shadow-card p-6">
+      <div className="rounded-panel border border-border bg-surface shadow-card p-6">
         <h1 className="text-lg font-bold mb-1">{t.title}</h1>
         <p className="text-muted text-sm mb-5">{t.subtitle}</p>
         <form onSubmit={submit} className="space-y-3">
@@ -63,7 +63,7 @@ function RegisterForm() {
               <Link href="/privacy" className="text-accent" target="_blank">{t.agreePrivacy}</Link>
             </span>
           </label>
-          <button disabled={busy} className="w-full py-2.5 rounded-full bg-accent text-background font-medium hover:bg-accent-strong transition-colors disabled:opacity-40">
+          <button disabled={busy} className="w-full py-2.5 rounded-control bg-accent text-background font-medium hover:bg-accent-strong transition-colors disabled:opacity-40">
             {busy ? t.submitting : t.submit}
           </button>
         </form>

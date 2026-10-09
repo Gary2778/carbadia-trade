@@ -12,17 +12,18 @@ import { usePrefs, writePrefs, type BottomTab } from "@/lib/market/prefs";
 import { ExportCsvLink, FILLS_CSV_HREF, HISTORY_CSV_HREF, STRIP_ITEM_BOX } from "./ExportCsvLink";
 import { OpenOrdersTab } from "./OpenOrdersTab";
 
-// 只有默认页签「当前委托」静态引入;其余四个选中时才取代码(next/dynamic,加载中统一 Skeleton):
+// 只有默认页签「当前委托」静态引入;其余五个选中时才取代码(next/dynamic,加载中统一 Skeleton):
 // /trade/[symbol] 首屏的自有 JS 预算所剩不多(计划 §7.1),它们连同各自的分页查询、筛选条、导出入口(P2-06)都不进首屏。
 // 页签只在登录态就绪后挂载,服务端从不渲染它们(ssr: false)。面板区高度固定(h-65 / 网格行),
 // 存了非默认页签的用户水合后切过去时 Skeleton 与表格在同一个框里替换,不推动页面其它部分。
 const tabLoading = () => <Skeleton rows={5} />;
+const TriggersTab = dynamic(() => import("./TriggersTab").then((m) => m.TriggersTab), { ssr: false, loading: tabLoading });
 const OrderHistoryTab = dynamic(() => import("./OrderHistoryTab").then((m) => m.OrderHistoryTab), { ssr: false, loading: tabLoading });
 const FillsTab = dynamic(() => import("./FillsTab").then((m) => m.FillsTab), { ssr: false, loading: tabLoading });
 const PositionsTab = dynamic(() => import("./PositionsTab").then((m) => m.PositionsTab), { ssr: false, loading: tabLoading });
 const LedgerTab = dynamic(() => import("./LedgerTab").then((m) => m.LedgerTab), { ssr: false, loading: tabLoading });
 
-export const BOTTOM_TABS: readonly BottomTab[] = ["open", "history", "fills", "positions", "ledger"];
+export const BOTTOM_TABS: readonly BottomTab[] = ["open", "triggers", "history", "fills", "positions", "ledger"];
 
 /** 非激活面板的样式(计划 §3.1、§3.6):content-visibility:auto;它们本来就不挂载内容,这一条保证即使日后改成保活也不付布局 / 绘制 */
 export const INACTIVE_PANEL_STYLE = { contentVisibility: "auto" } as const;
@@ -51,7 +52,7 @@ export function nextTab(current: BottomTab, key: string): BottomTab | null {
 }
 
 /**
- * 底部五个 Tab(计划 §3.1、§6.2.3 P2-07):当前委托 / 历史委托 / 成交记录 / 持仓 / 流水。
+ * 底部六个 Tab(计划 §3.1、§6.2.3 P2-07、§6.3.3 P3-07):当前委托 / 条件单 / 历史委托 / 成交记录 / 持仓 / 流水。
  *   - 激活的 Tab 存 prefs.bottomTab(usePrefs:服务端快照与水合首帧恒为默认 open,挂载后切到 localStorage 值;切换经 writePrefs;
  *     存储不可用时 prefs 自己留在内存里,本次会话照样能切);
  *   - 只有激活面板挂载内容 —— 非激活面板是空的 hidden tabpanel(style content-visibility:auto),Profiler 里零渲染;
@@ -69,7 +70,7 @@ export function BottomTabs({ symbol }: { symbol: string }) {
   const tablistId = `${id}-tablist`;
   const tabId = (tab: BottomTab) => `${id}-tab-${tab}`;
   const panelId = (tab: BottomTab) => `${id}-panel-${tab}`;
-  const labels: Record<BottomTab, string> = { open: t.tabs.open, history: t.tabs.history, fills: t.tabs.fills, positions: t.tabs.positions, ledger: t.ledger.tab };
+  const labels: Record<BottomTab, string> = { open: t.tabs.open, triggers: t.tabs.triggers, history: t.tabs.history, fills: t.tabs.fills, positions: t.tabs.positions, ledger: t.ledger.tab };
   const stripExport = stripExportHref(bottomTab, status);
 
   const handleSelect = (tab: BottomTab) => writePrefs({ bottomTab: tab });
@@ -102,6 +103,8 @@ export function BottomTabs({ symbol }: { symbol: string }) {
     switch (tab) {
       case "open":
         return <OpenOrdersTab symbol={symbol} />;
+      case "triggers":
+        return <TriggersTab />;
       case "history":
         return <OrderHistoryTab />;
       case "fills":
@@ -120,7 +123,7 @@ export function BottomTabs({ symbol }: { symbol: string }) {
       className="flex h-65 min-h-0 min-w-0 flex-col gap-gap overflow-hidden rounded-panel border border-(--terminal-border) bg-(--terminal-panel) p-panel md:h-auto"
     >
       {/* 页签条:tablist 本身只放 tab(ARIA);手机上导出入口是它右边的兄弟节点,不随 tab 横向滚走。
-          入口与 tab 同一个纵向盒子(STRIP_ITEM_BOX)、贴底对齐,外层不加上下内边距:在五个 tab 之间切换时页签条一样高 */}
+          入口与 tab 同一个纵向盒子(STRIP_ITEM_BOX)、贴底对齐,外层不加上下内边距:在各个 tab 之间切换时页签条一样高 */}
       <div className="flex shrink-0 items-stretch">
         <div id={tablistId} role="tablist" aria-label={t.tabs.tablistLabel} aria-orientation="horizontal" className="flex min-w-0 flex-1 items-end gap-gap overflow-x-auto border-b border-(--terminal-border)">
           {BOTTOM_TABS.map((tab) => {

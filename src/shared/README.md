@@ -17,11 +17,12 @@
 | `types.ts` | 领域类型:`Side`、`OrderType`、`OrderStatus`、`CandleInterval`、`VerificationStatus`、`AuditRef`、`Instrument`、`Ticker`、`TickerUpdate`、`InstrumentListItem`、`OrderBookLevel/Snapshot/Delta`、`TapeEntry`、`CandleBar`、`Order`、`Fill`、`LedgerLineView`、`Position`、`Balance`、`Me`、`FeeSchedule`、`ConnectionState`、`DraftError` |
 | `ws-protocol.ts` | WebSocket 协议:`Topic`、`ClientOp`、`ServerEvent`、`ServerFrame`、`WsErrorCode`;常量 `WS_PROTOCOL_VERSION`、`WS_HEARTBEAT_MS`、`WS_MAX_TOPICS`、`WS_TAPE_RING` |
 | `bus.ts` | 进程内总线 `BusMessage` / `AccountEvent` / `CarbadiaBus`,`WsStats`、`Presence`,以及 `globalThis.__carbadia*` 的类型声明 |
-| `api-shapes.ts` | REST 的 `data` 形状(`InstrumentsResponse`、`BookResponse`、`TradesResponse`、`CandlesResponse`、`AccountOrdersResponse`、`FillsResponse`、`FillDetailResponse`、`PositionsResponse`、`AccountOverview` / `AccountOverviewResponse`、`AccountTotals`、`EquityChange`(`pct` 是小数比例,不是百分数)、`OtcListingView`、`PlaceOrderRequest/Response`、`HealthResponse`、`ApiEnvelope`) |
-| `constants.ts` | `DEFAULT_TERMINAL_SYMBOL`、`BASE_UNIT`、`FILL_DISCLOSURE`、`auditRefOf`、`CANDLE_INTERVALS`、`AGG_STEPS`、`DEPTH_OPTIONS`、`MAX_TAPE`、`MAX_BARS`、`DEFAULT_FEE_SCHEDULE` |
+| `api-shapes.ts` | REST 的 `data` 形状(`InstrumentsResponse`、`BookResponse`、`TradesResponse`、`CandlesResponse`、`AccountOrdersResponse`、`FillsResponse`、`FillDetailResponse`、`PositionsResponse`、`AccountOverview` / `AccountOverviewResponse`、`AccountTotals`、`EquityChange`(`pct` 是小数比例,不是百分数)、`OtcListingView`、`PlaceOrderRequest/Response`、`DiskUsage`、`HealthResponse`、`ApiEnvelope`) |
+| `constants.ts` | `DEFAULT_TERMINAL_SYMBOL`、`BASE_UNIT`、`FILL_DISCLOSURE`、`auditRefOf`、`CANDLE_INTERVALS`、`AGG_STEPS`、`DEPTH_OPTIONS`、`MAX_TAPE`、`MAX_BARS`、`DEFAULT_FEE_SCHEDULE`、`TRIGGER_ERROR`(条件单接口失败信封里的错误码,服务端抛、客户端按它选文案) |
 | `index.ts` | 以上五个文件的统一出口(纯函数模块按文件名单独导入,如 `@/shared/order-math`) |
 | `orderbook.ts` | 盘口:`applyDelta`(quantity 0 删档,返回新 Map)、`diffBook`(与 `applyDelta` 往返恒等)、`aggregateLevels`(BUY 向下、SELL 向上取整到 step)、`cumulate`(`pct` 0..1)、`spread`(`abs` 分、`bps` 按中间价) |
 | `order-math.ts` | 下单算术:`roundToTick`(买向下、卖向上)、`roundToStep`、`qtyFromAmount`、`amountFromQty`、`qtyFromPercent`、`clampQty`、`validateDraft`(十个 `DraftError` 各有触发路径,通过即给出 `PlaceOrderRequest`);`MAX_PRICE_CENTS` / `MAX_NOTIONAL_CENTS` 与 `src/lib/exchange/limits.ts` 同值(测试断言) |
+| `trigger-drafts.ts` | 止盈止损与价格提醒的草稿校验:`validateOcoDraft`(至少一个价、价格三条规则、止盈 > 最新价 > 止损、数量 ≤ 持仓,通过即给出 `OcoFields`)、`validateAlertDraft`(触发价与方向,通过即给出 `AlertFields`);规则与 `order-math.ts` 的条件单校验共用。只有终端的两个对话框(懒加载)用,单独成模块,不进下单面板的首屏包 |
 | `fees.ts` | `estimateFee(notionalCents, bps, minFeeCents)`:费率 0 恒 0,否则 `max(minFee, ceil(notional × bps / 10000))` |
 | `indicators.ts` | `sma` / `ema`(整段,前 period − 1 位 null;EMA 以 SMA 起算)、`smaLast` / `emaNext`(实时只更新最后一根) |
 | `taker.ts` | `takerSideOf`:MARKET → 挂单价 ≠ 成交价 → `createdAt` 晚 → id 大(计划 §9.1 第 25 条) |
@@ -29,6 +30,7 @@
 | `precision.ts` | `formatPrice(cents, precision, locale)`(精度钳到 0..2)、`formatQty(qty, step, locale)`,`Intl.NumberFormat` 按 locale + 小数位缓存,非法 locale 回退 en-US;组件侧用 `src/lib/format.ts` 的 `fmtPrice(cents, instrument, lang)` 包装(按界面语言选 locale、空值「—」) |
 | `account-totals.ts` | 账户合计:`computeAccountTotals(balance, positions, priceOf)`(服务端按持仓行上的价格、客户端按行情的最新价;没有价格的持仓不计入市值并令 `valuationComplete = false`,情景标的不算 `heldCredits`,成本或估值不完整时 `unrealisedPnl` 为 null);从 `unrealised-pnl.ts` 再导出 `unrealisedPnlAt` |
 | `unrealised-pnl.ts` | `unrealisedPnlAt(position, price)`(一行持仓按给定价格的浮盈,成本取服务端算好的那一份);账户合计与逐行估值(`position-groups.ts` 的 `positionValue`)共用,单独成模块是为了终端首屏不带上合计(P2-10) |
+| `market-indices.ts` | 模拟指数(计划 §6.3.2 C6):`computeIndices(items, ts)` 给出全部 + 按 registry + 按 projectType 的 `IndexRow`;情景标的不参与;一组的涨跌 = 涨跌为有限数的成员的算术平均(等权,取两位小数),`level = 100 × (1 + 涨跌 / 100)`,成交量是吨数之和;服务端路由 `GET /api/market/indices` 与 `/trade/markets` 页面的浏览器端重算共用它 |
 | `purity.test.ts` | 纯度静态扫描 |
 | `ws-protocol.test.ts` | TS 类型 ↔ zod schema 的往返校验与类型层断言 |
 | `*.test.ts` | 每个纯函数模块的同名测试(各 ≥ 8 用例) |

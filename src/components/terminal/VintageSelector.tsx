@@ -25,6 +25,9 @@ export type VintageSelectorProps = {
  * 数据:只订阅 store 的 instruments 切片(标的元数据;ticker 刷新不换它的引用,所以行情跳动不重渲染头部的这组 chip),
  * store 空(服务端与水合首帧)时用 initialItems —— 与计划写的 useInstrumentList({}, initialItems) 同一来源,少一份逐 tick 的重算。
  *
+ * 「本项目其它年份」这行字只在 ≥ 100rem 显示(原来是 ≥ 48rem):英文头部在 1280 宽、带两个年份 chip 的标的上差 21 px 放不进一行(P3 终审实测);
+ * 读屏不受影响 —— 这行字本来就 aria-hidden,名字在 nav 的 aria-label 上。
+ *
  * 焦点:换标的后,被点的 chip 变成「当前」而从列表里消失;effect 把焦点交给刚换出去的那个 vintage 的 chip,
  * 键盘用户不会掉回 <body>(鼠标点击后的程序化聚焦不显示焦点环)。
  */
@@ -49,7 +52,7 @@ export const VintageSelector = memo(function VintageSelector({ projectId, curren
 
   return (
     <nav ref={navRef} aria-label={t.instruments.vintages} data-vintage-selector="" className="flex min-w-0 flex-wrap items-center gap-1">
-      <span aria-hidden="true" className="text-t-2xs text-muted-2 max-md:hidden">
+      <span aria-hidden="true" className="text-t-2xs text-muted-2 max-[100rem]:hidden">
         {t.instruments.vintages}
       </span>
       {siblings.map((ins) => (

@@ -7,6 +7,7 @@ import type { CoreMessages } from "./en";
 const zhCN: CoreMessages = {
   nav: {
     markets: "行情",
+    overview: "总览",
     otc: "OTC 挂牌",
     portfolio: "我的资产",
     cash: "可用现金",
@@ -34,6 +35,14 @@ const zhCN: CoreMessages = {
     dialogClose: "关闭对话框",
     listHint: "滚动查看更多行",
     simulatedUnverified: "模拟 · 未核证",
+  },
+
+  // 站内通知的铃铛(每个页面的 Nav 都带):只放铃铛自己要的;句子与面板文案在 ../notices/(随懒加载的面板走)
+  notices: {
+    title: "通知",
+    bell: (unread) => (unread > 0 ? `通知，${unread} 条未读` : "通知"),
+    error: "通知加载失败",
+    reload: "刷新页面",
   },
 
   exchange: {

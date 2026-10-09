@@ -42,6 +42,7 @@ let prisma: (typeof import("../server/db"))["prisma"];
 let matching: typeof import("./matching");
 let bot: typeof import("./bot");
 let publisher: typeof import("../server/market-publisher");
+let drainOrderHooks: (typeof import("../server/order-hooks"))["drainOrderHooks"];
 let bus: ReturnType<typeof createBus>;
 let restoreRandom: (() => void) | null = null;
 
@@ -74,6 +75,7 @@ beforeAll(async () => {
   matching = await import("./matching");
   bot = await import("./bot");
   publisher = await import("../server/market-publisher");
+  ({ drainOrderHooks } = await import("../server/order-hooks"));
   const rows = await prisma.$queryRaw<{ file: string }[]>`SELECT file FROM pragma_database_list WHERE name = 'main'`;
   if (!rows[0]?.file.startsWith(database.directory)) throw new Error(`测试连到了意外的数据库: ${rows[0]?.file}`);
 }, 120_000);
@@ -89,6 +91,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   // 每个用例一个干净的库:机器人的 tick 会给库里每一个标的报价
+  await prisma.notification.deleteMany(); // 真人成交的通知(提交后钩子写的)引用用户,先于用户删
   await prisma.trade.deleteMany();
   await prisma.order.deleteMany();
   await prisma.holding.deleteMany();
@@ -103,6 +106,7 @@ afterEach(async () => {
   restoreRandom = null;
   vi.restoreAllMocks();
   await publisher._internal.idle();
+  await drainOrderHooks(); // 提交后钩子在写通知:等它写完,不然下一个用例清库时撞上它
   publisher._internal.reset();
   globalThis.__carbadiaPresence = undefined;
 });

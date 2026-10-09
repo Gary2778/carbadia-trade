@@ -1,12 +1,14 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useRef, useState } from "react";
 import type { Order, OrderStatus, Side } from "@/shared";
 import { useToast } from "@/components/anim/Toast";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { useLang, useT } from "@/i18n/LangProvider";
 import { accountActions, useOpenOrders } from "@/lib/market/account-store";
+import { useTimeZone } from "@/providers/useTimeZone";
 import { CELL_END, CELL_START, fmtQuantity, fmtRowPrice, fmtTs, numberLocale, ROW_CLASS, sideTone, statusTone, TabTable, usePricePrecisions, type Columns } from "./TabTable";
+import { useArmedCancel } from "./useArmedCancel";
 
 export type OrderScope = "all" | "current";
 
@@ -55,14 +57,16 @@ type OpenOrderRowProps = {
 /**
  * 当前委托的一行:React.memo + 原始类型 props;撤单按钮带 data-cancel-for,Esc 取消时焦点经它还原。
  * 请求在途时按钮是 aria-disabled 而不是 disabled:disabled 会把焦点从它身上拿走,失败(429 等)后焦点就回不来了。
+ * 撤单按钮看得见的字是「撤单 / 确认撤单」,可访问名按行说清撤哪一张(方向 + 标的;武装后说明这一下是确认)。
  */
 export const OpenOrderRow = memo(function OpenOrderRow(p: OpenOrderRowProps) {
   const t = useT("terminal");
   const { lang } = useLang();
   const locale = numberLocale(lang);
+  const tz = useTimeZone();
   return (
     <div data-order-id={p.id} className={`${ROW_CLASS} hover:bg-(--terminal-row-hover)`} style={{ gridTemplateColumns: COLUMNS.template }}>
-      <span className={`${CELL_START} tnum text-muted`}>{fmtTs(p.createdAt, locale)}</span>
+      <span className={`${CELL_START} tnum text-muted`}>{fmtTs(p.createdAt, locale, tz)}</span>
       <span className={`${CELL_START} font-medium`}>{p.symbol}</span>
       <span className={`${CELL_START} ${sideTone(p.side)}`}>{p.side === "BUY" ? t.order.buy : t.order.sell}</span>
       <span className={CELL_START}>{p.type === "LIMIT" ? t.order.limit : t.order.market}</span>
@@ -75,6 +79,7 @@ export const OpenOrderRow = memo(function OpenOrderRow(p: OpenOrderRowProps) {
           type="button"
           data-cancel-for={p.id}
           data-armed={p.armed ? "" : undefined}
+          aria-label={t.tabs.cancelOrderLabel({ buy: p.side === "BUY", symbol: p.symbol, armed: p.armed })}
           aria-disabled={p.busy || undefined}
           aria-busy={p.busy || undefined}
           onClick={() => {
@@ -168,42 +173,8 @@ export function OpenOrdersView({ symbol, scope, onScope, orders, precisions, arm
   );
 }
 
-/** 武装期间一下 Esc 的处理方式(见 armedEscapeAction) */
-export type ArmedEscapeAction = "ignore" | "disarm" | "disarm-and-focus";
-
-/**
- * 两步撤单武装期间按下 Esc 该做什么(纯函数:tabs.ssr.test.ts 用假元素测;active = document.activeElement,root = 本面板容器):
- *   - "ignore":焦点在打开的 <dialog> 里(OrderConfirmDialog、FillDetailDialog 自己处理 Esc,不能被这里 preventDefault 截掉),
- *     或本面板在 inert 子树里(左栏抽屉是模态,Esc 归抽屉);武装保持,下一次 Esc 再取消;
- *   - "disarm-and-focus":焦点在本面板里,或掉在 body 上 —— 取消武装、preventDefault,焦点还给触发按钮;
- *   - "disarm":焦点在面板外的别处(例如搜索框)—— 取消武装、preventDefault,但不去抢焦点。
- */
-export function armedEscapeAction(active: Element | null, root: Element | null, body: Element | null): ArmedEscapeAction {
-  if (active?.closest("dialog[open]")) return "ignore";
-  if (root?.closest("[inert]")) return "ignore";
-  if (!active || active === body || root?.contains(active)) return "disarm-and-focus";
-  return "disarm";
-}
-
-/**
- * 武装的单还在列表里才算武装:它被机器人吃完、在别处撤掉、或切到「仅当前标的」后看不到了,都视同取消武装 ——
- * 否则 window 上的 Esc 监听一直挂着,下一次随便在哪按 Esc 都会被它 preventDefault 吞掉。
- * OpenOrdersTab 发现它不成立时还会把 armedId 本身清掉(渲染期调整 state):同一 id 再回到列表 —— D16 订阅快照与终态事件赛跑后
- * upsert 回来、截断快照的 upsert —— 也不会悄悄重新武装。
- */
-export function liveArmedId(armedId: string | null, orders: readonly Order[]): string | null {
-  return armedId !== null && orders.some((o) => o.id === armedId) ? armedId : null;
-}
-
-/**
- * 纯函数:渲染期对武装 state 的调整(OpenOrdersTab 按 React「随输入调整 state」的写法调用)。
- * 武装的单不在列表里了 → 返回 armedId null、vanished true(调用方写回 state,并记一次「消失」好还原焦点);否则原样、vanished false。
- * 因为清的是 state 本身而不只是派生值,同一 id 之后再回到列表也不会悄悄重新武装。
- */
-export function reconcileArmed(armedId: string | null, orders: readonly Order[]): { armedId: string | null; vanished: boolean } {
-  if (armedId !== null && liveArmedId(armedId, orders) === null) return { armedId: null, vanished: true };
-  return { armedId, vanished: false };
-}
+// 两步撤单的武装状态、Esc / 点别处取消与焦点还原在 ./useArmedCancel.ts(条件单页签共用);纯函数在那里,这里原样再导出(tabs.ssr.test.ts 从这里引)
+export { armedEscapeAction, liveArmedId, reconcileArmed, type ArmedEscapeAction } from "./useArmedCancel";
 
 /**
  * 当前委托(计划 §3.1):useOpenOrders(scope === "current" ? symbol : undefined),WS 的 order 事件 / 轮询快照即时反映。
@@ -220,71 +191,17 @@ export function OpenOrdersTab({ symbol }: { symbol: string }) {
   const [scope, setScope] = useState<OrderScope>("all");
   const orders = useOpenOrders(scope === "current" ? symbol : undefined);
   const precisions = usePricePrecisions();
-  const [armedId, setArmedId] = useState<string | null>(null);
-  /** 武装的单离开列表的次数:下面的 effect 据此还原焦点 */
-  const [armedVanished, setArmedVanished] = useState(0);
-  // 武装的单离开了列表(被吃完、在别处撤掉):武装就此作废。渲染期按 React「随输入调整 state」的写法清掉 armedId
-  // (条件只成立一次,不会循环;React 丢弃这一遍、立即以新 state 重渲染)—— 同一 id 之后再回到列表(D16 订阅快照与终态事件
-  // 赛跑后 upsert 回来、截断快照的 upsert)也不会悄悄重新武装、重新挂上吞 Esc 的监听
-  if (reconcileArmed(armedId, orders).vanished) {
-    setArmedId(null);
-    setArmedVanished((n) => n + 1);
-  }
-  // 派生值仍保留(liveArmedId):下面的监听、视图与 handleCancel 都只看 armed
-  const armed = liveArmedId(armedId, orders);
+  // 武装状态、Esc / 点别处取消、武装的单离开列表视同取消(含焦点还原):useArmedCancel(与条件单页签共用)
+  const { armed, rootRef, press, disarm } = useArmedCancel(orders);
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
-  const rootRef = useRef<HTMLDivElement>(null);
-  // handleCancel 经 ref 读武装 / 在途状态,自身引用保持稳定 —— 它是每个 memo 行的 prop,武装一次不该让整张表重渲染;
   // 在途集合的 ref 同步更新,两次点击落在同一帧(state 还没提交)也不会对同一张单发两次 DELETE
-  const armedRef = useRef<string | null>(null);
   const busyRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    armedRef.current = armed;
-  }, [armed]);
-
-  // 武装的那一行消失时,它的「确认撤单」按钮若有焦点,焦点会掉到 body:交还本面板容器(焦点在别处就不动)
-  useEffect(() => {
-    if (armedVanished === 0) return;
-    if (document.activeElement === null || document.activeElement === document.body) rootRef.current?.focus();
-  }, [armedVanished]);
-
-  // 武装期间:Esc 取消(Safari 点击不聚焦按钮,所以挂在 window 上而不是按钮的 onKeyDown);在别处按下指针也取消。
-  // 捕获阶段:先于 TerminalShell 与全局快捷键(P1-22)的冒泡阶段监听器运行,preventDefault 之后它们看 defaultPrevented 就知道这一下已被处理
-  useEffect(() => {
-    if (armed === null) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.defaultPrevented) return;
-      const action = armedEscapeAction(document.activeElement, rootRef.current, document.body);
-      if (action === "ignore") return;
-      e.preventDefault();
-      armedRef.current = null;
-      setArmedId(null);
-      if (action === "disarm-and-focus") rootRef.current?.querySelector<HTMLButtonElement>(`[data-cancel-for="${CSS.escape(armed)}"]`)?.focus();
-    };
-    const onPointerDown = (e: PointerEvent) => {
-      const target = e.target instanceof Element ? e.target.closest("[data-cancel-for]") : null;
-      if (target?.getAttribute("data-cancel-for") === armed) return;
-      armedRef.current = null;
-      setArmedId(null);
-    };
-    window.addEventListener("keydown", onKeyDown, { capture: true });
-    document.addEventListener("pointerdown", onPointerDown, true);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown, { capture: true });
-      document.removeEventListener("pointerdown", onPointerDown, true);
-    };
-  }, [armed]);
 
   const handleCancel = useCallback(
     async (id: string) => {
       if (busyRef.current.has(id)) return;
-      if (armedRef.current !== id) {
-        armedRef.current = id;
-        setArmedId(id);
-        return;
-      }
-      armedRef.current = null;
-      setArmedId(null);
+      // 第一次点只武装;已武装的同一张单再点才撤
+      if (!press(id)) return;
       busyRef.current.add(id);
       setBusyIds(new Set(busyRef.current));
       const trigger = rootRef.current?.querySelector(`[data-cancel-for="${CSS.escape(id)}"]`);
@@ -304,15 +221,17 @@ export function OpenOrdersTab({ symbol }: { symbol: string }) {
         push("err", ui.error, { dedupeKey: `cancel:${id}` });
       }
     },
-    [push, t, ui],
+    [push, t, ui, press, rootRef],
   );
 
   // 切换范围也取消武装(键盘切换不经过 pointerdown):否则切到「仅当前标的」藏起来的武装单,切回来时又是武装态
-  const handleScope = useCallback((next: OrderScope) => {
-    armedRef.current = null;
-    setArmedId(null);
-    setScope(next);
-  }, []);
+  const handleScope = useCallback(
+    (next: OrderScope) => {
+      disarm();
+      setScope(next);
+    },
+    [disarm],
+  );
 
   return (
     <div ref={rootRef} tabIndex={-1} className="flex min-h-0 flex-1 flex-col gap-gap focus-visible:outline-none">

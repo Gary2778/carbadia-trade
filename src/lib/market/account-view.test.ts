@@ -9,7 +9,7 @@ import { lastPriceOf, positionValue } from "./position-groups";
 // 资产页 /trade/account 的纯函数(计划 §6.2.3 P2-10)。重点一条:「数字与终端 PositionsTab 一致」—— 同一份 store 数据喂给两边,
 // 资产页的合计(liveTotals)等于终端持仓页签各行(positionValue(position, lastPriceOf(行情, symbol)))相加。
 
-const me = { id: "u1", email: "u@x", name: "u", cashBalance: 1_000_000, lockedCash: 20_000 };
+const me = { id: "u1", email: "u@x", name: "u", cashBalance: 1_000_000, lockedCash: 20_000, unreadNotices: 0 };
 const balance: Balance = { cashBalance: 1_000_000, lockedCash: 20_000 };
 
 function position(symbol: string, patch: Partial<Position> = {}): Position {

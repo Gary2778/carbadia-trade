@@ -68,6 +68,23 @@ describe("机器人账户的密码哈希", () => {
     expect(new Map(again.map((row) => [row.id, row.passwordHash]))).toEqual(new Map(after.map((row) => [row.id, row.passwordHash])));
   });
 
+  it("一轮 tick 把机器人名单顺带放进发布器与提交后钩子共用的缓存(seedBotUserIds),不多查一次库(只有取机器人那一次 user.findMany)", async () => {
+    const publisher = await import("../server/market-publisher");
+    publisher._internal.reset();
+    expect(publisher.knownBotUserIds()).toBeNull();
+    const findMany = vi.spyOn(prisma.user, "findMany");
+    try {
+      await bot._internal.tick();
+      expect(findMany).toHaveBeenCalledTimes(1);
+    } finally {
+      findMany.mockRestore();
+    }
+    const ids = (await prisma.user.findMany({ where: { isBot: true } })).map((row) => row.id);
+    expect(ids).toHaveLength(3);
+    expect([...(publisher.knownBotUserIds() ?? [])].sort()).toEqual([...ids].sort());
+    publisher._internal.reset();
+  });
+
   it("prisma/seed.ts 本身不再给机器人可用的密码:三个 `!<64 位十六进制>` 各不相同,verify 为 false;真人仍是演示密码", async () => {
     // 真跑一遍种子(与 npm run db:seed 同一条命令),对着本用例的临时库;种子先清空全部表再重建
     execFileSync("node_modules/.bin/tsx", ["prisma/seed.ts"], {

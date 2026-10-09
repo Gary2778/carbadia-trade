@@ -4,7 +4,8 @@ import type { Retirement } from "../../generated/prisma";
 import { prisma } from "../server/db";
 import { publishPositionChange } from "../server/market-publisher";
 import { writeLedger } from "./ledger";
-import { isContentionError, prismaErrorCode } from "./matching";
+import { prismaErrorCode } from "../server/prisma-errors";
+import { isContentionError } from "./matching";
 
 export const retirementInputSchema = z.object({
   assetId: z.string().trim().min(1).max(100),
@@ -159,7 +160,7 @@ async function retireCreditsTx(userId: string, rawInput: unknown) {
     });
   } catch (error) {
     // 只认 code 字段不认类:生产下 globalThis.prisma 来自 instrumentation 那份运行时,这里 instanceof 本 bundle 的
-    // Prisma.PrismaClientKnownRequestError 恒为 false,P2002 重放与 P1008/P2028/P2034 → 503 都会漏成 500(见 matching.ts prismaErrorCode)。
+    // Prisma.PrismaClientKnownRequestError 恒为 false,P2002 重放与 P1008/P2028/P2034 → 503 都会漏成 500(见 src/lib/server/prisma-errors.ts)。
     // Concurrent duplicate submissions are resolved by the database unique key.
     if (prismaErrorCode(error) === "P2002") {
       const existing = await prisma.retirement.findUnique({ where: { userId_idempotencyKey: key } });

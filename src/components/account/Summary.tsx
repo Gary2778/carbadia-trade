@@ -4,8 +4,10 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import type { AccountTotals, Balance, EquityChange } from "@/shared";
 import { useLang, useT } from "@/i18n/LangProvider";
+import { formatTime } from "@/lib/time-format";
+import { useTimeZone } from "@/providers/useTimeZone";
 import { PANEL } from "./styles";
-import { gainTone, localeOf, shortTime, signedPct, signedUsd, tonnes, usd } from "./format";
+import { gainTone, localeOf, signedPct, signedUsd, tonnes, usd } from "./format";
 
 export type AccountSummaryProps = {
   /** 按最新价重算的合计(liveTotals) */
@@ -41,6 +43,7 @@ export function AccountSummary({ totals, balance, change24h, stale }: AccountSum
   const a = useT("account");
   const { lang } = useLang();
   const locale = localeOf(lang);
+  const tz = useTimeZone();
   const partial = totals.valuationComplete ? undefined : a.summary.partialValuation;
   return (
     <section aria-labelledby="account-summary-title" className="flex flex-col gap-gap">
@@ -59,7 +62,7 @@ export function AccountSummary({ totals, balance, change24h, stale }: AccountSum
           label={a.summary.change24h}
           value={change24h ? signedUsd(change24h.amount, locale) : "—"}
           tone={change24h ? gainTone(change24h.amount) : "text-muted"}
-          note={change24h ? a.summary.change24hSince(shortTime(change24h.since, locale)) : a.summary.change24hUnavailable}
+          note={change24h ? a.summary.change24hSince(formatTime(change24h.since, locale, tz, "short")) : a.summary.change24hUnavailable}
         >
           {change24h && change24h.pct != null ? <dd className={`tnum text-t-sm ${gainTone(change24h.amount)}`}>{signedPct(change24h.pct, locale)}</dd> : null}
         </Stat>

@@ -26,6 +26,13 @@
      display: none 的面板不生成网格项,也就不留空行与行间隙 —— 手机的 SSR 首帧与水合后的手机子树同高(P1-25f) */
 }
 
+/* 紧凑行高(P3-10,计划 §6.3.2 C8):偏好 density = compact 时 TerminalShell 根节点带 data-density,行高 token 换成 --spacing-row-dense(20 px);
+   h-row / min-h-row 与 VirtualList 的行定位(calc(var(--spacing-row) * i))都读它,自动跟着变。面板格子是定高的,只有面板里的行数变;
+   触屏的 --spacing-row-touch(InstrumentPanel)与条件单历史的高行(TabTable tallRows)写在子节点上,仍压过这里。 */
+[data-terminal][data-density="compact"] {
+  --spacing-row: var(--spacing-row-dense);
+}
+
 /* 面板格子:允许收缩到 0,内容在面板内部滚动,永远不把页面撑出横向滚动 */
 [data-terminal] > [data-area] {
   min-width: 0;
@@ -307,6 +314,13 @@
   [data-terminal] .t-pin-row:hover > .t-pin {
     background: linear-gradient(var(--terminal-row-hover), var(--terminal-row-hover)), var(--t-pin-bg, var(--terminal-panel));
   }
+}
+
+/* 持仓行的「止盈止损」按钮(P3-07;PositionsTab):英文「Take-profit / stop-loss」在 9.5rem 的操作列里折成两行,两行加起来必须正好是一行高。
+   行距取行高的一半:22 px 行 → 11 px(与字号相同,原来的 leading-none),20 px 行(紧凑,P3-10)→ 10 px,按钮不会比行高。
+   中文四个字一行放得下,只是按钮矮一点,仍在行里居中。 */
+[data-terminal] [data-tpsl] {
+  line-height: calc(var(--spacing-row) / 2);
 }
 
 /* ── 资产页 /trade/account(P2-10)──────────────────────────────────────────

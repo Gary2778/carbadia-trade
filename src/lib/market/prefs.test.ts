@@ -1,6 +1,8 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEPTH_OPTIONS } from "@/shared";
-import { DEFAULT_PREFS, PREFS_KEY, readPrefs, readPrefsSnapshot, subscribePrefs, writePrefs, type TerminalPrefs } from "./prefs";
+import { DEFAULT_PREFS, PREFS_KEY, readPrefs, readPrefsSnapshot, subscribePrefs, useDensity, writePrefs, type TerminalPrefs } from "./prefs";
 
 /** 最小 localStorage 假件(node 环境无 window / localStorage);可切换成抛错模式(写抛错,或读写都抛错 —— 禁用站点数据) */
 function fakeStorage(opts: { throwOnSet?: boolean; throwOnGet?: boolean } = {}) {
@@ -46,8 +48,8 @@ describe("readPrefs", () => {
     expect(readPrefs("null")).toBe(DEFAULT_PREFS);
   });
 
-  it("默认值:1m、agg null、深度 15、open、MA + VOL 开、lastSymbol null", () => {
-    expect(DEFAULT_PREFS).toEqual({ interval: "1m", agg: null, depth: 15, bottomTab: "open", indicators: { ma: true, ema: false, vol: true }, lastSymbol: null });
+  it("默认值:1m、agg null、深度 15、open、MA + VOL 开、lastSymbol null、密度 comfortable", () => {
+    expect(DEFAULT_PREFS).toEqual({ interval: "1m", agg: null, depth: 15, bottomTab: "open", indicators: { ma: true, ema: false, vol: true }, lastSymbol: null, density: "comfortable" });
     expect(DEFAULT_PREFS.depth).toBe(DEPTH_OPTIONS[0]);
   });
 
@@ -67,12 +69,17 @@ describe("readPrefs", () => {
   it("bottomTab:第五个页签 ledger(P2-07)可读;加它之前存下的四个旧值照旧读出;未知值回默认 open,不连累其它键", () => {
     for (const tab of ["open", "history", "fills", "positions", "ledger"]) expect(readPrefs(JSON.stringify({ bottomTab: tab })).bottomTab, tab).toBe(tab);
     // 旧版本(四个页签)写下的整份偏好原样读回
-    const legacy: TerminalPrefs = { interval: "15m", agg: 5, depth: 25, bottomTab: "positions", indicators: { ma: true, ema: true, vol: false }, lastSymbol: "VCS-FOR-2021" };
+    const legacy: TerminalPrefs = { interval: "15m", agg: 5, depth: 25, bottomTab: "positions", indicators: { ma: true, ema: true, vol: false }, lastSymbol: "VCS-FOR-2021", density: "comfortable" };
     expect(readPrefs(JSON.stringify(legacy))).toEqual(legacy);
     // 未知值(大小写不符、以后才有的页签、非字符串)→ 默认 open
     for (const tab of ["Ledger", "transactions", "", 4, null, ["ledger"]]) {
       expect(readPrefs(JSON.stringify({ bottomTab: tab, interval: "1h" })), JSON.stringify(tab)).toEqual({ ...DEFAULT_PREFS, interval: "1h" });
     }
+  });
+
+  it("bottomTab:第六个页签 triggers(条件单,P3-07)可读、可写;拼写不符的值仍回默认 open", () => {
+    expect(readPrefs(JSON.stringify({ bottomTab: "triggers" })).bottomTab).toBe("triggers");
+    for (const tab of ["Triggers", "conditional", "trigger"]) expect(readPrefs(JSON.stringify({ bottomTab: tab })).bottomTab, tab).toBe("open");
   });
 
   it("depth 只认 DEPTH_OPTIONS(15 / 25 / 50)里的数;其余(不在档位里、字符串、小数、负数)回默认 15", () => {
@@ -82,8 +89,19 @@ describe("readPrefs", () => {
     expect(readPrefs(JSON.stringify({ depth: 7, agg: 5 }))).toEqual({ ...DEFAULT_PREFS, agg: 5 });
   });
 
+  it("density(P3-10):comfortable / compact 可读;缺键(加它之前存下的整份偏好)读出默认 comfortable;未知值回默认,不连累其它键", () => {
+    for (const density of ["comfortable", "compact"]) expect(readPrefs(JSON.stringify({ density })).density, density).toBe(density);
+    // 没有 density 键的旧存储:其余键原样读回,密度是默认值
+    const old = { interval: "15m", agg: 5, depth: 25, bottomTab: "positions", indicators: { ma: true, ema: true, vol: false }, lastSymbol: "VCS-FOR-2021" };
+    expect(readPrefs(JSON.stringify(old))).toEqual({ ...old, density: "comfortable" });
+    // 未知值(大小写不符、以后才有的取值、非字符串)→ 默认
+    for (const density of ["Compact", "dense", "tight", "", 20, true, null, ["compact"]]) {
+      expect(readPrefs(JSON.stringify({ density, interval: "1h" })), JSON.stringify(density)).toEqual({ ...DEFAULT_PREFS, interval: "1h" });
+    }
+  });
+
   it("往返:全量写入再读回逐字段相等", () => {
-    const prefs: TerminalPrefs = { interval: "4h", agg: 50, depth: 50, bottomTab: "positions", indicators: { ma: false, ema: true, vol: false }, lastSymbol: "VCS-FOR-2021" };
+    const prefs: TerminalPrefs = { interval: "4h", agg: 50, depth: 50, bottomTab: "positions", indicators: { ma: false, ema: true, vol: false }, lastSymbol: "VCS-FOR-2021", density: "compact" };
     expect(readPrefs(JSON.stringify(prefs))).toEqual(prefs);
   });
 });
@@ -111,6 +129,17 @@ describe("writePrefs", () => {
     expect(readPrefs(localStorage.getItem(PREFS_KEY))).toEqual({ ...DEFAULT_PREFS, bottomTab: "history" });
   });
 
+  it("density 与其它键一样合并写入并持久化:只动自己,别的键与旧存储里没有 density 的内容都不丢", () => {
+    g.localStorage = fakeStorage();
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ interval: "1h", depth: 25 }));
+    writePrefs({ density: "compact" });
+    expect(JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}")).toMatchObject({ interval: "1h", depth: 25, density: "compact" });
+    writePrefs({ bottomTab: "fills" });
+    expect(readPrefs(localStorage.getItem(PREFS_KEY))).toEqual({ ...DEFAULT_PREFS, interval: "1h", depth: 25, density: "compact", bottomTab: "fills" });
+    writePrefs({ density: "comfortable" });
+    expect(readPrefs(localStorage.getItem(PREFS_KEY)).density).toBe("comfortable");
+  });
+
   it("切到流水页签(ledger)会持久化,旧存储里的其它键不动", () => {
     g.localStorage = fakeStorage();
     localStorage.setItem(PREFS_KEY, JSON.stringify({ interval: "1h", bottomTab: "positions", lastSymbol: "VCS-FOR-2021" }));
@@ -123,6 +152,45 @@ describe("writePrefs", () => {
     expect(() => writePrefs({ interval: "5m" })).not.toThrow();
     delete g.localStorage;
     expect(() => writePrefs({ interval: "5m" })).not.toThrow();
+  });
+});
+
+describe("useDensity(P3-10)", () => {
+  function Probe() {
+    return createElement("i", null, useDensity());
+  }
+
+  it("服务端与水合首帧恒为 comfortable,存储里写着 compact 也一样(与 usePrefs 同一模式);客户端快照读存储", () => {
+    g.localStorage = fakeStorage();
+    writePrefs({ density: "compact" });
+    expect(readPrefsSnapshot().density).toBe("compact");
+    expect(renderToStaticMarkup(createElement(Probe))).toBe("<i>comfortable</i>");
+  });
+
+  it("存储里没有 density(旧偏好)读出 comfortable;写入 compact 后订阅者被通知,再写回 comfortable", () => {
+    const w = globalThis as unknown as { window?: EventTarget };
+    const hadWindow = "window" in w;
+    w.window ??= new EventTarget();
+    g.localStorage = fakeStorage();
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ interval: "1h" }));
+    expect(readPrefsSnapshot().density).toBe("comfortable");
+    const listener = vi.fn();
+    const unsub = subscribePrefs(listener);
+    writePrefs({ density: "compact" });
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(readPrefsSnapshot().density).toBe("compact");
+    writePrefs({ density: "comfortable" });
+    expect(readPrefsSnapshot().density).toBe("comfortable");
+    unsub();
+    if (!hadWindow) delete w.window;
+  });
+
+  it("存储写不进去时密度也留在本次会话里(与其它偏好一样的内存兜底)", () => {
+    g.localStorage = fakeStorage({ throwOnSet: true });
+    writePrefs({ density: "compact" });
+    expect(readPrefsSnapshot().density).toBe("compact");
+    g.localStorage = fakeStorage();
+    writePrefs({ density: "comfortable" }); // 存储好了:一次成功写入把会话层清掉,不留给下一个用例
   });
 });
 

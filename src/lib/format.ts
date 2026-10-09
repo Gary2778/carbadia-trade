@@ -14,10 +14,7 @@ export const fmtQty = (n: number | null | undefined) =>
 export const fmtTonnes = (n: number | null | undefined) =>
   n == null ? "—" : Math.round(n).toLocaleString("en-US");
 
-export const fmtTime = (iso: string | Date, locale = "en") => {
-  const d = typeof iso === "string" ? new Date(iso) : iso;
-  return d.toLocaleString(locale, { hour12: false });
-};
+// 显示时间不在这里:Nav(每页的 floor 包)引本文件,时间格式化与时区偏好在 lib/time-format.ts,不得经本文件进 floor。
 
 /**
  * 按标的精度显示价格(计划 §4.4、§4.8):整数分 → 元字符串,小数位取 instrument.pricePrecision(钳到 0..2),

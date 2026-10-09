@@ -166,6 +166,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await (await import("@/lib/server/order-hooks")).drainOrderHooks(); // 真人成交的通知由提交后钩子写:等它写完再关库
   await prisma?.$disconnect();
   wipe();
 });

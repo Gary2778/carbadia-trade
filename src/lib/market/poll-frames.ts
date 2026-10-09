@@ -14,6 +14,7 @@ import type {
   Position,
   ServerFrame,
   TradesResponse,
+  Trigger,
 } from "@/shared";
 
 /** 无序号 */
@@ -44,10 +45,14 @@ export function framesFromCandles(symbol: string, interval: CandleInterval, r: C
   return r.candles.map((candle) => ({ t: "candle", topic: `candles:${symbol}:${interval}`, seq: NO_SEQ, symbol, interval, candle }));
 }
 
-/** 与 hub 对 account 的 snapshot-on-subscribe 同序:balance → 逐条 order → 逐条 position */
-export function framesFromAccount(orders: readonly Order[], positions: readonly Position[], balance: Balance): ServerFrame {
+/**
+ * 与 hub 对 account 的 snapshot-on-subscribe 同序:balance → 逐条 order → 逐条 position → 逐条 trigger(未完结的条件单,
+ * GET /api/account/triggers?status=open 的行;缺省 = 没有)。「已经没有了」的条件单靠调用方先 retainTriggers,帧本身只能覆盖。
+ */
+export function framesFromAccount(orders: readonly Order[], positions: readonly Position[], balance: Balance, triggers: readonly Trigger[] = []): ServerFrame {
   const frame: ServerFrame = [{ t: "balance", topic: "account", seq: NO_SEQ, balance }];
   for (const order of orders) frame.push({ t: "order", topic: "account", seq: NO_SEQ, order });
   for (const position of positions) frame.push({ t: "position", topic: "account", seq: NO_SEQ, position });
+  for (const trigger of triggers) frame.push({ t: "trigger", topic: "account", seq: NO_SEQ, trigger });
   return frame;
 }

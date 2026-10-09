@@ -111,6 +111,9 @@ describe("TerminalShell server render", () => {
     const html = render();
     expect(html).toContain('data-terminal=""');
     expect(html).toContain('data-glass="off"');
+    // 行密度(P3-10):服务端与水合首帧恒为 comfortable(存储值挂载后才读),根节点带 data-density;头部有开关,未按下
+    expect(html).toContain('data-glass="off" data-density="comfortable" data-layout="desktop"');
+    expect(html).toContain('aria-pressed="false" aria-label="Compact rows" title="Compact rows" data-density-toggle="comfortable"');
     // 与验收同一条正则:HTML 里出现全部 14 个标的代码
     expect(symbolsIn(html)).toEqual(new Set(INITIAL.map((x) => x.instrument.symbol)));
     for (const x of INITIAL) expect(html, x.instrument.symbol).toContain(`data-symbol="${x.instrument.symbol}"`);
@@ -153,9 +156,10 @@ describe("TerminalShell server render", () => {
     // 碳元数据:来自 initial 的 instrument(方法学 / 核证状态为 null → 未提供)
     expect(html).toContain('data-meta="methodology"');
     expect(html).toContain(`>${en.terminal.meta.notProvided}<`);
-    // 底部五个 Tab(P2-07 加「流水」;另有手机页签条的三个,见下一条用例)
+    // 底部六个 Tab(P2-07 加「流水」,P3-07 加「条件单」;另有手机页签条的三个,见下一条用例)
     const bottomTabs = html.slice(html.indexOf('data-area="tabs"'));
-    expect(count(bottomTabs, 'role="tab"')).toBe(5);
+    expect(count(bottomTabs, 'role="tab"')).toBe(6);
+    expect(bottomTabs).toContain(`>${en.terminal.tabs.triggers}</button>`);
     expect(bottomTabs).toContain(`>${en.terminal.ledger.tab}</button>`);
     // 头部的同项目 vintage chip(测试数据的 projectId 按 standard 分组:VCS 的其它标的都是兄弟)
     expect(html).toContain("data-vintage-selector");
@@ -308,6 +312,7 @@ describe("terminal route metadata", () => {
     await expect(meta("VCS-FOR-2021")).resolves.toEqual({
       title: "VCS-FOR-2021 · Terminal",
       description: "Simulated order book, candles and orders for VCS-FOR-2021 on Carbadia Trade.",
+      alternates: { canonical: "/trade/VCS-FOR-2021" },
     });
     // 形状对但库里没有:不查库,仍按代码出标题(404 由 page.tsx 决定)
     expect((await meta("NOPE-XX-2020")).title).toBe("NOPE-XX-2020 · Terminal");
@@ -414,12 +419,12 @@ describe("terminal shell helpers", () => {
   });
 
   it("formats the badge's last-message time by the UI language, not the browser default", () => {
-    expect(lastMessageTime(null, "en")).toBeNull();
+    expect(lastMessageTime(null, "en", "local")).toBeNull();
     const d = new Date(TS);
-    expect(lastMessageTime(TS, "en")).toBe(d.toLocaleTimeString("en-US", { hour12: false }));
-    expect(lastMessageTime(TS, "zh-CN")).toBe(d.toLocaleTimeString("zh-CN", { hour12: false }));
+    expect(lastMessageTime(TS, "en", "local")).toBe(d.toLocaleTimeString("en-US", { hour12: false }));
+    expect(lastMessageTime(TS, "zh-CN", "local")).toBe(d.toLocaleTimeString("zh-CN", { hour12: false }));
     // 冻结语言(界面只维护 en 与 zh-CN)一律按 en-US
-    expect(lastMessageTime(TS, "ja")).toBe(d.toLocaleTimeString("en-US", { hour12: false }));
+    expect(lastMessageTime(TS, "ja", "local")).toBe(d.toLocaleTimeString("en-US", { hour12: false }));
   });
 
   it("cycles Tab / Shift+Tab inside the modal drawer", () => {

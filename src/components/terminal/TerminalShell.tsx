@@ -4,11 +4,12 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import type { InstrumentListItem, OrderType, Side } from "@/shared";
+import { NoticeToaster } from "@/components/notices/NoticeToaster";
 import { useT } from "@/i18n/LangProvider";
 import { MarketProvider } from "@/lib/market/MarketProvider";
 import { intervalSlot, matchHotkey, nudgePrice, type HotkeyAction } from "@/lib/market/hotkeys";
 import { symbolFromPath } from "@/lib/market/navigation";
-import { usePrefs } from "@/lib/market/prefs";
+import { useDensity, usePrefs } from "@/lib/market/prefs";
 import type { InstrumentFilters } from "@/lib/market/selectors";
 import { marketActions, useMarketStore } from "@/lib/market/store";
 import type { TransportMode } from "@/lib/market/transport";
@@ -114,7 +115,7 @@ function PanelFrame({ area, title, children }: { area: string; title: string; ch
 /**
  * 这个包装只为把 interval 显式传给 MarketProvider(P1-14 的备注:订阅的 K 线周期在调用处看得见),不是为了隔离重渲染 ——
  * MarketProvider 自己也调 usePrefs()(不传 interval 时用它),任何偏好变化本来就会重渲染 MarketProvider;
- * 这里只是多一个同源的偏好订阅。壳本身不订阅偏好。
+ * 这里只是多一个同源的偏好订阅。壳本身只订阅行密度(useDensity,一个枚举值),不订阅其它偏好。
  */
 function MarketFeed({ symbol, initialInstruments, transportMode }: { symbol: string; initialInstruments: InstrumentListItem[]; transportMode?: TransportMode }) {
   const { interval } = usePrefs();
@@ -125,8 +126,10 @@ function MarketFeed({ symbol, initialInstruments, transportMode }: { symbol: str
  * 终端根容器、布局网格与键盘分发(计划 §3.1、§3.6、§4.1.5、§4.7、§6.1 SSR 首屏规则):
  *   - 根 <div data-terminal data-glass="off">:terminal.css 的网格 / 断点只匹配它;data-glass="off" 让 dark 下的面板不透明、
  *     液态玻璃折射跳过整棵子树;挂载时写 html[data-starfield="static"](星空画一帧就停 rAF),卸载删掉;
+ *     data-density(偏好 comfortable | compact,useDensity 只订阅这一项:服务端与水合首帧 comfortable)让 terminal.css 把行高 token 换成 20 px;
  *   - symbol = symbolFromPath(usePathname()) ?? props.symbol:换标的走 switchSymbol 的 replaceState,不走 RSC,本组件不重挂载;
- *   - 渲染期零 store 访问:头部、左栏、碳元数据的首屏由 initialInstruments 画(组件内部 store 值 ?? props 值),本组件不订阅任何行情;
+ *   - 渲染期零 store 访问:头部、左栏、碳元数据的首屏由 initialInstruments 画(组件内部 store 值 ?? props 值),本组件不订阅任何行情,
+ *     偏好也只订阅 density(周期 / 页签 / 盘口档数变化不重渲染壳,见 MarketFeed 上方的说明);
  *   - 面板(§3.1 组件树):ChartPanel(图表库在它内部 next/dynamic 懒加载)、OrderBookPanel、TradesTape、OrderPanel、
  *     CarbonMetaPanel、BottomTabs、头部的 VintageSelector;除图表外都自带 <section data-area>;
  *   - MarketProvider(唯一挂 transport 与 usePolling 的地方)等水合完成才挂(经 MarketFeed 显式传 interval):
@@ -148,6 +151,7 @@ export function TerminalShell({ symbol: propSymbol, initialInstruments, initialS
   const pathname = usePathname();
   const symbol = symbolFromPath(pathname) ?? propSymbol;
   const layout = useTerminalLayout();
+  const density = useDensity();
   const hydrated = useHydrated();
   const drawerId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -459,8 +463,10 @@ export function TerminalShell({ symbol: propSymbol, initialInstruments, initialS
   );
 
   return (
-    <div ref={rootRef} data-terminal="" data-glass="off" data-layout={layout} data-mobile-tab={mobileTab} data-drawer={drawerOpen ? "open" : "closed"}>
+    <div ref={rootRef} data-terminal="" data-glass="off" data-density={density} data-layout={layout} data-mobile-tab={mobileTab} data-drawer={drawerOpen ? "open" : "closed"}>
       {feed}
+      {/* 实时通知的 Toast(无渲染输出;列表在 Nav 的铃铛里) */}
+      <NoticeToaster />
 
       {header}
 

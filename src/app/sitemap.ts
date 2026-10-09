@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const base = "https://cbda.trade";
-  const statics = ["", "/otc", "/terms", "/privacy"].map((p) => ({
+  const statics = ["", "/trade/markets", "/otc", "/terms", "/privacy"].map((p) => ({
     url: `${base}${p}`,
     changeFrequency: "daily" as const,
     priority: p === "" ? 1 : 0.6,

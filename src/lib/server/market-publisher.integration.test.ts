@@ -44,12 +44,14 @@ type Publisher = typeof import("./market-publisher");
 type Snapshots = typeof import("./market-snapshots");
 type PositionsLib = typeof import("./positions");
 type Stats = typeof import("../exchange/stats24h");
+type OrderHooks = typeof import("./order-hooks");
 
 let prisma: Db;
 let matching: Matching;
 let otc: Otc;
 let retirement: RetirementLib;
 let publisher: Publisher;
+let orderHooks: OrderHooks;
 let snapshots: Snapshots;
 let getOrderBook: MockInstance<Matching["getOrderBook"]>;
 let stats24h: MockInstance<Stats["stats24h"]>;
@@ -79,8 +81,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function ofKind<K extends BusMessage["kind"]>(kind: K): Extract<BusMessage, { kind: K }>[] {
   return received.filter((m): m is Extract<BusMessage, { kind: K }> => m.kind === kind);
 }
+/**
+ * 某用户收到的 account 事件。不含 notice:成交通知由提交后钩子(order-hooks.ts)另写另发,时机在发布器的派生之外、与各条断言要看的
+ * order / fill / balance / position 的先后无关;它自己的行为见 order-hooks.integration.test.ts
+ */
 function accountOf(userId: string) {
-  return ofKind("account").filter((m) => m.userId === userId);
+  return ofKind("account").filter((m) => m.userId === userId && m.event.t !== "notice");
 }
 /** 当前标的的六个 candles topic */
 function candleTopics(): Topic[] {
@@ -114,6 +120,7 @@ function presence(topics: Topic[], users: string[] = []) {
 async function settle(ms = 120) {
   await sleep(ms);
   await publisher._internal.idle();
+  await orderHooks.drainOrderHooks(); // 提交后钩子的写通知也跑完(它不属于发布器,但与发布器共用库与机器人名单)
 }
 function subscribe() {
   unsubscribe?.();
@@ -172,6 +179,7 @@ beforeAll(async () => {
   otc = await import("../exchange/otc");
   retirement = await import("../exchange/retirement");
   publisher = await import("./market-publisher");
+  orderHooks = await import("./order-hooks");
   snapshots = await import("./market-snapshots");
   getOrderBook = vi.spyOn(matching, "getOrderBook");
   // 在 beforeAll 里取:之后「两个 bundle」的用例 vi.resetModules() 了,再 import 拿到的是新实例,不是发布器用的这一份
@@ -211,6 +219,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await publisher._internal.idle();
+  await orderHooks.drainOrderHooks();
 });
 
 describe("门控 ①:无订阅者", () => {
@@ -220,6 +229,7 @@ describe("门控 ①:无订阅者", () => {
     expect(bus.hasSubscribers()).toBe(false);
     const r = await buy(alice, 10_000, 10); // 穿价成交,若不门控会派生 ticker / candle / account
     expect(r.trades).toHaveLength(1);
+    await orderHooks.drainOrderHooks(); // 提交后钩子不看总线订阅者(成交通知照写),先让它写完,之后发布器这一侧不该再有 SQL
     await settle(50); // 让事务自己的最后一条查询事件落地
     const after = queries;
     await settle(200);
@@ -628,29 +638,40 @@ describe("account 事件(门控 ②:hasUser)", () => {
     expect(ofKind("book")[0].delta).toMatchObject({ bids: [{ price: 9_100, quantity: 0, orders: 0 }], asks: [] });
   });
 
-  it("account 快照钩子 globalThis.__carbadiaAccountSnapshot:balance + 当前挂单 + 持仓(与 REST 同形),余额 / 挂单 / 持仓在一个事务里读", async () => {
+  it("account 快照钩子 globalThis.__carbadiaAccountSnapshot:balance + 当前挂单 + 持仓 + 未完结的条件单(与 REST 同形),全部在一个事务里读", async () => {
     await quietly(() => buy(alice, 10_000, 5)); // alice 持有 5
     const open = await buy(alice, 9_200, 7);
+    // 条件单:PENDING 与 TRIGGERING 进快照(新的在前,与 ?status=open 同序),终态的不进
+    const trigger = (status: string, createdAt: number) =>
+      prisma.trigger.create({ data: { userId: alice, assetId, kind: "ALERT", direction: "ABOVE", triggerPrice: 12_000, status, createdAt: new Date(createdAt) } });
+    const t0 = Date.now();
+    const pending = await trigger("PENDING", t0 - 3_000);
+    const triggering = await trigger("TRIGGERING", t0 - 2_000);
+    await trigger("TRIGGERED", t0 - 1_000);
+    await trigger("CANCELLED", t0);
     sql.length = 0;
     const transaction = vi.spyOn(prisma, "$transaction");
     const snapshot = await globalThis.__carbadiaAccountSnapshot!(alice);
     const statements = [...sql];
-    // 一个批量事务装下全部七个读取(余额、挂单 + 持仓的五个:持仓行、账本、注销、SELL 挂单汇总、场外挂牌汇总;
+    // 一个批量事务装下全部八个读取(余额、挂单、条件单 + 持仓的五个:持仓行、账本、注销、SELL 挂单汇总、场外挂牌汇总;
     // 不是 Promise.all 里各读各的,再加一个只管持仓的小事务)
     expect(transaction).toHaveBeenCalledTimes(1);
-    expect(transaction.mock.calls[0][0]).toHaveLength(7);
+    expect(transaction.mock.calls[0][0]).toHaveLength(8);
     transaction.mockRestore();
     const user = await prisma.user.findUniqueOrThrow({ where: { id: alice } });
     expect(snapshot.balance).toEqual({ cashBalance: Number(user.cashBalance), lockedCash: Number(user.lockedCash) });
     expect(snapshot.orders).toEqual([expect.objectContaining({ id: open.order.id, symbol, side: "BUY", status: "OPEN", price: 9_200, quantity: 7 })]);
     expect(snapshot.positions).toEqual([expect.objectContaining({ assetId, symbol, quantity: 5, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 5 })]);
-    // 余额、挂单、持仓、账本、注销聚合、锁定来源的读取夹在同一对 BEGIN / COMMIT 之间:不会拼出「余额含某笔成交、挂单还是成交前」的快照
+    expect(snapshot.triggers.map((t) => [t.id, t.status])).toEqual([[triggering.id, "TRIGGERING"], [pending.id, "PENDING"]]);
+    expect(snapshot.triggers[1]).toMatchObject({ symbol, assetId, kind: "ALERT", direction: "ABOVE", triggerPrice: 12_000, createdAt: t0 - 3_000 });
+    expect("userId" in snapshot.triggers[0]).toBe(false);
+    // 余额、挂单、条件单、持仓、账本、注销聚合、锁定来源的读取夹在同一对 BEGIN / COMMIT 之间:不会拼出「余额含某笔成交、挂单还是成交前」的快照
     const begin = statements.findIndex((s) => /^BEGIN/i.test(s));
     const commit = statements.findIndex((s) => /^COMMIT/i.test(s));
     expect(begin).toBeGreaterThanOrEqual(0);
     expect(commit).toBeGreaterThan(begin);
     const inTx = statements.slice(begin + 1, commit).join("\n");
-    for (const table of ["User", "Order", "Holding", "LedgerEntry", "Retirement", "OtcListing"]) expect(inTx).toContain(`\`${table}\``);
+    for (const table of ["User", "Order", "Trigger", "Holding", "LedgerEntry", "Retirement", "OtcListing"]) expect(inTx).toContain(`\`${table}\``);
     expect(statements.filter((s) => /^BEGIN/i.test(s))).toHaveLength(1);
     await matching.cancelOrder(alice, open.order.id);
   });
@@ -1545,13 +1566,17 @@ describe("做市机器人账户与每用户状态回收(终审 P1-25a)", () => {
     expect(globalThis.__carbadiaPublisherState?.orderReads.size).toBe(0); // 机器人的挂单不领票;alice 的两张都已 FILLED,发布即回收
   });
 
-  it("没人在线时不为机器人名单查库", async () => {
-    await botQuote();
+  it("没人在线时不为机器人名单查库(机器人循环已把名单放进缓存):成交之后发布器与提交后钩子都没有 isBot 查询", async () => {
+    const botId = await botQuote();
     presence(all(), []);
+    // 这里没有跑着的机器人:用它每轮顺带调的 seedBotUserIds 把名单放进缓存(bot.ts 的 tick;那一步由 bot-credentials.integration.test.ts 覆盖)。
+    // 不放的话,提交后钩子在第一笔有真人的成交里会查一次名单(order-hooks.integration.test.ts 的冷启动用例);发布器自己仍然不查
+    publisher.seedBotUserIds([botId]);
     sql.length = 0;
-    await buy(alice, 9_900, 1);
+    await buy(alice, 9_900, 1); // 真人 taker、机器人 maker,没人在线
     await settle();
     expect(botQueries()).toBe(0);
+    expect(globalThis.__carbadiaPublisherState?.botUserIds).toEqual([botId]);
   });
 
   it("余额 / 订单票号有界:终结的挂单一发布就回收;用户离线后下一次清扫(每分钟至多一次,随发布触发)回收他的全部票号", async () => {

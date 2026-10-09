@@ -153,9 +153,9 @@ export function CreditOverview({
   return (
     <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-3">
       <div className="min-w-0 space-y-4 lg:col-span-2">
-        <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+        <section className="rounded-panel border border-border bg-surface p-5 shadow-card">
           <div className="flex items-start gap-4">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent/10 text-accent">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-control bg-accent/10 text-accent">
               <ExchangeIcon
                 name={asset.isScenario ? "layers" : profile.icon}
                 size={25}
@@ -203,7 +203,7 @@ export function CreditOverview({
           </p>
         </section>
 
-        <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+        <section className="rounded-panel border border-border bg-surface p-5 shadow-card">
           <h2 className="text-base font-semibold">
             {zh ? "项目数据与来源" : "Project details and provenance"}
           </h2>
@@ -285,7 +285,7 @@ export function CreditOverview({
             />
           </dl>
           {!asset.isScenario && (
-            <p className="mt-5 rounded-xl bg-surface-2 p-3 text-xs leading-5 text-muted">
+            <p className="mt-5 rounded-panel bg-surface-2 p-3 text-xs leading-5 text-muted">
               {zh
                 ? "Vintage 指减排或移除发生的年份，而非碳信用签发或购买年份。此页显示的是示范目录中的年份，未经项目文档核实。"
                 : "Vintage is the year the reduction or removal occurred, rather than when the credit was issued or purchased. The year shown here is a demo-catalogue value, not verified against project documents."}
@@ -294,7 +294,7 @@ export function CreditOverview({
         </section>
 
         {!asset.isScenario && (
-          <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+          <section className="rounded-panel border border-border bg-surface p-5 shadow-card">
             <h2 className="text-base font-semibold">
               {zh ? "环境与社会影响" : "Environmental and social impact"}
             </h2>
@@ -319,7 +319,7 @@ export function CreditOverview({
         )}
 
         {!asset.isScenario && (
-          <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+          <section className="rounded-panel border border-border bg-surface p-5 shadow-card">
             <h2 className="text-base font-semibold">
               {zh ? "了解碳信用的生命周期" : "Follow a credit’s lifecycle"}
             </h2>
@@ -332,7 +332,7 @@ export function CreditOverview({
               {lifecycle.map((stage, index) => (
                 <li
                   key={stage.name}
-                  className="rounded-xl border border-border bg-surface-2/50 p-3"
+                  className="rounded-panel border border-border bg-surface-2/50 p-3"
                 >
                   <div className="flex items-center gap-2">
                     <span
@@ -383,12 +383,12 @@ export function CreditOverview({
         )}
 
         {!asset.isScenario && (
-          <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+          <section className="rounded-panel border border-border bg-surface p-5 shadow-card">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="text-base font-semibold">
                 {zh ? "质量尽职调查清单" : "Quality due diligence"}
               </h2>
-              <span className="rounded-full border border-border px-2.5 py-1 text-xs text-muted">
+              <span className="rounded-chip border border-border px-2.5 py-1 text-xs text-muted">
                 {zh ? "未评分" : "Not scored"}
               </span>
             </div>
@@ -418,7 +418,7 @@ export function CreditOverview({
           </section>
         )}
 
-        <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+        <section className="rounded-panel border border-border bg-surface p-5 shadow-card">
           <h2 className="text-base font-semibold">
             {zh ? "文档与参考数据" : "Documents and references"}
           </h2>
@@ -450,7 +450,7 @@ export function CreditOverview({
                 />
               )}
             {!profile.registryUrl && (
-              <p className="rounded-xl bg-surface-2 p-3 text-sm text-muted">
+              <p className="rounded-panel bg-surface-2 p-3 text-sm text-muted">
                 {zh
                   ? "此示范标的没有可供核查的注册处项目链接。"
                   : "No registry project link is available for this demonstration instrument."}
@@ -461,7 +461,7 @@ export function CreditOverview({
       </div>
 
       <aside className="space-y-4 lg:sticky lg:top-6">
-        <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+        <section className="rounded-panel border border-border bg-surface p-5 shadow-card">
           <h2 className="font-semibold">
             {zh ? "模拟市场概况" : "Demo market snapshot"}
           </h2>
@@ -490,13 +490,13 @@ export function CreditOverview({
           <div className="mt-5 grid grid-cols-2 gap-2">
             <Link
               href={`/market/${asset.symbol}?tab=trade&side=BUY`}
-              className="rounded-full bg-accent px-4 py-2.5 text-center text-sm font-semibold text-background transition-colors hover:bg-accent-strong"
+              className="rounded-control bg-accent px-4 py-2.5 text-center text-sm font-semibold text-background transition-colors hover:bg-accent-strong"
             >
               {zh ? "买入" : "Buy"}
             </Link>
             <Link
               href={`/market/${asset.symbol}?tab=trade&side=SELL`}
-              className="rounded-full border border-accent/30 bg-accent/10 px-4 py-2.5 text-center text-sm font-semibold text-accent transition-colors hover:bg-accent/15"
+              className="rounded-control border border-accent/30 bg-accent/10 px-4 py-2.5 text-center text-sm font-semibold text-accent transition-colors hover:bg-accent/15"
             >
               {zh ? "卖出" : "Sell"}
             </Link>
@@ -508,7 +508,7 @@ export function CreditOverview({
           </p>
         </section>
         {!asset.isScenario && (
-          <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+          <section className="rounded-panel border border-border bg-surface p-5 shadow-card">
             <h2 className="font-semibold">
               {zh ? "理解名义碳量" : "Understanding carbon quantity"}
             </h2>
@@ -559,7 +559,7 @@ function ReferenceLink({ href, label }: { href: string; label: string }) {
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="flex items-center justify-between gap-3 rounded-xl border border-border px-4 py-3 text-sm font-medium hover:border-accent/40 hover:text-accent"
+      className="flex items-center justify-between gap-3 rounded-control border border-border px-4 py-3 text-sm font-medium hover:border-accent/40 hover:text-accent"
     >
       <span>{label}</span>
       <ExchangeIcon name="external" size={16} />

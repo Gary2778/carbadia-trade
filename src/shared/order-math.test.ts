@@ -9,12 +9,17 @@ import {
   qtyFromPercent,
   roundToStep,
   roundToTick,
+  triggerDirection,
   validateDraft,
+  validateTriggerDraft,
   type DraftAvail,
   type DraftInstrument,
   type OrderDraft,
+  type TriggerDraft,
+  type TriggerDraftField,
 } from "./order-math";
-import type { DraftError } from "./types";
+import { validateOcoDraft } from "./trigger-drafts";
+import type { DraftError, TriggerDraftError, TriggerDirection } from "./types";
 
 const instrument: DraftInstrument = { id: "asset-1", tickSize: 5, qtyStep: 10, minQty: 10 };
 const avail: DraftAvail = { cashCents: 1_000_000, qty: 500, bestBid: 9_995, bestAsk: 10_005 };
@@ -186,5 +191,137 @@ describe("validateDraft", () => {
     const inst = { ...instrument, tickSize: 1, qtyStep: 1, minQty: 1 };
     expect(validateDraft({ ...limitBuy, price: MAX_PRICE_CENTS, quantity: 10 }, inst, rich).ok).toBe(true);
     expect(validateDraft({ ...limitBuy, price: MAX_PRICE_CENTS, quantity: 11 }, inst, rich)).toEqual({ ok: false, reason: "overMaxNotional" });
+  });
+});
+
+describe("triggerDirection", () => {
+  const cases: [string, number, number | null, TriggerDirection | null][] = [
+    ["高于最新价 → ABOVE", 10_100, 10_000, "ABOVE"],
+    ["低于最新价 → BELOW", 9_900, 10_000, "BELOW"],
+    ["等于最新价 → null(创建即触发)", 10_000, 10_000, null],
+    ["最新价未知 → null,由调用方让用户选", 10_100, null, null],
+    ["最新价是 0 或非整数也算未知", 10_100, 0, null],
+    ["触发价不是整数 → null", 10_000.5, 10_000, null],
+    ["触发价 NaN → null", NaN, 10_000, null],
+  ];
+  it.each(cases)("%s", (_name, price, last, expected) => {
+    expect(triggerDirection(price, last)).toBe(expected);
+  });
+  it("最新价差一分就能定方向", () => {
+    expect(triggerDirection(10_001, 10_000)).toBe("ABOVE");
+    expect(triggerDirection(9_999, 10_000)).toBe("BELOW");
+  });
+});
+
+describe("validateTriggerDraft", () => {
+  const LAST = 10_000;
+  const limitBuyTrigger: TriggerDraft = { side: "BUY", orderType: "LIMIT", triggerPrice: 10_500, limitPrice: 10_550, quantity: 50 };
+  const marketSellTrigger: TriggerDraft = { side: "SELL", orderType: "MARKET", triggerPrice: 9_500, limitPrice: null, quantity: 50 };
+  const rich = { ...instrument, tickSize: 1, qtyStep: 1, minQty: 1 };
+
+  const cases: [string, TriggerDraftError, TriggerDraftField, TriggerDraft, (number | null)?, DraftInstrument?][] = [
+    ["触发价空", "invalidTrigger", "triggerPrice", { ...limitBuyTrigger, triggerPrice: null }],
+    ["触发价 NaN(垃圾输入)", "invalidTrigger", "triggerPrice", { ...limitBuyTrigger, triggerPrice: NaN }],
+    ["触发价 0", "invalidTrigger", "triggerPrice", { ...limitBuyTrigger, triggerPrice: 0 }],
+    ["触发价非整数", "invalidTrigger", "triggerPrice", { ...limitBuyTrigger, triggerPrice: 10_500.5 }],
+    ["触发价超上限", "overMaxPrice", "triggerPrice", { ...limitBuyTrigger, triggerPrice: MAX_PRICE_CENTS + 5 }],
+    ["触发价不在 tick 上", "offTick", "triggerPrice", { ...limitBuyTrigger, triggerPrice: 10_502 }],
+    ["触发价等于最新价", "wouldTriggerNow", "triggerPrice", { ...limitBuyTrigger, triggerPrice: LAST }],
+    ["最新价未知又没选方向", "directionNeeded", "direction", limitBuyTrigger, null],
+    ["最新价未知,选的方向不是 ABOVE / BELOW", "directionNeeded", "direction", { ...limitBuyTrigger, direction: null }, null],
+    ["限价空", "invalidPrice", "limitPrice", { ...limitBuyTrigger, limitPrice: null }],
+    ["限价 0", "invalidPrice", "limitPrice", { ...limitBuyTrigger, limitPrice: 0 }],
+    ["限价超上限", "overMaxPrice", "limitPrice", { ...limitBuyTrigger, limitPrice: MAX_PRICE_CENTS + 5 }],
+    ["限价不在 tick 上", "offTick", "limitPrice", { ...limitBuyTrigger, limitPrice: 10_552 }],
+    ["数量空", "invalidQty", "quantity", { ...limitBuyTrigger, quantity: null }],
+    ["数量非整数", "invalidQty", "quantity", { ...limitBuyTrigger, quantity: 10.5 }],
+    ["数量 0", "invalidQty", "quantity", { ...marketSellTrigger, quantity: 0 }],
+    ["数量低于最小量", "belowMinQty", "quantity", { ...limitBuyTrigger, quantity: 5 }],
+    ["数量不是 step 倍数", "offStep", "quantity", { ...limitBuyTrigger, quantity: 15 }],
+    ["限价名义额超上限", "overMaxNotional", "quantity", { ...limitBuyTrigger, triggerPrice: MAX_PRICE_CENTS - 5, limitPrice: MAX_PRICE_CENTS, quantity: 20 }, 1, rich],
+  ];
+
+  it.each(cases)("%s → %s(归到 %s)", (_name, reason, field, draft, last = LAST, inst = instrument) => {
+    expect(validateTriggerDraft(draft, inst, last)).toEqual({ ok: false, reason, field });
+  });
+
+  it("触发价相关的错误排在限价与数量之前,限价的排在数量之前", () => {
+    expect(validateTriggerDraft({ ...limitBuyTrigger, triggerPrice: null, limitPrice: null, quantity: null }, instrument, LAST)).toMatchObject({ reason: "invalidTrigger" });
+    expect(validateTriggerDraft({ ...limitBuyTrigger, triggerPrice: LAST, limitPrice: null, quantity: null }, instrument, LAST)).toMatchObject({ reason: "wouldTriggerNow" });
+    expect(validateTriggerDraft({ ...limitBuyTrigger, limitPrice: null, quantity: null }, instrument, LAST)).toMatchObject({ reason: "invalidPrice" });
+  });
+
+  it("市价条件单忽略限价(空 / 垃圾都不报错),名义额不查,输出的 limitPrice 为 null", () => {
+    for (const limitPrice of [null, NaN, 3, MAX_PRICE_CENTS * 2]) {
+      expect(validateTriggerDraft({ ...marketSellTrigger, limitPrice }, instrument, LAST)).toEqual({
+        ok: true,
+        trigger: { assetId: "asset-1", direction: "BELOW", triggerPrice: 9_500, side: "SELL", orderType: "MARKET", limitPrice: null, quantity: 50 },
+      });
+    }
+    const huge: TriggerDraft = { ...marketSellTrigger, triggerPrice: MAX_PRICE_CENTS, quantity: 100_000 };
+    expect(validateTriggerDraft(huge, rich, 1).ok).toBe(true);
+  });
+
+  it("合法限价条件单给出 submitOrderTrigger 的输入:ABOVE 买、限价带上", () => {
+    expect(validateTriggerDraft(limitBuyTrigger, instrument, LAST)).toEqual({
+      ok: true,
+      trigger: { assetId: "asset-1", direction: "ABOVE", triggerPrice: 10_500, side: "BUY", orderType: "LIMIT", limitPrice: 10_550, quantity: 50 },
+    });
+  });
+
+  it("买卖方向与触发方向互不相干:BELOW 的买单(抄底)、ABOVE 的卖单(止盈)都合法", () => {
+    expect(validateTriggerDraft({ ...limitBuyTrigger, triggerPrice: 9_500, limitPrice: 9_505 }, instrument, LAST)).toMatchObject({ ok: true, trigger: { direction: "BELOW", side: "BUY" } });
+    expect(validateTriggerDraft({ ...marketSellTrigger, triggerPrice: 10_500 }, instrument, LAST)).toMatchObject({ ok: true, trigger: { direction: "ABOVE", side: "SELL" } });
+  });
+
+  it("不查现金与持仓:数量远超任何资源也通过", () => {
+    expect(validateTriggerDraft({ ...limitBuyTrigger, quantity: 90 }, instrument, LAST).ok).toBe(true);
+    expect(validateTriggerDraft({ ...marketSellTrigger, quantity: 90 }, instrument, LAST).ok).toBe(true);
+  });
+
+  it("最新价未知时用用户选的方向,任何触发价都放行(与服务端「最新价为空时放行」一致);最新价已知时选的方向被忽略", () => {
+    expect(validateTriggerDraft({ ...limitBuyTrigger, direction: "BELOW" }, instrument, null)).toMatchObject({ ok: true, trigger: { direction: "BELOW", triggerPrice: 10_500 } });
+    expect(validateTriggerDraft({ ...limitBuyTrigger, direction: "ABOVE" }, instrument, null)).toMatchObject({ ok: true, trigger: { direction: "ABOVE" } });
+    expect(validateTriggerDraft({ ...limitBuyTrigger, direction: "BELOW" }, instrument, LAST)).toMatchObject({ ok: true, trigger: { direction: "ABOVE" } });
+    expect(validateTriggerDraft({ ...limitBuyTrigger, triggerPrice: LAST, direction: "ABOVE" }, instrument, LAST)).toMatchObject({ reason: "wouldTriggerNow" });
+  });
+
+  it("名义额恰好等于上限合法,多一分即 overMaxNotional", () => {
+    const draft: TriggerDraft = { side: "BUY", orderType: "LIMIT", triggerPrice: MAX_PRICE_CENTS, limitPrice: MAX_PRICE_CENTS, quantity: 10 };
+    expect(validateTriggerDraft(draft, rich, 1).ok).toBe(true);
+    expect(validateTriggerDraft({ ...draft, quantity: 11 }, rich, 1)).toEqual({ ok: false, reason: "overMaxNotional", field: "quantity" });
+  });
+
+  it("assetId 取自标的", () => {
+    const result = validateTriggerDraft(limitBuyTrigger, { ...instrument, id: "asset-9" }, LAST);
+    expect(result.ok && result.trigger.assetId).toBe("asset-9");
+  });
+});
+
+describe("TriggerDraftError 字面量", () => {
+  it("十四个字面量每个都有触发路径", () => {
+    const all: TriggerDraftError[] = [
+      "invalidTrigger", "wouldTriggerNow", "directionNeeded", "invalidPrice", "overMaxPrice", "offTick", "invalidQty",
+      "belowMinQty", "offStep", "overMaxNotional", "ocoNeedsOne", "takeProfitTooLow", "stopLossTooHigh", "overPosition",
+    ];
+    const seen = new Set<TriggerDraftError>();
+    const note = (r: { ok: boolean; reason?: TriggerDraftError }) => void (!r.ok && r.reason && seen.add(r.reason));
+    const t: TriggerDraft = { side: "BUY", orderType: "LIMIT", triggerPrice: 10_500, limitPrice: 10_550, quantity: 50 };
+    const inst = { ...instrument, tickSize: 1, qtyStep: 10, minQty: 10 };
+    note(validateTriggerDraft({ ...t, triggerPrice: null }, inst, 10_000));
+    note(validateTriggerDraft({ ...t, triggerPrice: 10_000 }, inst, 10_000));
+    note(validateTriggerDraft(t, inst, null));
+    note(validateTriggerDraft({ ...t, limitPrice: null }, inst, 10_000));
+    note(validateTriggerDraft({ ...t, limitPrice: MAX_PRICE_CENTS + 1 }, inst, 10_000));
+    note(validateTriggerDraft({ ...t, quantity: null }, inst, 10_000));
+    note(validateTriggerDraft({ ...t, quantity: 5 }, inst, 10_000));
+    note(validateTriggerDraft({ ...t, quantity: 15 }, inst, 10_000));
+    note(validateTriggerDraft({ ...t, limitPrice: MAX_PRICE_CENTS, quantity: 20 }, inst, 10_000));
+    note(validateTriggerDraft({ ...t, limitPrice: 10_552 }, { ...instrument, tickSize: 5 }, 10_000));
+    note(validateOcoDraft({ takeProfit: null, stopLoss: null, quantity: 10 }, inst, 10_000, 100));
+    note(validateOcoDraft({ takeProfit: 9_000, stopLoss: null, quantity: 10 }, inst, 10_000, 100));
+    note(validateOcoDraft({ takeProfit: null, stopLoss: 11_000, quantity: 10 }, inst, 10_000, 100));
+    note(validateOcoDraft({ takeProfit: 11_000, stopLoss: null, quantity: 110 }, inst, 10_000, 100));
+    expect([...seen].sort()).toEqual([...all].sort());
   });
 });

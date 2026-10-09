@@ -4,10 +4,14 @@ Carbadia Trade（cbda.trade）是 Carbadia 的碳信用交易模拟盘：真实�
 
 - **订单簿撮合**：限价单 / 市价单，价格-时间优先撮合引擎。
 - **OTC 挂牌**：卖方挂牌、买方按单价直接成交（支持部分成交、最小购买量）。
-- **自绘 K 线 / 深度图**：前端从成交记录实时聚合 OHLCV 并手写渲染。
+- **交易终端**（`/trade/<标的>`）：K 线（lightweight-charts）、盘口与逐笔成交、限价 / 市价下单，委托、成交、持仓与流水页签；行情经 WebSocket `/ws` 推送，推送不可用时自动轮询。
+- **条件单与提醒**：终端里可挂条件单（最新成交价涨到或跌到触发价时替你下限价或市价单）、给持仓挂止盈止损（一对市价卖出的条件单，一个触发另一个自动撤销）、设价格提醒（只通知、不下单）；未完结的与历史都在「条件单」页签，可撤销。等待期间不冻结资金或持仓，OTC 成交不触发。
+- **站内通知**：导航栏的铃铛列出成交、条件单结果与价格提醒（保留 30 天），终端页上实时弹出提示。
+- **时区与行高**：时间按浏览器时区、北京时间或 UTC 显示（终端与资产页页头切换）；终端表格可切紧凑行高。
 - **做市机器人**：7x24 随机游走报价、多档买卖盘挂单、概率吃单。
 - **模拟注销与私有凭证**：按账户记录模拟注销，幂等请求防重复扣减，不产生登记簿注销或真实减排声明。
 - **资产页**（`/trade/account`）：总资产、可用与冻结现金、持仓市值、24 小时变化与未实现盈亏；持仓按项目与年份分组，显示锁定来源（挂单 / 场外）与已注销数量；持仓分布、本人 OTC 挂单与撤单;注销在对话框里分三步确认。旧地址 `/portfolio`、`/dashboard` 308 跳到这里。演示资金不能充值、提现或转出，站内没有这类入口。
+- **市场总览页**（`/trade/markets`）：按登记簿与按项目类型的模拟指数（24 小时前 = 100，每个指数都标「模拟」）、涨幅榜、跌幅榜、成交量榜，情景标的单独一栏、不计入指数。公开页面，未登录可看；行情随推送更新，推送不可用时每 2 秒轮询。指数也可由 `GET /api/market/indices` 读取。
 - **CSV 导出**：委托、成交与资金流水各有一个导出（`/api/account/orders.csv`、`/api/account/fills.csv`、`/api/transactions.csv`），筛选条件与页面相同；文件名带 `simulated`，每行末列 `environment` 恒为 `SIMULATED`。
 - **影子价格实验**：情景标的价格纯由本盘交易形成；每日快照与真实收盘的内部对照只供研究，任何接口都不返回真实价格。
 - **两种界面语言**：English、简体中文。
@@ -55,18 +59,21 @@ src/
     page.tsx                 行情(现货市场)
     trade/layout.tsx         /trade 下共用的布局:终端样式与终端文案(只随 /trade 加载)
     trade/[symbol]/          交易终端:标的列表、K 线、盘口与成交、下单、委托 / 成交 / 持仓 / 流水
-    trade/account/           资产页(/portfolio、/dashboard 307 跳到这里)
+    trade/account/           资产页(/portfolio、/dashboard 308 跳到这里)
+    trade/markets/           市场总览页:模拟指数与三张榜
     market/[symbol]/         标的页:总览与简易交易(高级交易进终端)
     otc/ orders/ transactions/ retirement/ account/
     projects/ watchlist/ research/ learn/
     login/ register/ feedback/ terms/ privacy/
     api/                     Route Handlers(认证、行情、交易、持仓、注销、反馈、埋点、健康检查)
-    api/market/ api/account/ 终端的公开行情快照与私有账户接口(含资产总览 overview、委托与成交的 .csv 导出)
+    api/market/ api/account/ 终端的公开行情快照(含模拟指数 indices)与私有账户接口(含资产总览 overview、委托与成交的 .csv 导出、条件单 triggers、通知 notices)
     api/transactions/ api/transactions.csv/   资金流水(筛选、键集分页)与流水导出
     api/real/[...path]/      登记簿数据代理(→ carbadia.io/api/real/*)
   components/
     terminal/                交易终端的面板、快捷键帮助与布局
     account/                 资产页的组件与注销对话框(终端持仓页签共用)
+    markets/                 市场总览页的组件(指数卡、榜单、行情订阅)
+    notices/                 导航栏铃铛、通知面板(懒加载)与终端上的实时通知提示
     ui/                      全站共用的骨架、空态、错误态、对话框与虚拟列表
     exchange/                交易页组件及专属界面逻辑
     charts/ anim/            图表与动效
@@ -76,13 +83,13 @@ src/
   lib/
     market/                  终端的行情与账户 store、WebSocket / 轮询传输、选择器、下单草稿、快捷键
     exchange/                撮合、OTC、做市、账本、持仓分析与模拟注销
-    server/                  数据库、认证、限流、API 响应处理、行情发布与快照
+    server/                  数据库、认证、限流、API 响应处理、行情发布与快照、条件单触发引擎与通知
     real-sync/               影子价格采集
     registry-proxy.ts        代理路由的白名单与上游地址
     http/client.ts format.ts redirects.ts
   instrumentation.ts         做市机器人与影子价格同步入口
 prisma/                      数据模型、迁移、种子
-scripts/perf/                性能度量与核对脚本(chunk 预算、Lighthouse、WebSocket 压测、注销时延、本地大账本、CSV 对 JSON、资产页对终端合计)
+scripts/perf/                性能度量与核对脚本(chunk 预算、Lighthouse、WebSocket 压测与空闲连接观测、注销时延、本地大账本、CSV 对 JSON、资产页对终端合计)
 scripts/smoke-ws.mjs         /ws 冒烟
 infra/cloudflare-proxy/      cbda.trade 反代 Worker(内部)
 scripts/prod/                生产检查与诊断脚本(内部)
@@ -110,8 +117,11 @@ docs/                        设计、计划、发布记录(内部)
 | `SESSION_SECRET` | 是 | 会话 cookie 的 HMAC 签名密钥,用 `openssl rand -hex 32` 生成;生产环境缺失会拒绝启动(本地 dev 有内置回退) |
 | `BOT_DISABLED` | 否 | 设为 `1` 时不启动做市机器人 |
 | `SYNC_DISABLED` | 否 | 设为 `1` 时不启动影子价格采集;本地页面预览建议与 `BOT_DISABLED=1` 一起使用 |
+| `TRIGGERS_DISABLED` | 否 | 设为 `1` 时不启动条件单触发引擎(条件单与价格提醒不再触发,30 天通知清理也停),两个创建接口答 503 `triggersDisabled`(列表与撤销照常);与 `BOT_DISABLED` 无关 |
 | `RETENTION_DAYS` | 否 | 机器人历史数据保留天数,默认 `7`;任何真人参与的成交/订单永久保留 |
+| `BOT_LEDGER_RETENTION_DAYS` | 否 | 机器人自己的账本流水保留天数,默认 `1`(它占库的大头;只按登录用户读流水,没有地方读机器人的);真人流水永久保留 |
 | `PROXY_SECRET` | 否 | 反代密钥(生产建议设)。Cloudflare Worker 转发时注入请求头 `x-proxy-secret=<此值>`;应用只在该头匹配时才信任 `cf-connecting-ip` 做限流分桶 |
+| `WATCHDOG_SECRET` | 否 | 看门狗密钥。`GET /api/health` 带请求头 `x-watchdog-secret=<此值>` 时才做深探(写一次 `Heartbeat` 表 + 读数据卷用量,响应多 `write` / `disk`);未设或不匹配时响应与原来逐字节相同。值与主仓 Cloudflare Worker `carbadia-watchdog` 的同名 secret 一致 |
 | `REGISTRY_UPSTREAM` | 否 | 登记簿数据上游,默认 `https://carbadia.io` |
 | `BOT_TICK_MS` | 否 | 做市机器人节奏(毫秒),默认 `2500`;本地压盘口可设 `500`,生产不改 |
 | `START_MODE` | 否 | 容器启动方式:`custom`(默认,`node server.mjs`,Next + WebSocket `/ws` 同端口)或 `next`(回滚到 `next start`,无 `/ws`)。`docker-entrypoint.sh` 据它选启动命令;终端页在服务端也读它,为 `next` 时页面首帧就轮询、不试 `/ws` |
@@ -141,13 +151,14 @@ npm run dev:plain     # next dev 逃生口:没有 /ws,终端自动降级轮询,�
 npm run start         # 生产模式的 server.mjs(先 npm run build);npm run start:plain = next start
 npm run smoke:ws -- ws://localhost:3000/ws VCS-FOR-2021   # /ws 冒烟:10 s 内收到 hello、subscribed 与一帧 book 即 exit 0
 npm run perf:chunks  # 首屏 JS 体积门禁(先 npm run build):各路由 gzip 预算、库检测与阳性对照,超标 exit 1;--json 输出明细
-npm run perf:lh -- http://localhost:3000       # Lighthouse:终端页、首页与资产页,移动真实节流(门禁)5 次、模拟节流(只报告)与桌面各 3 次,取中位数(npx lighthouse@12,需本机 Chrome)
+npm run perf:lh -- http://localhost:3000       # Lighthouse:终端页、首页、资产页与市场总览页,移动真实节流(门禁)5 次、模拟节流(只报告)与桌面各 3 次,取中位数(npx lighthouse@12,需本机 Chrome)
 npm run perf:ws-flood -- --url ws://localhost:3000/ws --clients 300 --seconds 60   # /ws 压测
+npm run perf:ws-idle -- --url ws://localhost:3000/ws --minutes 10   # 一条不订阅、不发应用层 ping 的 /ws 连接能活多久(只开一条、不写入,可对着线上跑)
 ```
 
 ## 运行与发布
 
-Railway 使用 Dockerfile 构建，并在构建时执行测试与 ESLint。容器启动时校验环境变量、应用 Prisma 迁移、重建查询统计，然后启动 `node server.mjs`（Next 页面、REST 与 WebSocket `/ws` 同一端口；`START_MODE=next` 时退回 `next start`，无 `/ws`，终端自动降级轮询）；生产 SQLite 必须挂载在 `/data` 持久化卷上。`GET /api/health` 返回 `{ db, bot, startMode, ws }`，其中 `ws` 是 hub 的连接 / 订阅 / 帧数 / 背压统计（`WS_DISABLED=1` 时 `enabled: false`）。基础设施定义在内部目录 `.railway/railway.ts`（`railway config plan` / `apply`），反代 Worker 在内部目录 `infra/cloudflare-proxy/`。
+Railway 使用 Dockerfile 构建，并在构建时执行测试与 ESLint。容器启动时校验环境变量、应用 Prisma 迁移、重建查询统计，然后启动 `node server.mjs`（Next 页面、REST 与 WebSocket `/ws` 同一端口；`START_MODE=next` 时退回 `next start`，无 `/ws`，终端自动降级轮询）；生产 SQLite 必须挂载在 `/data` 持久化卷上。`GET /api/health` 返回 `{ db, bot, startMode, ws }`，其中 `ws` 是 hub 的连接 / 订阅 / 帧数 / 背压统计（`WS_DISABLED=1` 时 `enabled: false`）；带 `x-watchdog-secret` 且匹配 `WATCHDOG_SECRET` 时多 `write` / `disk`（看门狗深探，见主仓 `infra/watchdog/`）。基础设施定义在内部目录 `.railway/railway.ts`（`railway config plan` / `apply`），反代 Worker 在内部目录 `infra/cloudflare-proxy/`。
 
 ## 与 carbadia.io 的关系
 

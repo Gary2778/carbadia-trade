@@ -138,7 +138,7 @@ function composite(chain: readonly string[], base: string, layers: readonly stri
 }
 
 
-/** 终端的源码:src/components/terminal、src/app/trade 与资产页组件 src/components/account(P2-10)下的 .tsx(不含测试);name 是相对各自目录的路径 */
+/** 终端的源码:src/components/terminal、src/app/trade、资产页组件 src/components/account(P2-10)与市场总览页组件 src/components/markets(P3-05)下的 .tsx(不含测试);name 是相对各自目录的路径 */
 function tsxUnder(dir: string, prefix: string): { name: string; src: string }[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     if (entry.isDirectory()) return tsxUnder(join(dir, entry.name), `${prefix}${entry.name}/`);
@@ -150,6 +150,7 @@ const TERMINAL_SOURCES = [
   ...tsxUnder(fileURLToPath(new URL("./", import.meta.url)), ""),
   ...tsxUnder(fileURLToPath(new URL("../../app/trade/", import.meta.url)), "app/trade/"),
   ...tsxUnder(fileURLToPath(new URL("../account/", import.meta.url)), "components/account/"),
+  ...tsxUnder(fileURLToPath(new URL("../markets/", import.meta.url)), "components/markets/"),
 ];
 
 /** 终端文字坐在这三种面上:面板、二级面板(输入框、下拉、买卖切换)、对话框(ui/Dialog 的 --surface-overlay) */

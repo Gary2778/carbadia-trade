@@ -18,6 +18,7 @@
     "perf:chunks": "node scripts/perf/chunk-report.mjs",
     "perf:lh": "node scripts/perf/lighthouse.mjs",
     "perf:ws-flood": "node scripts/perf/ws-flood.mjs",
+    "perf:ws-idle": "node scripts/perf/ws-idle.mjs",
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset --force",
     "db:seed": "tsx prisma/seed.ts",

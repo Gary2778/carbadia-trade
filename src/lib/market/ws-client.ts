@@ -19,8 +19,8 @@
 //   - 可见性:document.hidden 超过 30 s 退订市场 topic(account 保留),回前台重订阅;
 //   - lastMessageAt 每帧更新,但对外最多每秒通知一次,免得 ConnectionBadge 每帧重渲染;
 //   - account 订阅快照的边界:识别出一份快照就把帧在快照末尾切开 —— 快照及之前的部分交给 onFrame,随即上报 account-snapshot
-//     (快照里的挂单 id / 持仓 assetId),同一帧里快照之后的事件在上报之后才交给 onFrame;MarketProvider 据此收口
-//     (快照只能覆盖,表达不了断线期间已成交 / 已撤的单与卖光的持仓)。识别规则见 accountWatch。
+//     (快照里的挂单 id / 持仓 assetId / 未完结条件单 id),同一帧里快照之后的事件在上报之后才交给 onFrame;MarketProvider 据此收口
+//     (快照只能覆盖,表达不了断线期间已成交 / 已撤的单、卖光的持仓与已触发 / 已撤的条件单)。识别规则见 accountWatch。
 // 全部外部依赖(WebSocket 构造器、定时器、随机数、可见性)可注入,测试用假 socket + vitest 假定时器,不需要 jsdom。
 // 帧本身不校验 schema(信任同源 hub,省掉 zod 进客户端 bundle);非数组 / 非 JSON 的帧直接忽略。
 import type { ClientOp, ConnectionState, Order, ServerEvent, ServerFrame, Topic } from "@/shared";
@@ -51,7 +51,7 @@ export type Visibility = {
 /**
  * 给 transport 管理器(降级判定)与 PerfHud 的生命周期事件;account-snapshot 给 MarketProvider 做账户快照收口
  * (帧在快照末尾切开:快照及之前的事件已交给 onFrame、同一帧里快照之后的事件还没交 —— 收口时 flush batcher 只会应用到快照为止;
- * orderIds / assetIds = 快照里的挂单 id / 持仓 assetId,再减去订阅之后、快照之前的增量里已终结(FILLED / CANCELLED)的挂单;
+ * orderIds / assetIds / triggerIds = 快照里的挂单 id / 持仓 assetId / 未完结条件单 id,orderIds 再减去订阅之后、快照之前的增量里已终结(FILLED / CANCELLED)的挂单;
  * 快照之前的增量碰过、快照里却没有的 id 不在其中,见 createWsClient 里的 accountWatch)。
  */
 export type WsClientEvent =
@@ -59,7 +59,7 @@ export type WsClientEvent =
   | { type: "connect-failed"; attempt: number }
   | { type: "policy"; code: number; reason: string }
   | { type: "resync"; topic: Topic; ok: boolean }
-  | { type: "account-snapshot"; orderIds: ReadonlySet<string>; assetIds: ReadonlySet<string> }
+  | { type: "account-snapshot"; orderIds: ReadonlySet<string>; assetIds: ReadonlySet<string>; triggerIds: ReadonlySet<string> }
   /**
    * 这条连接的身份与账户 store 的不一致:reason "hello" = hello.userId(userId)不等于 expectedUserId;"unauthorized" = account 被 hub 拒绝
    * (连接是匿名的)。每条连接至多一次;此后这条连接不再订 account,直到重连后的 hello 一致。
@@ -116,8 +116,8 @@ export const ACCOUNT_SNAPSHOT_WATCH_MAX = 1_000;
 /** account 快照观察窗口里记下的 id(见 createWsClient 的 accountWatch):只有窗口里已终结的挂单 */
 type AccountWatch = { closedOrderIds: Set<string> };
 const newAccountWatch = (): AccountWatch => ({ closedOrderIds: new Set() });
-/** 正在识别的一份快照:它自己的挂单 id / 持仓 assetId(收口只保留这些),外加窗口里记下的已终结挂单(排除) */
-type SnapshotIds = { orderIds: Set<string>; assetIds: Set<string>; closedOrderIds: Set<string>; seq: number };
+/** 正在识别的一份快照:它自己的挂单 id / 持仓 assetId / 条件单 id(收口只保留这些),外加窗口里记下的已终结挂单(排除) */
+type SnapshotIds = { orderIds: Set<string>; assetIds: Set<string>; triggerIds: Set<string>; closedOrderIds: Set<string>; seq: number };
 const isOpenOrder = (order: Order): boolean => order.status === "OPEN" || order.status === "PARTIAL";
 
 const OPEN = 1;
@@ -210,8 +210,8 @@ export function createWsClient(opts: WsClientOptions): MarketTransport {
   /** 已发出重订阅、还没恢复(subscribed + 快照)的 topic → 等到哪一步与超时定时器 */
   const pendingResync = new Map<Topic, PendingResync>();
   /**
-   * account 快照的观察窗口。§3.3:subscribe account → subscribed{seq},随后快照 = balance → 逐条 order → 逐条 position,全部带当前 seq
-   * (快照不推进序号)。hub 的顺序保证(server/ws-hub.mjs runAccountSnapshot):查询前记下该用户的 seq,返回时 seq 变了就重查,
+   * account 快照的观察窗口。§3.3:subscribe account → subscribed{seq},随后快照 = balance → 逐条 order → 逐条 position → 逐条 trigger
+   * (未完结的条件单,P3-03),全部带当前 seq(快照不推进序号)。hub 的顺序保证(server/ws-hub.mjs runAccountSnapshot):查询前记下该用户的 seq,返回时 seq 变了就重查,
    * 只有查询期间没有账户事件流出才发快照、带的是那时的 seq —— 所以快照不会比它前面任何一条账户增量旧,窗口里的增量也不会比快照新;
    * 连续几次都被穿插就不发快照,改发 resync 让客户端重订阅。
    * 快照事件由 hub 一次同步入队,落在同一个合帧里、彼此相邻。识别:
@@ -222,7 +222,8 @@ export function createWsClient(opts: WsClientOptions): MarketTransport {
    *     (instrumentation 与路由各一份)可能把同一持仓相邻两次提交的事件以相反顺序送上总线(先到 qty 0、后到更旧的 qty 5),
    *     若按「窗口碰过」保留,更旧的那行会一直留在 store 里,直到该用户该标的的下一条事件;
    *   - 窗口里第一条被应用且不推进序号(seq === 应用前的 lastSeq["account"])的 balance 即快照开头,关窗;
-   *     同一帧里紧随其后、同 seq 的 order / position 属于快照,遇到任何别的事件或帧尾即结束;
+   *     同一帧里紧随其后、同 seq 的 order / position / trigger 属于快照,遇到任何别的事件或帧尾即结束
+   *     (快照里的 trigger 都是未完结的行,它们的 id 进收口集合;推进序号的 trigger 是增量,seq 不同,把快照结束);
    *   - 帧在快照末尾切开交付(见 handleMessage 的 segments):快照之后同一帧里的增量比快照新、不进收口集合,
    *     它们在 account-snapshot 上报(MarketProvider 收口)之后才交给 onFrame,所以收口删不到它们;一帧里有两份快照时同理各切一刀。
    * 推进序号的 balance 是增量;被当旧事件丢掉的快照不认;hello / stop / 退订 account 关窗。
@@ -502,19 +503,19 @@ export function createWsClient(opts: WsClientOptions): MarketTransport {
     // 帧在每份 account 快照(见 accountWatch)的末尾切段:段交给 onFrame,紧接着上报这份快照,再交下一段。
     // hub 把一个合帧窗口里的事件全放进一帧,快照后面可能还跟着更新的增量(新开的单、新持仓)乃至下一份快照;
     // MarketProvider 收口前会 flush batcher,整帧一起交出去的话,这些更新的事件会先落进 store、再被这次收口按旧快照删掉。
-    const segments: { events: ServerEvent[]; snapshot: { orderIds: Set<string>; assetIds: Set<string> } | null }[] = [];
+    const segments: { events: ServerEvent[]; snapshot: { orderIds: Set<string>; assetIds: Set<string>; triggerIds: Set<string> } | null }[] = [];
     let out: ServerEvent[] = [];
     let snapshot: SnapshotIds | null = null;
     const endSnapshot = (): void => {
       if (!snapshot) return;
-      segments.push({ events: out, snapshot: { orderIds: snapshot.orderIds, assetIds: snapshot.assetIds } });
+      segments.push({ events: out, snapshot: { orderIds: snapshot.orderIds, assetIds: snapshot.assetIds, triggerIds: snapshot.triggerIds } });
       out = [];
       snapshot = null;
     };
     for (const ev of frame as ServerEvent[]) {
       if (!ev || typeof ev !== "object" || typeof ev.t !== "string") continue;
-      // 快照只由同 seq 的 account order / position 延续,别的事件一律把它结束
-      if (snapshot && !((ev.t === "order" || ev.t === "position") && ev.topic === "account" && ev.seq === snapshot.seq)) endSnapshot();
+      // 快照只由同 seq 的 account order / position / trigger 延续,别的事件一律把它结束
+      if (snapshot && !((ev.t === "order" || ev.t === "position" || ev.t === "trigger") && ev.topic === "account" && ev.seq === snapshot.seq)) endSnapshot();
       switch (ev.t) {
         case "hello":
           onHello(ev);
@@ -570,12 +571,13 @@ export function createWsClient(opts: WsClientOptions): MarketTransport {
             if (ev.t === "order") {
               if (!snapshot.closedOrderIds.has(ev.order.id)) snapshot.orderIds.add(ev.order.id);
             } else if (ev.t === "position") snapshot.assetIds.add(ev.position.assetId);
+            else if (ev.t === "trigger") snapshot.triggerIds.add(ev.trigger.id);
             break;
           }
           if (!accountWatch) break;
           if (ev.t === "balance" && verdict === "apply" && before !== undefined && ev.seq === before) {
             // 收口集合只从快照自己的行开始:窗口里的增量比快照旧,碰过的 id 不保留(见 accountWatch)
-            snapshot = { orderIds: new Set(), assetIds: new Set(), closedOrderIds: accountWatch.closedOrderIds, seq: ev.seq };
+            snapshot = { orderIds: new Set(), assetIds: new Set(), triggerIds: new Set(), closedOrderIds: accountWatch.closedOrderIds, seq: ev.seq };
             accountWatch = null;
             break;
           }
@@ -593,7 +595,7 @@ export function createWsClient(opts: WsClientOptions): MarketTransport {
     for (const segment of segments) {
       if (segment.events.length) opts.onFrame(segment.events);
       if (!segment.snapshot) continue;
-      opts.onEvent?.({ type: "account-snapshot", orderIds: segment.snapshot.orderIds, assetIds: segment.snapshot.assetIds });
+      opts.onEvent?.({ type: "account-snapshot", orderIds: segment.snapshot.orderIds, assetIds: segment.snapshot.assetIds, triggerIds: segment.snapshot.triggerIds });
       if (!started) return; // 回调里停掉了:本帧余下的段作废(同循环里的处理)
     }
     for (const [topic, since] of gaps) resubscribe(topic, since);

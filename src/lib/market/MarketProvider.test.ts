@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AccountOrdersResponse, Balance, BookResponse, CandleBar, CandlesResponse, ConnectionState, InstrumentsResponse, Me, Order, Position, PositionsResponse, ServerEvent, TradesResponse } from "@/shared";
+import type { AccountOrdersResponse, AccountTriggersResponse, Balance, BookResponse, CandleBar, CandlesResponse, ConnectionState, InstrumentsResponse, Me, Order, Position, PositionsResponse, ServerEvent, TradesResponse, Trigger } from "@/shared";
 import { DEFAULT_FEE_SCHEDULE, auditRefOf } from "@/shared";
-import { OPEN_ORDERS_MAX_PAGES, applyAccountEvents as applyAccountEventsViaBridge, readKnownMeId, registerAccountSource } from "./account-bridge";
+import { OPEN_ORDERS_MAX_PAGES, applyAccountEvents as applyAccountEventsViaBridge, readKnownMeId, registerAccountSource, registerNoticeRefresher, type NoticeRefreshReason } from "./account-bridge";
 import {
   accountActions,
   accountSource,
@@ -10,6 +10,7 @@ import {
   createInitialAccountState,
   retainOpenOrders as storeRetainOpenOrders,
   retainPositions as storeRetainPositions,
+  retainTriggers as storeRetainTriggers,
   useAccountStore,
 } from "./account-store";
 import { createBatcher, type Batcher } from "./batcher";
@@ -69,9 +70,12 @@ function fakeRuntime() {
 function fakeAccount(me: Me) {
   const retain = vi.fn<(ids: ReadonlySet<string>) => void>();
   const retainPos = vi.fn<(assetIds: ReadonlySet<string>) => void>();
+  const retainTrig = vi.fn<(ids: ReadonlySet<string>) => void>();
   const apply = vi.fn();
-  registerAccountSource({ subscribe: () => () => {}, getState: () => ({ me }), applyAccountEvent: apply, retainOpenOrders: retain, retainPositions: retainPos });
-  return { retain, retainPos, apply };
+  const refreshNotices = vi.fn<(reason: NoticeRefreshReason) => void>();
+  registerAccountSource({ subscribe: () => () => {}, getState: () => ({ me }), applyAccountEvent: apply, retainOpenOrders: retain, retainPositions: retainPos, retainTriggers: retainTrig });
+  registerNoticeRefresher(refreshNotices);
+  return { retain, retainPos, retainTrig, apply, refreshNotices };
 }
 
 const bookResp: BookResponse = { symbol: SYM, bids: [{ price: 1230, quantity: 3, orders: 1 }], asks: [], ts: 5, seq: 0 };
@@ -91,7 +95,19 @@ const order = (id: string): Order => ({ id, clientOrderId: null, assetId: "a1", 
 const position = (assetId: string): Position => ({ assetId, symbol: SYM, quantity: 3, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 3, retired: 0, lastPrice: 1234, marketValue: 3702, averagePurchasePrice: null, unrealisedPnl: null, costBasisStatus: "incomplete_ledger", isScenario: false });
 const positionsResp: PositionsResponse = { positions: [position("a1")], balance };
 const ordersResp: AccountOrdersResponse = { orders: [order("o1")], nextCursor: null };
-const me: Me = { id: "u1", email: "u@x", name: "u", cashBalance: 1000, lockedCash: 0 };
+const trigger = (id: string, over: Partial<Trigger> = {}): Trigger => ({
+  id, kind: "ORDER", assetId: "a1", symbol: SYM, direction: "ABOVE", triggerPrice: 1300, side: "SELL", orderType: "MARKET", limitPrice: null, quantity: 2,
+  ocoGroupId: null, status: "PENDING", reason: null, orderId: null, firedPrice: null, createdAt: 1, updatedAt: 1, firedAt: null, ...over,
+});
+const triggersResp: AccountTriggersResponse = { triggers: [trigger("t1")], nextCursor: null };
+const noTriggers: AccountTriggersResponse = { triggers: [], nextCursor: null };
+/** 一轮 pollAccount 的三个请求(持仓、挂单、未完结条件单)一次答完 */
+function answerPoll(over: { positions?: unknown; orders?: unknown; triggers?: unknown } = {}): void {
+  answer("/positions", over.positions ?? positionsResp);
+  answer("/orders", over.orders ?? ordersResp);
+  answer("/triggers", over.triggers ?? triggersResp);
+}
+const me: Me = { id: "u1", email: "u@x", name: "u", cashBalance: 1000, lockedCash: 0, unreadNotices: 0 };
 const bar = (t: number, v: number, c = 1): CandleBar => ({ t, o: 1, h: 1, l: 1, c, v });
 const tradeAt = (id: string, ts: number) => ({ id, symbol: SYM, price: 1234, quantity: 1, takerSide: "BUY" as const, ts, auditRef: auditRefOf(id) });
 
@@ -106,6 +122,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   registerAccountSource(null);
+  registerNoticeRefresher(null);
 });
 
 describe("pollMarket", () => {
@@ -163,23 +180,140 @@ describe("pollMarket", () => {
 });
 
 describe("pollAccount", () => {
-  it("轮询中且仍是同一用户:先 retainOpenOrders / retainPositions 收口挂单与持仓集合,再 push 账户快照帧", async () => {
+  it("轮询中且仍是同一用户:先 retainOpenOrders / retainPositions / retainTriggers 收口挂单、持仓与条件单集合,再 push 账户快照帧(条件单排在持仓之后)", async () => {
     const { rt, push } = fakeRuntime();
-    const { retain, retainPos } = fakeAccount(me);
+    const { retain, retainPos, retainTrig } = fakeAccount(me);
     marketActions.setConnection(POLL);
     const done = pollAccount("u1", rt);
-    expect(inflight.map((p) => p.url)).toEqual(["/api/account/positions", "/api/account/orders?status=open&limit=100"]);
-    answer("/positions", positionsResp);
-    answer("/orders", ordersResp);
+    expect(inflight.map((p) => p.url)).toEqual(["/api/account/positions", "/api/account/orders?status=open&limit=100", "/api/account/triggers?status=open&limit=100"]);
+    answerPoll();
     await done;
     expect(retain).toHaveBeenCalledTimes(1);
     expect([...retain.mock.calls[0][0]]).toEqual(["o1"]);
     expect(retainPos).toHaveBeenCalledTimes(1);
     expect([...retainPos.mock.calls[0][0]]).toEqual(["a1"]);
+    expect(retainTrig).toHaveBeenCalledTimes(1);
+    expect([...retainTrig.mock.calls[0][0]]).toEqual(["t1"]);
     expect(push).toHaveBeenCalledTimes(1);
-    expect(push.mock.calls[0][0].map((e) => e.t)).toEqual(["balance", "order", "position"]);
+    expect(push.mock.calls[0][0].map((e) => e.t)).toEqual(["balance", "order", "position", "trigger"]);
     expect(retain.mock.invocationCallOrder[0]).toBeLessThan(push.mock.invocationCallOrder[0]);
     expect(retainPos.mock.invocationCallOrder[0]).toBeLessThan(push.mock.invocationCallOrder[0]);
+    expect(retainTrig.mock.invocationCallOrder[0]).toBeLessThan(push.mock.invocationCallOrder[0]);
+  });
+
+  it("轮询中每一轮都请求重读未读通知数(account-store 自己限流到 30 s 一次);不在轮询时不请求", async () => {
+    const { rt } = fakeRuntime();
+    const { refreshNotices } = fakeAccount(me);
+    marketActions.setConnection(POLL);
+    const done = pollAccount("u1", rt);
+    expect(refreshNotices.mock.calls).toEqual([["poll"]]);
+    answerPoll();
+    await done;
+    const next = pollAccount("u1", rt);
+    expect(refreshNotices.mock.calls).toEqual([["poll"], ["poll"]]);
+    answerPoll();
+    await next;
+    marketActions.setConnection({ transport: "ws", state: "open", lastMessageAt: null, rttMs: null });
+    await pollAccount("u1", rt);
+    expect(refreshNotices).toHaveBeenCalledTimes(2);
+  });
+
+  it("includeTriggers: false(资产页):只取持仓与挂单两个请求,不 retainTriggers、帧里没有 trigger;store 里已有的条件单不动", async () => {
+    const { rt, push } = fakeRuntime();
+    const { retain, retainPos, retainTrig } = fakeAccount(me);
+    marketActions.setConnection(POLL);
+    const done = pollAccount("u1", rt, { includeTriggers: false });
+    expect(inflight.map((p) => p.url)).toEqual(["/api/account/positions", "/api/account/orders?status=open&limit=100"]);
+    answer("/positions", positionsResp);
+    answer("/orders", ordersResp);
+    await done;
+    expect(retain).toHaveBeenCalledTimes(1);
+    expect(retainPos).toHaveBeenCalledTimes(1);
+    expect(retainTrig).not.toHaveBeenCalled();
+    expect(push.mock.calls[0][0].map((e) => e.t)).toEqual(["balance", "order", "position"]);
+  });
+
+  it("没有未完结的条件单:空集合也要 retainTriggers(本地的条件单在断线 / 轮询期间触发或撤销了),帧里没有 trigger", async () => {
+    const { rt, push } = fakeRuntime();
+    const { retainTrig } = fakeAccount(me);
+    marketActions.setConnection(POLL);
+    const done = pollAccount("u1", rt);
+    answerPoll({ triggers: noTriggers });
+    await done;
+    expect(retainTrig).toHaveBeenCalledTimes(1);
+    expect(retainTrig.mock.calls[0][0].size).toBe(0);
+    expect(push.mock.calls[0][0].map((e) => e.t)).toEqual(["balance", "order", "position"]);
+  });
+
+  it("条件单列表说还有下一页(complete: false):不 retainTriggers,挂单与持仓照常收口,拿到的条件单照常 push", async () => {
+    const { rt, push } = fakeRuntime();
+    const { retain, retainPos, retainTrig } = fakeAccount(me);
+    marketActions.setConnection(POLL);
+    const done = pollAccount("u1", rt);
+    answerPoll({ triggers: { triggers: [trigger("t1")], nextCursor: "c1" } });
+    await done;
+    expect(retainTrig).not.toHaveBeenCalled();
+    expect(retain).toHaveBeenCalledTimes(1);
+    expect(retainPos).toHaveBeenCalledTimes(1);
+    expect(push.mock.calls[0][0].filter((e) => e.t === "trigger")).toHaveLength(1);
+  });
+
+  it("条件单列表请求失败:余额 / 挂单 / 持仓这一轮照常收口与灌入,条件单按「不完整」处理(没有 trigger 帧、不 retainTriggers)", async () => {
+    const { rt, push } = fakeRuntime();
+    const { retain, retainPos, retainTrig } = fakeAccount(me);
+    marketActions.setConnection(POLL);
+    const done = pollAccount("u1", rt);
+    answer("/positions", positionsResp);
+    answer("/orders", ordersResp);
+    answerError("/triggers", 503);
+    await done;
+    expect([...retain.mock.calls[0][0]]).toEqual(["o1"]);
+    expect([...retainPos.mock.calls[0][0]]).toEqual(["a1"]);
+    expect(retainTrig).not.toHaveBeenCalled();
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(push.mock.calls[0][0].map((e) => e.t)).toEqual(["balance", "order", "position"]);
+  });
+
+  it("条件单列表请求失败(真账户 store):已有的条件单原样留着,下一轮读到了再收口", async () => {
+    registerAccountSource(accountSource);
+    useAccountStore.setState({ ...createInitialAccountState(), me, balance, status: "ready", openTriggers: new Map([["t-keep", trigger("t-keep")], ["t-gone", trigger("t-gone", { createdAt: 2 })]]) }, true);
+    const batcher = createBatcher((events) => applyAccountEventsViaBridge(events), { hidden: () => false });
+    const rt: MarketRuntime = { transport: fakeRuntime().rt.transport, batcher };
+    const triggerIds = () => [...useAccountStore.getState().openTriggers.keys()].sort();
+    try {
+      marketActions.setConnection(POLL);
+      const failed = pollAccount("u1", rt);
+      answer("/positions", positionsResp);
+      answer("/orders", ordersResp);
+      answerError("/triggers", 500);
+      await failed;
+      batcher.flush();
+      expect([...useAccountStore.getState().openOrders.keys()]).toEqual(["o1"]); // 挂单照常落了
+      expect(triggerIds()).toEqual(["t-gone", "t-keep"]);
+      const next = pollAccount("u1", rt);
+      answerPoll({ triggers: { triggers: [trigger("t-keep")], nextCursor: null } });
+      await next;
+      batcher.flush();
+      expect(triggerIds()).toEqual(["t-keep"]);
+    } finally {
+      batcher.dispose();
+      useAccountStore.setState(createInitialAccountState(), true);
+    }
+  });
+
+  it("挂单或持仓请求失败仍是整轮 reject(它们之间保持原来的全有或全无),条件单请求失败与否都不改变这一点", async () => {
+    const { rt, push } = fakeRuntime();
+    const { retain, retainPos, retainTrig } = fakeAccount(me);
+    marketActions.setConnection(POLL);
+    const done = pollAccount("u1", rt);
+    answerError("/positions", 500);
+    answer("/orders", ordersResp);
+    answer("/triggers", triggersResp);
+    await expect(done).rejects.toThrow("HTTP 500");
+    expect(retain).not.toHaveBeenCalled();
+    expect(retainPos).not.toHaveBeenCalled();
+    expect(retainTrig).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
   });
 
   it("持仓清空(全部卖出):快照里没有的 assetId 经 retainPositions 移除(空集合也要调)", async () => {
@@ -187,8 +321,7 @@ describe("pollAccount", () => {
     const { retainPos } = fakeAccount(me);
     marketActions.setConnection(POLL);
     const done = pollAccount("u1", rt);
-    answer("/positions", { positions: [], balance });
-    answer("/orders", ordersResp);
+    answerPoll({ positions: { positions: [], balance } });
     await done;
     expect(retainPos).toHaveBeenCalledTimes(1);
     expect(retainPos.mock.calls[0][0].size).toBe(0);
@@ -200,6 +333,7 @@ describe("pollAccount", () => {
     marketActions.setConnection(POLL);
     const done = pollAccount("u1", rt);
     answer("/positions", positionsResp);
+    answer("/triggers", triggersResp);
     answer("/orders", { orders: [order("o1")], nextCursor: "c1" });
     await requested("cursor=c1");
     expect(inflight.map((p) => p.url)).toEqual(["/api/account/orders?status=open&limit=100&cursor=c1"]);
@@ -215,6 +349,7 @@ describe("pollAccount", () => {
     marketActions.setConnection(POLL);
     const done = pollAccount("u1", rt);
     answer("/positions", positionsResp);
+    answer("/triggers", triggersResp);
     for (let i = 0; i < OPEN_ORDERS_MAX_PAGES; i++) {
       const match = i === 0 ? "/orders" : `cursor=c${i}`;
       await requested(match);
@@ -248,8 +383,7 @@ describe("pollAccount", () => {
     marketActions.setConnection(POLL);
     const done = pollAccount("u1", rt);
     marketActions.setConnection(WS_OPEN);
-    answer("/positions", positionsResp);
-    answer("/orders", ordersResp);
+    answerPoll();
     await done;
     expect(retain).not.toHaveBeenCalled();
     expect(retainPos).not.toHaveBeenCalled();
@@ -261,10 +395,10 @@ describe("pollAccount", () => {
     fakeAccount(me);
     marketActions.setConnection(POLL);
     const done = pollAccount("u1", rt);
-    const { retain } = fakeAccount(null);
-    answer("/positions", positionsResp);
-    answer("/orders", ordersResp);
+    const { retain, retainTrig } = fakeAccount(null);
+    answerPoll();
     await done;
+    expect(retainTrig).not.toHaveBeenCalled();
     expect(retain).not.toHaveBeenCalled();
     expect(push).not.toHaveBeenCalled();
   });
@@ -276,21 +410,22 @@ describe("pollAccount:请求期间 store 被写过(本地下单 / 撤单等)→ 
     let version = 7;
     const retain = vi.fn();
     const retainPos = vi.fn();
-    registerAccountSource({ subscribe: () => () => {}, getState: () => ({ me }), applyAccountEvent: vi.fn(), retainOpenOrders: retain, retainPositions: retainPos, listsVersion: () => version });
+    const retainTrig = vi.fn();
+    registerAccountSource({ subscribe: () => () => {}, getState: () => ({ me }), applyAccountEvent: vi.fn(), retainOpenOrders: retain, retainPositions: retainPos, retainTriggers: retainTrig, listsVersion: () => version });
     marketActions.setConnection(POLL);
     const stale = pollAccount("u1", rt);
-    version++; // 请求发出之后,OrderPanel 落了一张新单
-    answer("/positions", positionsResp);
-    answer("/orders", ordersResp);
+    version++; // 请求发出之后,OrderPanel 落了一张新单(或条件单面板建了一条条件单)
+    answerPoll();
     await stale;
     expect(retain).not.toHaveBeenCalled();
     expect(retainPos).not.toHaveBeenCalled();
+    expect(retainTrig).not.toHaveBeenCalled();
     expect(push).not.toHaveBeenCalled();
     const fresh = pollAccount("u1", rt);
-    answer("/positions", positionsResp);
-    answer("/orders", ordersResp);
+    answerPoll();
     await fresh;
     expect(retain).toHaveBeenCalledTimes(1);
+    expect(retainTrig).toHaveBeenCalledTimes(1);
     expect(push).toHaveBeenCalledTimes(1);
   });
 
@@ -309,11 +444,38 @@ describe("pollAccount:请求期间 store 被写过(本地下单 / 撤单等)→ 
         marketActions.setConnection(POLL);
         const done = pollAccount("u1", rt);
         accountActions.applyAccountEvents([{ t: "order", topic: "account", seq: 0, order: order("o-x") }]);
-        answer("/positions", positionsResp);
-        answer("/orders", ordersResp); // 只有 o1
+        answerPoll({ triggers: noTriggers }); // 挂单只有 o1
         await done;
         batcher.flush();
         expect(ids()).toEqual(["o-x", "o1"]);
+      } finally {
+        batcher.dispose();
+        useAccountStore.setState(createInitialAccountState(), true);
+      }
+    });
+
+    it("请求在途时本地建了一条条件单(POST 响应写进 store),读在它之前的快照不含它:整轮丢弃,条件单还在;下一轮快照里有它就保留、没有(已触发)就收掉", async () => {
+      const batcher = wireStore([order("o1")]);
+      const rt: MarketRuntime = { transport: fakeRuntime().rt.transport, batcher };
+      const triggerIds = () => [...useAccountStore.getState().openTriggers.keys()].sort();
+      try {
+        marketActions.setConnection(POLL);
+        const done = pollAccount("u1", rt);
+        accountActions.applyAccountEvent({ t: "trigger", topic: "account", seq: 0, trigger: trigger("t-new") });
+        answerPoll({ triggers: noTriggers });
+        await done;
+        batcher.flush();
+        expect(triggerIds()).toEqual(["t-new"]);
+        const next = pollAccount("u1", rt);
+        answerPoll({ triggers: { triggers: [trigger("t-new")], nextCursor: null } });
+        await next;
+        batcher.flush();
+        expect(triggerIds()).toEqual(["t-new"]);
+        const last = pollAccount("u1", rt);
+        answerPoll({ triggers: noTriggers }); // 它在两轮之间触发了:open 列表里已经没有
+        await last;
+        batcher.flush();
+        expect(triggerIds()).toEqual([]);
       } finally {
         batcher.dispose();
         useAccountStore.setState(createInitialAccountState(), true);
@@ -327,15 +489,13 @@ describe("pollAccount:请求期间 store 被写过(本地下单 / 撤单等)→ 
         marketActions.setConnection(POLL);
         const done = pollAccount("u1", rt);
         accountActions.applyAccountEvent({ t: "order", topic: "account", seq: 0, order: { ...order("o1"), status: "CANCELLED", cancelReason: "USER", updatedAt: 2 } });
-        answer("/positions", positionsResp);
-        answer("/orders", ordersResp);
+        answerPoll({ triggers: noTriggers });
         await done;
         batcher.flush();
         expect(ids()).toEqual([]);
         // 下一轮(撤单之后读出的快照)照常收口
         const next = pollAccount("u1", rt);
-        answer("/positions", positionsResp);
-        answer("/orders", { orders: [], nextCursor: null });
+        answerPoll({ orders: { orders: [], nextCursor: null }, triggers: noTriggers });
         await next;
         batcher.flush();
         expect(ids()).toEqual([]);
@@ -353,7 +513,7 @@ describe("onTransportEvent(transport 的生命周期事件)", () => {
     const refresh = vi.fn();
     const retain = vi.fn();
     registerAccountSource({ subscribe: () => () => {}, getState: () => ({ me }), applyAccountEvent: vi.fn(), retainOpenOrders: retain, refresh });
-    onTransportEvent({ type: "account-snapshot", orderIds: new Set(["o1"]), assetIds: new Set() }, { flush });
+    onTransportEvent({ type: "account-snapshot", orderIds: new Set(["o1"]), assetIds: new Set(), triggerIds: new Set() }, { flush });
     expect(flush).toHaveBeenCalledTimes(1);
     expect(retain).toHaveBeenCalledTimes(1);
     onTransportEvent({ type: "identity-mismatch", userId: "u2", reason: "hello" }, { flush });
@@ -388,7 +548,7 @@ describe("loadAccountListsUnlessStreamed(硬刷新 /trade:Nav 的 /api/auth/me �
   afterEach(() => {
     vi.useRealTimers();
   });
-  const snapshotEvent = { type: "account-snapshot", orderIds: new Set<string>(), assetIds: new Set<string>() } as const;
+  const snapshotEvent = { type: "account-snapshot", orderIds: new Set<string>(), assetIds: new Set<string>(), triggerIds: new Set<string>() } as const;
 
   it("还在连:先不拉;宽限期内 account 订阅快照到了 → 一直不拉(列表只读一遍)", () => {
     expect(ACCOUNT_LISTS_GRACE_MS).toBe(3_000);
@@ -440,15 +600,25 @@ describe("loadAccountListsUnlessStreamed(硬刷新 /trade:Nav 的 /api/auth/me �
 });
 
 describe("reconcileAccountSnapshot(WS 的 account 订阅快照边界)", () => {
-  it("先 flush batcher(快照帧已 push、尚未应用),再用快照里的 id 收口挂单与持仓", () => {
+  it("先 flush batcher(快照帧已 push、尚未应用),再用快照里的 id 收口挂单、持仓与条件单", () => {
     const { rt, flush } = fakeRuntime();
-    const { retain, retainPos } = fakeAccount(me);
-    reconcileAccountSnapshot({ type: "account-snapshot", orderIds: new Set(["o1"]), assetIds: new Set(["a1"]) }, rt.batcher);
+    const { retain, retainPos, retainTrig } = fakeAccount(me);
+    reconcileAccountSnapshot({ type: "account-snapshot", orderIds: new Set(["o1"]), assetIds: new Set(["a1"]), triggerIds: new Set(["t1", "t2"]) }, rt.batcher);
     expect(flush).toHaveBeenCalledTimes(1);
     expect([...retain.mock.calls[0][0]]).toEqual(["o1"]);
     expect([...retainPos.mock.calls[0][0]]).toEqual(["a1"]);
+    expect([...retainTrig.mock.calls[0][0]]).toEqual(["t1", "t2"]);
     expect(flush.mock.invocationCallOrder[0]).toBeLessThan(retain.mock.invocationCallOrder[0]);
     expect(flush.mock.invocationCallOrder[0]).toBeLessThan(retainPos.mock.invocationCallOrder[0]);
+    expect(flush.mock.invocationCallOrder[0]).toBeLessThan(retainTrig.mock.invocationCallOrder[0]);
+  });
+
+  it("快照收口之后请求重读未读通知数(断线期间写进库的通知不会补发)", () => {
+    const { rt } = fakeRuntime();
+    const { retainTrig, refreshNotices } = fakeAccount(me);
+    reconcileAccountSnapshot({ type: "account-snapshot", orderIds: new Set(), assetIds: new Set(), triggerIds: new Set() }, rt.batcher);
+    expect(refreshNotices.mock.calls).toEqual([["subscribed"]]);
+    expect(retainTrig.mock.invocationCallOrder[0]).toBeLessThan(refreshNotices.mock.invocationCallOrder[0]);
   });
 
   it("端到端(真 batcher):快照前 push 的旧单与已清空持仓在快照应用后移除,快照里的保留", () => {
@@ -471,7 +641,7 @@ describe("reconcileAccountSnapshot(WS 的 account 订阅快照边界)", () => {
         { t: "order", topic: "account", seq: 4, order: order("o-live") },
         { t: "position", topic: "account", seq: 4, position: position("a-live") },
       ]);
-      reconcileAccountSnapshot({ type: "account-snapshot", orderIds: new Set(["o-live"]), assetIds: new Set(["a-live"]) }, batcher);
+      reconcileAccountSnapshot({ type: "account-snapshot", orderIds: new Set(["o-live"]), assetIds: new Set(["a-live"]), triggerIds: new Set() }, batcher);
       expect([...orders.keys()]).toEqual(["o-live"]);
       expect([...positions.keys()]).toEqual(["a-live"]);
     } finally {
@@ -505,6 +675,7 @@ describe("reconcileAccountSnapshot(WS 的 account 订阅快照边界)", () => {
       subscribed: (seq: number): ServerEvent => ({ t: "subscribed", topic: "account", seq }),
       balance: (seq: number): ServerEvent => ({ t: "balance", topic: "account", seq, balance }),
       order: (seq: number, id: string): ServerEvent => ({ t: "order", topic: "account", seq, order: order(id) }),
+      trigger: (seq: number, id: string): ServerEvent => ({ t: "trigger", topic: "account", seq, trigger: trigger(id) }),
       position: (seq: number, assetId: string, quantity = 3): ServerEvent => ({
         t: "position",
         topic: "account",
@@ -522,6 +693,7 @@ describe("reconcileAccountSnapshot(WS 的 account 订阅快照边界)", () => {
         applyAccountEvents: storeApplyAccountEvents,
         retainOpenOrders: storeRetainOpenOrders,
         retainPositions: storeRetainPositions,
+        retainTriggers: storeRetainTriggers,
       });
       useAccountStore.setState(
         {
@@ -532,6 +704,8 @@ describe("reconcileAccountSnapshot(WS 的 account 订阅快照边界)", () => {
           // 断线前的旧状态:断线期间已成交的单、卖光的持仓 —— 快照里没有,收口应删掉
           openOrders: new Map([["o-stale", order("o-stale")]]),
           positions: new Map([["a-sold", position("a-sold")]]),
+          // 断线期间已触发的条件单:同样不在快照里
+          openTriggers: new Map([["t-stale", trigger("t-stale")]]),
         },
         true,
       );
@@ -555,6 +729,7 @@ describe("reconcileAccountSnapshot(WS 的 account 订阅快照边界)", () => {
     }
     const openOrderIds = () => [...useAccountStore.getState().openOrders.keys()].sort();
     const positionIds = () => [...useAccountStore.getState().positions.keys()].sort();
+    const triggerIds = () => [...useAccountStore.getState().openTriggers.keys()].sort();
 
     it("hub 把快照与其后的增量合在同一帧:快照之后新开的 OPEN 单与新持仓不被这次收口删掉,旧单 / 卖光的持仓删掉", () => {
       const { batcher, transport, socket } = wire();
@@ -563,6 +738,33 @@ describe("reconcileAccountSnapshot(WS 的 account 订阅快照边界)", () => {
         batcher.flush(); // 下一个 rAF
         expect(openOrderIds()).toEqual(["o-new", "o-snap"]);
         expect(positionIds()).toEqual(["a-new"]);
+      } finally {
+        transport.stop();
+        batcher.dispose();
+        useAccountStore.setState(createInitialAccountState(), true);
+      }
+    });
+
+    it("快照带着条件单(balance → order → position → trigger,同 seq):快照里的保留,断线期间已触发的 t-stale 被收口删掉;其后的增量 trigger 不被这次收口删掉", () => {
+      const { batcher, transport, socket } = wire();
+      try {
+        socket.frame([ev.subscribed(3), ev.balance(3), ev.order(3, "o-snap"), ev.position(3, "a-snap"), ev.trigger(3, "t-snap"), ev.trigger(4, "t-new")]);
+        batcher.flush();
+        expect(triggerIds()).toEqual(["t-new", "t-snap"]);
+        expect(openOrderIds()).toEqual(["o-snap"]);
+      } finally {
+        transport.stop();
+        batcher.dispose();
+        useAccountStore.setState(createInitialAccountState(), true);
+      }
+    });
+
+    it("快照里没有任何条件单:本地残留的条件单全部清掉(它们都已触发 / 撤销 / 被拒)", () => {
+      const { batcher, transport, socket } = wire();
+      try {
+        socket.frame([ev.subscribed(3), ev.balance(3)]);
+        batcher.flush();
+        expect(triggerIds()).toEqual([]);
       } finally {
         transport.stop();
         batcher.dispose();
@@ -623,13 +825,14 @@ describe("reconcileAccountSnapshot(WS 的 account 订阅快照边界)", () => {
       const { batcher, transport, socket } = wire();
       try {
         socket.frame([
-          ev.subscribed(3), ev.balance(3), ev.order(3, "o1"), ev.position(3, "a1"),
+          ev.subscribed(3), ev.balance(3), ev.order(3, "o1"), ev.position(3, "a1"), ev.trigger(3, "t1"),
           { t: "unsubscribed", topic: "account" },
-          ev.subscribed(3), ev.balance(3), ev.order(3, "o2"), ev.position(3, "a2"),
+          ev.subscribed(3), ev.balance(3), ev.order(3, "o2"), ev.position(3, "a2"), ev.trigger(3, "t2"),
         ]);
         batcher.flush();
         expect(openOrderIds()).toEqual(["o2"]);
         expect(positionIds()).toEqual(["a2"]);
+        expect(triggerIds()).toEqual(["t2"]);
       } finally {
         transport.stop();
         batcher.dispose();

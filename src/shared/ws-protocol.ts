@@ -1,6 +1,6 @@
 // WebSocket 实时协议(计划 §3.3)。一个客户端文本帧 = 一个 ClientOp(JSON);一个服务端文本帧 = ServerEvent[](hub 每连接 50 ms 合帧)。
 // 运行时 zod schema 在 server/ws-schema.mjs(纯 JS,hub 与测试共用);ws-protocol.test.ts 把本文件的示例值往返校验,保证两边不漂移。
-import type { Balance, CandleBar, CandleInterval, Fill, Order, OrderBookLevel, Position, TapeEntry, TickerUpdate } from "./types";
+import type { Balance, CandleBar, CandleInterval, Fill, Notice, Order, OrderBookLevel, Position, TapeEntry, TickerUpdate, Trigger } from "./types";
 
 export const WS_PROTOCOL_VERSION = 1 as const;
 /** 服务端 ws 层 ping 间隔;10 s 内无 pong → terminate() */
@@ -50,6 +50,8 @@ export type ServerEvent =
   | { t: "fill"; topic: "account"; seq: number; fill: Fill }
   | { t: "balance"; topic: "account"; seq: number; balance: Balance }
   | { t: "position"; topic: "account"; seq: number; position: Position }
+  | { t: "trigger"; topic: "account"; seq: number; trigger: Trigger }
+  | { t: "notice"; topic: "account"; seq: number; notice: Notice; unread: number }
   | { t: "resync"; topic: Topic; reason: "backpressure" | "restart" };
 
 /** 一个服务端文本帧 = JSON 数组(hub 每连接 50 ms 合帧) */

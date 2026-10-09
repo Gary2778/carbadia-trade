@@ -11,6 +11,8 @@ import { useT } from "@/i18n/LangProvider";
 import { fmtPrice } from "@/lib/format";
 import type { PagedSnapshot } from "@/lib/market/paged-query";
 import { useMarketStore } from "@/lib/market/store";
+import { formatTime } from "@/lib/time-format";
+import type { TimeZonePref } from "@/providers/timeZoneState";
 
 // 底部四个 Tab(P1-21)共用的表格骨架与格式化:
 //   - 表头与行共用同一个 grid-template-columns(行在 VirtualList 里绝对定位,不能用 <table>);
@@ -83,16 +85,8 @@ export const fmtLedgerDelta = (account: string, delta: number, locale: string): 
 /** 数量(整数吨,Phase 1 qtyStep = 1) */
 export const fmtQuantity = (qty: number | null | undefined, locale: string): string => (qty == null ? "—" : formatQty(qty, 1, locale));
 
-const timeFormats = new Map<string, Intl.DateTimeFormat>();
-/** unix ms → 「MM/DD HH:mm:ss」(按 locale 与浏览器时区,§9.1 第 32 条);按 locale 缓存 */
-export function fmtTs(ms: number, locale: string): string {
-  let fmt = timeFormats.get(locale);
-  if (!fmt) {
-    fmt = new Intl.DateTimeFormat(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-    timeFormats.set(locale, fmt);
-  }
-  return Number.isFinite(ms) ? fmt.format(ms) : "—";
-}
+/** unix ms → 「MM/DD HH:mm:ss」(按 locale 与时区偏好,各页签、成交详情的时间列共用;格式化在 lib/time-format.ts 的 tab 样式) */
+export const fmtTs = (ms: number, locale: string, tz: TimeZonePref): string => formatTime(ms, locale, tz, "tab");
 
 /** 方向色:终端的方向文字 token(买涨色、卖跌色,随涨跌轴翻转;§4.1.3) */
 export const sideTone = (side: Side): string => (side === "BUY" ? "text-(--terminal-up)" : "text-(--terminal-down)");
@@ -149,14 +143,22 @@ export type TabTableProps<T> = {
    * 行与表头里要贴边的格子自己带 PIN_START / PIN_END(表头经 HeaderCell.className)。不传 = 原来的滚法,其它页签不变。
    */
   pinEdges?: boolean;
+  /**
+   * 行高改用 --spacing-row-touch(2.75rem):行里要放两三行字的表(条件单历史:状态下面一行原因,P3-07)。只作用在虚拟列表的滚动容器上,
+   * 表头仍是一行高;行的定位照旧按 --spacing-row 写成 CSS,覆写的就是这个 token。不传 = 原来的行高,其它页签不变。
+   */
+  tallRows?: boolean;
 };
+
+/** --spacing-row-touch 的像素估值(只决定虚拟列表渲染哪几行;真实行高由 CSS 给,同 InstrumentPanel 的 TOUCH_ROW_HEIGHT) */
+const TALL_ROW_HEIGHT = 44;
 
 /**
  * 横向可滚的表格外壳:表头 + VirtualList(DOM 行数 = 视口 + overscan)。
  * 分页状态:第一页未到 → Skeleton;第一页失败 → ErrorState(重试);翻页中 → 末行 Skeleton;翻页失败 → 表下 ErrorState(重试),
  * 失败后不自动重试(哨兵只在 idle 时触发),避免对着一个坏端点连发。
  */
-export function TabTable<T>({ columns, headers, items, getKey, renderRow, label, empty, pager, footnote, pinEdges = false }: TabTableProps<T>) {
+export function TabTable<T>({ columns, headers, items, getKey, renderRow, label, empty, pager, footnote, pinEdges = false, tallRows = false }: TabTableProps<T>) {
   const t = useT("terminal");
   const ui = useT("ui");
   const hintId = useId();
@@ -183,7 +185,8 @@ export function TabTable<T>({ columns, headers, items, getKey, renderRow, label,
     <VirtualList<ListItem<T>>
       items={rows}
       label={label}
-      className="min-h-0 flex-1"
+      className={tallRows ? "min-h-0 flex-1 [--spacing-row:var(--spacing-row-touch)]" : "min-h-0 flex-1"}
+      rowHeight={tallRows ? TALL_ROW_HEIGHT : undefined}
       empty={empty}
       getKey={(item) => (item === MORE ? "__more__" : getKey(item))}
       renderRow={(item, index) => (item === MORE ? <PagerRow status={status ?? "idle"} onLoadMore={pager?.onLoadMore} /> : renderRow(item, index))}

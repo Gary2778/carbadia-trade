@@ -210,7 +210,7 @@ describe("PositionsTab (PositionsView)", () => {
   ];
   const retiredOut = position("GS-WIND-2023", { quantity: 0, locked: 0, lockedBy: { orders: 0, otc: 0 }, available: 0, retired: 40, marketValue: 0 });
   const render = (patch: Partial<PositionsViewProps> = {}) =>
-    renderToStaticMarkup(createElement(PositionsView, { positions, meta: META, onSell: () => {}, onRetire: () => {}, retiredOpen: false, onToggleRetired: () => {}, ...patch }));
+    renderToStaticMarkup(createElement(PositionsView, { positions, meta: META, onSell: () => {}, onRetire: () => {}, onProtect: () => {}, retiredOpen: false, onToggleRetired: () => {}, ...patch }));
   const rowOf = (markup: string, assetId: string) => {
     const start = markup.indexOf(`data-asset-id="${assetId}"`);
     const next = markup.slice(start + 1).search(/data-(?:asset-id|group|locks-for|retired-group|retired-asset-id)=/);
@@ -226,8 +226,8 @@ describe("PositionsTab (PositionsView)", () => {
   });
 
   it("fits 1440-wide bottom tabs (~798 px) without scrolling; narrower (from 48rem), the first and action columns and the group titles stay pinned (P2-12)", () => {
-    // 最小宽度 46.25rem = 740 px ≤ 1440 宽时底部页签的内容宽约 798 px:不横向滚动就看得到「卖出 / 注销」
-    expect(html).toContain("min-width:46.25rem");
+    // 最小宽度 49.75rem = 796 px ≤ 1440 宽时底部页签的内容宽约 798 px:不横向滚动就看得到「卖出 / 注销 / 止盈止损」(P3-07 加第三个按钮)
+    expect(html).toContain("min-width:49.75rem");
     expect(parseFloat(/min-width:([\d.]+)rem/.exec(html)?.[1] ?? "99") * 16).toBeLessThanOrEqual(798);
     // 表头在虚拟列表的滚动容器里贴顶,横向滚动也由那个容器做(外层不再 overflow-x-auto):sticky 的格子才有参照
     const region = html.slice(html.indexOf('role="region"'));
@@ -270,8 +270,8 @@ describe("PositionsTab (PositionsView)", () => {
   });
 
   it("phones do not pin: sticky, the opaque fill and the gap extension apply only from 48rem, so a 375-wide phone scrolls the whole table and every column can be read in full (P2-12 fix round 2)", () => {
-    // 375 宽时滚动区约 317 px;首列最窄 10.5rem(168 px)、操作列 5.5rem(88 px),两头贴住只剩约 53 px,中间七列哪一列都读不全
-    expect(/grid-template-columns:([^;"]+)/.exec(html)?.[1]).toMatch(/^minmax\(10\.5rem,[^)]*\) .* 5\.5rem$/);
+    // 375 宽时滚动区约 317 px;首列最窄 10.5rem(168 px)、操作列 9.5rem(152 px,P3-07 起三个按钮),两头一贴中间七列一点都不剩
+    expect(/grid-template-columns:([^;"]+)/.exec(html)?.[1]).toMatch(/^minmax\(10\.5rem,[^)]*\) .* 9\.5rem$/);
     const pin = pinRules();
     // 断点块外:只有撑满行高、竖直居中、贴右格内容靠右这些版面规则,没有 sticky、inset、底色、z-index、伸出间隙
     expect(pin.base(".t-pin")).toEqual({ "align-self": "stretch", display: "flex", "align-items": "center" });
@@ -747,14 +747,17 @@ describe("OpenOrdersTab", () => {
     );
     expect(armed).toMatch(new RegExp(`data-cancel-for="o1" data-armed=""[^>]*>${T.tabs.cancelConfirm}</button>`));
     expect(armed).toContain("text-danger");
+    // 可访问名按行说清撤哪一张;武装后说明这一下是确认(看得见的字不变)
+    expect(armed).toContain('aria-label="Confirm cancel buy order VCS-FOR-2021"');
     const idle = view([order("o1", 1)]);
     expect(idle).toMatch(new RegExp(`data-cancel-for="o1"[^>]*>${T.tabs.cancel}</button>`));
     expect(idle).not.toContain("data-armed");
+    expect(idle).toContain(`data-cancel-for="o1" aria-label="Cancel sell order VCS-FOR-2021"`);
   });
 
   it("marks every order with a cancel in flight as busy, not just the latest one", () => {
     const html = view([order("o1", 3), order("o2", 2), order("o3", 1)], null, new Set(["o1", "o2"]));
-    const busy = (id: string) => new RegExp(`data-cancel-for="${id}" aria-disabled="true" aria-busy="true"`).test(html);
+    const busy = (id: string) => new RegExp(`data-cancel-for="${id}" aria-label="[^"]*" aria-disabled="true" aria-busy="true"`).test(html);
     expect(busy("o1")).toBe(true);
     expect(busy("o2")).toBe(true);
     expect(busy("o3")).toBe(false);
@@ -989,15 +992,16 @@ describe("BottomTabs", () => {
     expect(html).toContain(`<div id="${labelledBy}" role="tablist"`);
     // tablist 自己有名字(P1-25d):读屏不只念「标签列表」;面板区域经 aria-labelledby 取到同一个名字
     expect(html).toContain(`<div id="${labelledBy}" role="tablist" aria-label="${T.tabs.tablistLabel}"`);
-    // 五个页签(P2-07 加「流水」),标题与顺序:当前委托 / 历史委托 / 成交记录 / 持仓 / 流水
-    expect(count(html, 'role="tab"')).toBe(5);
+    // 六个页签(P2-07 加「流水」,P3-07 在当前委托之后加「条件单」),标题与顺序:当前委托 / 条件单 / 历史委托 / 成交记录 / 持仓 / 流水
+    expect(count(html, 'role="tab"')).toBe(6);
     const titles = [...html.matchAll(/<button type="button" role="tab"[^>]*>([^<]*)<\/button>/g)].map((m) => m[1]);
-    expect(titles).toEqual([T.tabs.open, T.tabs.history, T.tabs.fills, T.tabs.positions, T.ledger.tab]);
+    expect(titles).toEqual([T.tabs.open, T.tabs.triggers, T.tabs.history, T.tabs.fills, T.tabs.positions, T.ledger.tab]);
     expect(html).toMatch(new RegExp(`aria-selected="true"[^>]*tabindex="0"[^>]*>${T.tabs.open}<`));
-    expect(count(html, 'aria-selected="false"')).toBe(4);
-    expect(count(html, 'role="tabpanel"')).toBe(5);
+    expect(count(html, 'aria-selected="false"')).toBe(5);
+    expect(count(html, 'role="tabpanel"')).toBe(6);
     // 非激活面板:hidden + content-visibility:auto,没有内容
-    expect(count(html, "content-visibility:auto")).toBe(4);
+    expect(count(html, "content-visibility:auto")).toBe(5);
+    expect(html).toMatch(/data-tab="triggers" hidden="" style="content-visibility:auto"><\/div>/);
     expect(html).toMatch(/data-tab="history" hidden="" style="content-visibility:auto"><\/div>/);
     // 流水页签的面板也在(空的、hidden):它的代码是懒加载的,没选中时不渲染、不取数
     expect(html).toMatch(/data-tab="ledger" hidden="" style="content-visibility:auto"><\/div>/);
@@ -1013,8 +1017,10 @@ describe("BottomTabs", () => {
   });
 
   it("moves between tabs with the arrow keys, Home and End", () => {
-    expect(BOTTOM_TABS).toEqual(["open", "history", "fills", "positions", "ledger"]);
-    expect(nextTab("open", "ArrowRight")).toBe("history");
+    expect(BOTTOM_TABS).toEqual(["open", "triggers", "history", "fills", "positions", "ledger"]);
+    expect(nextTab("open", "ArrowRight")).toBe("triggers");
+    expect(nextTab("triggers", "ArrowRight")).toBe("history");
+    expect(nextTab("history", "ArrowLeft")).toBe("triggers");
     // 循环经过第五个页签:第一个往左到「流水」,「持仓」往右到「流水」,「流水」往右回到第一个
     expect(nextTab("open", "ArrowLeft")).toBe("ledger");
     expect(nextTab("positions", "ArrowRight")).toBe("ledger");
@@ -1026,10 +1032,10 @@ describe("BottomTabs", () => {
     expect(nextTab("history", "Enter")).toBeNull();
   });
 
-  it("statically imports only the default Open orders tab; the other four load with next/dynamic when selected (P2-06: out of the terminal's first load)", () => {
+  it("statically imports only the default Open orders tab; the other five load with next/dynamic when selected (P2-06: out of the terminal's first load; P3-07 adds the Conditional tab)", () => {
     const source = readFileSync(fileURLToPath(new URL("./BottomTabs.tsx", import.meta.url)), "utf8");
     expect(source).toMatch(/^import \{ OpenOrdersTab \} from "\.\/OpenOrdersTab";$/m);
-    for (const name of ["OrderHistoryTab", "FillsTab", "PositionsTab", "LedgerTab"]) {
+    for (const name of ["TriggersTab", "OrderHistoryTab", "FillsTab", "PositionsTab", "LedgerTab"]) {
       expect(source, name).toMatch(new RegExp(`^const ${name} = dynamic\\(\\(\\) => import\\("\\./${name}"\\)\\.then\\(\\(m\\) => m\\.${name}\\), \\{ ssr: false, loading: tabLoading \\}\\);$`, "m"));
       expect(source, name).not.toMatch(new RegExp(`from "\\./${name}"`));
     }
@@ -1221,7 +1227,7 @@ describe("per-user paged caches", () => {
       const { historyQueries: history } = await import("./OrderHistoryTab");
       const { fillsQueries: fills } = await import("./FillsTab");
       const { useAccountStore: store } = await import("@/lib/market/account-store");
-      store.setState({ me: { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 0, lockedCash: 0 }, status: "ready" });
+      store.setState({ me: { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 0, lockedCash: 0, unreadNotices: 0 }, status: "ready" });
       const h1 = history.forUser("u1");
       const f1 = fills.forUser("u1");
       store.setState({ me: null, status: "anon" });
@@ -1239,7 +1245,7 @@ describe("per-user paged caches", () => {
     try {
       const { historyQueries: history } = await import("./OrderHistoryTab");
       const { useAccountStore: store, accountActions } = await import("@/lib/market/account-store");
-      const me = { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 0, lockedCash: 0 };
+      const me = { id: "u1", email: "u1@example.test", name: "U1", cashBalance: 0, lockedCash: 0, unreadNotices: 0 };
       const old = order("o-old", 5, { status: "OPEN", filledQuantity: 0 });
       store.setState({ me, status: "ready", openOrders: new Map([["o-old", old], ["o-new", order("o-new", 9)]]) });
 

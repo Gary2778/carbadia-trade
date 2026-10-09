@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-export const metadata: Metadata = { title: "Terms of Service" };
+export const metadata: Metadata = { title: "Terms of Service", alternates: { canonical: "/terms" } };
 
 const SECTIONS: [string, string][] = [
   ["1. What Carbadia Trade is", "Carbadia Trade (cbda.trade) is a simulation of carbon-credit trading operated by Carbadia (carbadia.io). It holds no financial license, conducts no real trading, clearing, or settlement, and its instruments, prices, and market data are fictional. No real funds or carbon assets are handled anywhere on this site."],

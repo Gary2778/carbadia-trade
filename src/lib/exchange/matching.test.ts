@@ -21,6 +21,8 @@ vi.mock("../server/db", async () => {
 
 // 发布器存根换成 spy:断言事务提交后(且只有提交后)结果被交给 publishOrderResult
 vi.mock("../server/market-publisher", () => ({ publishOrderResult: vi.fn() }));
+// 提交后钩子(成交通知)同理:这里只断言它在发布器之后拿到同一份结果,通知本身见 order-hooks.integration.test.ts
+vi.mock("../server/order-hooks", () => ({ afterOrderCommit: vi.fn() }));
 
 type DbModule = typeof import("../server/db");
 type MatchingModule = typeof import("./matching");
@@ -28,6 +30,7 @@ type MatchingModule = typeof import("./matching");
 let prisma: DbModule["prisma"];
 let matching: MatchingModule;
 let publishOrderResult: ReturnType<typeof vi.fn>;
+let afterOrderCommit: ReturnType<typeof vi.fn>;
 
 // SQLite 主文件之外还可能有日志/WAL 附属文件,一并清理才算干净
 const wipeDbFiles = () => {
@@ -46,6 +49,7 @@ beforeAll(async () => {
   matching = await import("./matching");
   ({ prisma } = await import("../server/db"));
   ({ publishOrderResult } = (await import("../server/market-publisher")) as unknown as { publishOrderResult: ReturnType<typeof vi.fn> });
+  ({ afterOrderCommit } = (await import("../server/order-hooks")) as unknown as { afterOrderCommit: ReturnType<typeof vi.fn> });
 
   // 保险丝: 确认连的是测试库再继续,防止清库语句误伤 dev.db
   const rows = await prisma.$queryRaw<{ file: string }[]>`SELECT file FROM pragma_database_list WHERE name = 'main'`;
@@ -75,6 +79,7 @@ beforeEach(async () => {
   initialCashTotal = 0;
   initialQtyByAsset.clear();
   publishOrderResult.mockClear();
+  afterOrderCommit.mockClear();
 });
 
 async function fundUser(name: string, cash: number) {
@@ -885,18 +890,25 @@ describe("PlaceOrderResult / CancelOrderResult 与发布器交接(计划 §3.2)"
     await expectInvariants();
   });
 
-  it("下单 / 撤单提交后各把结果交给 publishOrderResult 一次; 被拒的事务不发布", async () => {
+  it("下单 / 撤单提交后各把结果交给 publishOrderResult 与 afterOrderCommit 一次(钩子在发布器之后); 被拒的事务两者都不调", async () => {
     const { asset, alice } = await setupMarket();
     const placed = await matching.placeOrder({ userId: alice.id, assetId: asset.id, side: "BUY", type: "LIMIT", price: 9_000, quantity: 1 });
     expect(publishOrderResult).toHaveBeenCalledTimes(1);
     expect(publishOrderResult).toHaveBeenLastCalledWith(placed);
+    expect(afterOrderCommit).toHaveBeenCalledTimes(1);
+    expect(afterOrderCommit).toHaveBeenLastCalledWith(placed);
+    expect(afterOrderCommit.mock.invocationCallOrder[0]).toBeGreaterThan(publishOrderResult.mock.invocationCallOrder[0]);
 
     const cancelled = await matching.cancelOrder(alice.id, placed.order.id);
     expect(publishOrderResult).toHaveBeenCalledTimes(2);
     expect(publishOrderResult).toHaveBeenLastCalledWith(cancelled);
+    expect(afterOrderCommit).toHaveBeenCalledTimes(2);
+    expect(afterOrderCommit).toHaveBeenLastCalledWith(cancelled);
+    expect(afterOrderCommit.mock.invocationCallOrder[1]).toBeGreaterThan(publishOrderResult.mock.invocationCallOrder[1]);
 
     await expect(matching.placeOrder({ userId: alice.id, assetId: asset.id, side: "SELL", type: "LIMIT", price: 9_000, quantity: 1 })).rejects.toThrow(matching.TradingError);
     await expect(matching.cancelOrder(alice.id, placed.order.id)).rejects.toThrow(matching.TradingError);
     expect(publishOrderResult).toHaveBeenCalledTimes(2);
+    expect(afterOrderCommit).toHaveBeenCalledTimes(2);
   });
 });

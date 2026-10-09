@@ -4,12 +4,12 @@ import { LEGACY_REDIRECTS, safeReturnTo } from "./redirects";
 // cbda.trade 没有 /exchange 前缀;带旧前缀落进来的链接整棵子树平移到根。
 // 旧资产页 /portfolio 与 /dashboard 由 /trade/account 取代(计划 §6.2.2 C8,P2-10)。
 describe("旧地址重定向表", () => {
-  // /portfolio 与 /dashboard 是临时跳转(307):永久跳转会被浏览器长期缓存,回滚到没有 /trade/account 的 Phase 1 后收不回来(P2-13)
-  it("/exchange/:path* → /:path*(308);/portfolio 与 /dashboard → /trade/account(307,回滚安全)", () => {
+  // /portfolio 与 /dashboard 在 Phase 2 是 307(回滚到 Phase 1 时浏览器不留缓存的跳转);Phase 3 起回滚目标是有 /trade/account 的 Phase 2,改成 308(P3-11)
+  it("/exchange/:path* → /:path*(308);/portfolio 与 /dashboard → /trade/account(308)", () => {
     expect(LEGACY_REDIRECTS).toEqual([
       { source: "/exchange/:path*", destination: "/:path*", permanent: true },
-      { source: "/portfolio", destination: "/trade/account", permanent: false },
-      { source: "/dashboard", destination: "/trade/account", permanent: false },
+      { source: "/portfolio", destination: "/trade/account", permanent: true },
+      { source: "/dashboard", destination: "/trade/account", permanent: true },
     ]);
   });
 });

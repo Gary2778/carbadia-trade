@@ -56,6 +56,8 @@ import {
 } from "@/lib/market/chart-adapter";
 import type { IndicatorPrefs } from "@/lib/market/prefs";
 import { useCandles, useInstrument } from "@/lib/market/selectors";
+import type { ZoneId } from "@/lib/time-format";
+import { useTimeZone } from "@/providers/useTimeZone";
 
 export type CandleChartLWProps = {
   symbol: string;
@@ -85,8 +87,10 @@ type Handles = {
   lines: Map<string, ISeriesApi<"Line">>;
   main: Main | null;
   tokens: ChartTokens;
-  /** format.shift = 图上这段数据的时间平移(秒);整段 setData 时取一次,增量、十字线、换色都用它 */
+  /** format.shift = 图上这段数据的时间平移(秒);整段 setData 时取一次,增量、十字线、换色都用它;format.tz = 十字线标签的时区偏好 */
   format: ChartFormat;
+  /** 最近一次整段 setData 用的时区偏好:与当前偏好不同就按新时区的偏移重画一次 */
+  drawnTz: ZoneId;
   priceFormat: PriceFormatBuiltIn;
   /** 最近一次全量 setData 的 `${symbol}:${interval}:${mode}`、interval、所用的 REST 历史与它的截止点 */
   drawnKey: string | null;
@@ -125,7 +129,7 @@ function updateMain(main: Main, bar: CandleBar, shift: number): void {
 /**
  * 全量 setData。reset = 换了键或该键的 REST 历史到达:K 线回到最新、分时 fitContent;
  * 同一键内的重画(planDraw 判出空档 / 已收盘 bar 被校准改写 / 积压)保留用户当前的平移与缩放(图表库按右侧偏移锚定),
- * 分时只在重画前整段可见时再 fitContent。时间平移(chartShiftFor)在这里取一次,整段数据共用。
+ * 分时只在重画前整段可见时再 fitContent。时间平移(chartShiftFor,按 h.format.tz 的时区偏好)在这里取一次,整段数据共用。
  */
 function drawAll(h: Handles, bars: readonly CandleBar[], mode: ChartMode, interval: CandleInterval, reset: boolean): void {
   const timeScale = h.chart.timeScale();
@@ -134,8 +138,9 @@ function drawAll(h: Handles, bars: readonly CandleBar[], mode: ChartMode, interv
   const wasFit = range !== null && range.from < 1 && range.to > h.bars.length - 2;
   const fromLine = h.main?.mode === "line";
   const main = ensureMain(h, mode);
-  const shift = chartShiftFor(interval);
+  const shift = chartShiftFor(interval, Date.now(), h.format.tz);
   h.interval = interval;
+  h.drawnTz = h.format.tz;
   if (shift !== h.format.shift) {
     h.format = { ...h.format, shift };
     h.chart.applyOptions(buildChartOptions(h.tokens, h.format));
@@ -215,7 +220,7 @@ function revealIndex(chart: IChartApi, index: number): void {
  *   - 图表只创建一次;全量 setData 在 (symbol, interval, mode) 变化、该键的 REST 历史到达时发生
  *     (mergeHistory 合并订阅后缓冲在 store 里的实时 bar);其余时候 store 变化交给 planDraw:平时只 series.update 尾巴,
  *     尾巴之前的 bar 被补进 / 改写(断线恢复后校准补的空档、轮询校准修正已收盘的 bar)或积压过多时整段重画一次,保留视图;
- *   - 日内 interval 的时间平移到本地时区(chartShiftFor),刻度落在本地整点 / 零点;日线按 UTC;
+ *   - 日内 interval 的时间平移到所选时区(时区偏好,chartShiftFor),刻度落在该时区的整点 / 零点,偏好变了整段按新偏移重画一次;日线按 UTC,与偏好无关;
  *   - 指标 MA 7/25/99、EMA 12/26 全量用 indicatorSeries,实时只推新根(smaLast / emaNext);VOL 是 "vol" 价格轴上的直方图;
  *   - 主题:MutationObserver 盯 <html> 的 data-theme / data-updown,变了就重读 token → applyOptions,不重建;
  *     量柱颜色逐根写在数据里,所以换色时量柱整列重设一次;
@@ -228,6 +233,7 @@ export default function CandleChartLW({ symbol, interval, mode, indicators, hist
   const ui = useT("ui");
   const { lang } = useLang();
   const locale = htmlLang(lang);
+  const tz = useTimeZone();
   const hintId = useId();
   const live = useCandles(symbol, interval);
   const instrument = useInstrument(symbol);
@@ -269,7 +275,8 @@ export default function CandleChartLW({ symbol, interval, mode, indicators, hist
       lines,
       main: null,
       tokens,
-      format: { locale: "en-US", pricePrecision: 2, timeVisible: true, shift: 0 },
+      format: { locale: "en-US", pricePrecision: 2, timeVisible: true, shift: 0, tz: "local" },
+      drawnTz: "local",
       priceFormat: priceFormatOf(2, 1),
       drawnKey: null,
       interval: "1m",
@@ -321,15 +328,15 @@ export default function CandleChartLW({ symbol, interval, mode, indicators, hist
     };
   }, []);
 
-  // 语言 / 精度 / 日线:价格与时间的格式(时间平移 shift 跟着数据走,由 drawAll 更新)
+  // 语言 / 精度 / 日线 / 时区偏好:价格与时间的格式(时间平移 shift 跟着数据走,由 drawAll 更新)
   useEffect(() => {
     const h = handlesRef.current;
     if (!h) return;
-    h.format = { locale, pricePrecision, timeVisible: interval !== "1d", shift: h.format.shift };
+    h.format = { locale, pricePrecision, timeVisible: interval !== "1d", shift: h.format.shift, tz };
     h.priceFormat = priceFormatOf(pricePrecision, tickSize);
     h.chart.applyOptions(buildChartOptions(h.tokens, h.format));
     h.main?.api.applyOptions({ priceFormat: h.priceFormat });
-  }, [locale, pricePrecision, tickSize, interval]);
+  }, [locale, pricePrecision, tickSize, interval, tz]);
 
   // 指标开关:只切 visible(隐藏的线照常增量更新,再打开不用重画);开 VOL 时主价格轴让出底部
   useEffect(() => {
@@ -340,7 +347,7 @@ export default function CandleChartLW({ symbol, interval, mode, indicators, hist
     h.chart.priceScale("right").applyOptions({ scaleMargins: mainScaleMargins(indicators.vol) });
   }, [indicators]);
 
-  // 数据:键或历史变了 → 全量;否则交给 planDraw(平时只推尾巴;低功耗时 500 ms 节流)
+  // 数据:键或历史变了 → 全量;时区偏好变了 → 按新偏移整段重画(保留视图);否则交给 planDraw(平时只推尾巴;低功耗时 500 ms 节流)
   const restBars = history.status === "ready" ? history.bars : null;
   useEffect(() => {
     const h = handlesRef.current;
@@ -359,6 +366,8 @@ export default function CandleChartLW({ symbol, interval, mode, indicators, hist
       h.drawnKey = drawKey;
       return;
     }
+    // 偏好换了时区:图上的时间整体平移的量变了,整段按新偏移重画一次(视图不重置);此后的尾巴照常走下面的增量
+    if (h.drawnTz !== tz && h.main) drawAll(h, h.bars, h.main.mode, h.interval, false);
     if (!lowPower) {
       h.lastTailAt = Date.now();
       applyLive(h, bars);
@@ -374,7 +383,7 @@ export default function CandleChartLW({ symbol, interval, mode, indicators, hist
       },
       Math.max(0, h.lastTailAt + LOW_POWER_THROTTLE_MS - Date.now()),
     );
-  }, [drawKey, mode, interval, restBars, live, lowPower]);
+  }, [drawKey, mode, interval, restBars, live, lowPower, tz]);
 
   // 键盘十字线:← → 逐根、Home / End 两端、Esc 清除;读数进 aria-live
   const handleKeyDown = useCallback(
@@ -431,7 +440,7 @@ export default function CandleChartLW({ symbol, interval, mode, indicators, hist
   const selectedIndex = readout ? barIndexAt(liveBars, chartTime(readout.bar.t)) : -1;
   const shown = readout ? (selectedIndex >= 0 ? liveBars[selectedIndex] : readout.bar) : latest;
   const fmt = { pricePrecision, qtyStep, locale };
-  const describe = (bar: CandleBar) => `${formatChartTime(bar.t, locale, interval === "1d")} ${t.chart.readout(readoutValues(bar, fmt))}`;
+  const describe = (bar: CandleBar) => `${formatChartTime(bar.t, locale, interval === "1d", tz)} ${t.chart.readout(readoutValues(bar, fmt))}`;
   const text = shown ? describe(shown) : "";
   const announcement = readout?.via === "keyboard" ? describe(readout.bar) : "";
 
